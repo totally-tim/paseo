@@ -2,6 +2,21 @@ import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
 
 export const ja: TranslationResources = {
+  agentHandoff: {
+    custom: "カスタム設定",
+    action: "別のエージェントで続行…",
+    description:
+      "保存したコンテキストを使って、このワークスペースで新しい会話を開始します。現在のエージェントは停止します。別のプロバイダーを選ぶと、コンテキストがそのプロバイダーに送信されます。",
+    model: "プロバイダーとモデル",
+    mode: "権限モード",
+    defaultMode: "プロバイダーの既定値",
+    continue: "続行を開始",
+    source: "前の会話",
+    successor: "続きの会話を開く",
+    stopped: "続行を要求しました",
+    briefing: "追加の指示（任意）",
+    thinking: "思考: {{value}}",
+  },
   common: {
     back: "戻る",
     loading: "読み込み中...",

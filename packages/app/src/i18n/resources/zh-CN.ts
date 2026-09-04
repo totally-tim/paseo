@@ -2,6 +2,21 @@ import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
 
 export const zhCN: TranslationResources = {
+  agentHandoff: {
+    custom: "自定义配置",
+    action: "使用其他代理继续…",
+    description:
+      "使用保存的上下文在此工作区开始新对话。当前代理将停止。选择其他提供商会将上下文发送给该提供商。",
+    model: "提供商和模型",
+    mode: "权限模式",
+    defaultMode: "提供商默认设置",
+    continue: "开始继续工作",
+    source: "上一个对话",
+    successor: "打开后续对话",
+    stopped: "已请求继续",
+    briefing: "附加指令（可选）",
+    thinking: "思考：{{value}}",
+  },
   common: {
     back: "返回",
     loading: "加载中...",

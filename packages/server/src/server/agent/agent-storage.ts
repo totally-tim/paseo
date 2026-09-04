@@ -1,5 +1,6 @@
 import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { Logger } from "pino";
 
@@ -9,6 +10,7 @@ import { toStoredAgentRecord } from "./agent-projections.js";
 import type { ManagedAgent } from "./agent-manager.js";
 import type { AgentSessionConfig } from "./agent-sdk-types.js";
 import { AgentOwnerSchema, daemonExecutionKey, type DaemonAgentOwner } from "./agent-owner.js";
+import { AgentHandoffStateSchema, type AgentHandoffState } from "./handoff-state.js";
 
 const SERIALIZABLE_CONFIG_SCHEMA = z
   .object({
@@ -105,6 +107,10 @@ export class AgentStorage {
   private loaded = false;
   private baseDir: string;
   private loadPromise: Promise<StoredAgentRecord[]> | null = null;
+  private handoffOperations = new Map<
+    string,
+    { input: unknown; promise: Promise<StoredAgentRecord> }
+  >();
   private logger: Logger;
 
   constructor(baseDir: string, logger: Logger) {
@@ -124,6 +130,65 @@ export class AgentStorage {
   async get(agentId: string): Promise<StoredAgentRecord | null> {
     await this.load();
     return this.cache.get(agentId) ?? null;
+  }
+
+  async getHandoff(agentId: string): Promise<AgentHandoffState | null> {
+    if (this.deleting.has(agentId) || !(await this.get(agentId))) return null;
+    try {
+      const raw = await fs.readFile(this.handoffPath(agentId), "utf8");
+      return AgentHandoffStateSchema.parse(JSON.parse(raw));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  runHandoff(
+    agentId: string,
+    input: unknown,
+    operation: () => Promise<StoredAgentRecord>,
+  ): Promise<StoredAgentRecord> {
+    if (this.deleting.has(agentId))
+      return Promise.reject(new Error("Source agent is being deleted"));
+    const existing = this.handoffOperations.get(agentId);
+    if (existing) {
+      return isDeepStrictEqual(existing.input, input)
+        ? existing.promise
+        : Promise.reject(
+            new Error(
+              "A continuation with different settings is already in progress. Open it before choosing another provider.",
+            ),
+          );
+    }
+    const pending = operation();
+    this.handoffOperations.set(agentId, { input, promise: pending });
+    const clear = () => this.handoffOperations.delete(agentId);
+    void pending.then(clear, clear);
+    return pending;
+  }
+
+  async saveHandoff(state: AgentHandoffState): Promise<void> {
+    if (this.deleting.has(state.sourceAgentId) || !(await this.get(state.sourceAgentId))) {
+      throw new Error("Source agent no longer exists");
+    }
+    const parsed = AgentHandoffStateSchema.parse(state);
+    const filePath = this.handoffPath(state.sourceAgentId);
+    await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    await writeJsonFileAtomic(this.getHandoffContextPath(state.sourceAgentId), {
+      sourceAgentId: state.sourceAgentId,
+      prompt: state.prompt,
+      rows: state.rows,
+    });
+    await writeJsonFileAtomic(filePath, parsed);
+  }
+
+  getHandoffContextPath(agentId: string): string {
+    return this.handoffPath(agentId).replace(/\.json$/, ".context.json");
+  }
+
+  private handoffPath(agentId: string): string {
+    if (!/^[a-zA-Z0-9_-]+$/.test(agentId)) throw new Error("Invalid handoff agent ID");
+    return path.join(`${this.baseDir}-handoffs`, `${agentId}.json`);
   }
 
   async listByProviderSession(
@@ -213,8 +278,13 @@ export class AgentStorage {
   async remove(agentId: string): Promise<void> {
     await this.load();
     this.beginDelete(agentId);
+    await this.handoffOperations.get(agentId)?.promise.catch(() => undefined);
     await (this.pendingWrites.get(agentId) ?? Promise.resolve());
-    const paths = Array.from(this.pathsById.get(agentId) ?? []);
+    const paths = [
+      ...(this.pathsById.get(agentId) ?? []),
+      this.handoffPath(agentId),
+      this.getHandoffContextPath(agentId),
+    ];
     await Promise.all(
       paths.map(async (filePath) => {
         try {

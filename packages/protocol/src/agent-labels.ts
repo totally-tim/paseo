@@ -1,4 +1,6 @@
 export const PARENT_AGENT_ID_LABEL = "paseo.parent-agent-id";
+export const HANDOFF_FROM_AGENT_ID_LABEL = "paseo.handoff-from-agent-id";
+export const HANDOFF_TO_AGENT_ID_LABEL = "paseo.handoff-to-agent-id";
 const OPEN_AGENT_TAB_LABEL_PREFIX = "paseo.open-agent-tab.";
 
 export function getOpenAgentTabLabel(clientId: string): string {

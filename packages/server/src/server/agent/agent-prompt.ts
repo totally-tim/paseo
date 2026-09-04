@@ -21,7 +21,8 @@ export type AgentRunController = Pick<
   | "replaceAgentRun"
   | "steerOrReplaceActiveTurn"
   | "streamAgent"
->;
+> &
+  Partial<Pick<AgentManager, "assertAgentCanAcceptPrompt">>;
 
 export interface StartAgentRunOptions {
   replaceRunning?: boolean;
@@ -85,6 +86,7 @@ export async function startAgentRun(
   logger: Logger,
   options?: StartAgentRunOptions,
 ): Promise<{ disposition: PromptDispatchDisposition }> {
+  agentManager.assertAgentCanAcceptPrompt?.(agentId);
   const snapshot = agentManager.getAgent(agentId);
   logger.trace(
     {

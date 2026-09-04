@@ -1,4 +1,19 @@
 export const en = {
+  agentHandoff: {
+    custom: "Custom configuration",
+    action: "Continue with…",
+    description:
+      "Start a new conversation in this workspace with saved context. The current agent will stop. Selecting another provider sends that context to the selected provider.",
+    model: "Provider and model",
+    mode: "Permission mode",
+    defaultMode: "Provider default",
+    continue: "Start continuation",
+    source: "Previous conversation",
+    successor: "Open continuation",
+    stopped: "Continuation requested",
+    briefing: "Additional instructions (optional)",
+    thinking: "Thinking: {{value}}",
+  },
   common: {
     back: "Back",
     loading: "Loading...",

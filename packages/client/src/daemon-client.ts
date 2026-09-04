@@ -15,6 +15,7 @@ import {
   DaemonUpdateResponseSchema,
   SessionInboundMessageSchema,
   type ActiveTurnBehavior,
+  type HandoffAgentRequestMessage,
   type ServerInfoStatusPayload,
 } from "@getpaseo/protocol/messages";
 import { validateWSOutboundMessage } from "@getpaseo/protocol/validation/ws-outbound";
@@ -2545,6 +2546,28 @@ export class DaemonClient {
     }
 
     return status.agent;
+  }
+
+  async handoffAgent(
+    input: Omit<HandoffAgentRequestMessage, "type" | "requestId">,
+  ): Promise<AgentSnapshotPayload> {
+    const requestId = this.createRequestId();
+    const payload = await this.sendRequest({
+      requestId,
+      message: SessionInboundMessageSchema.parse({
+        ...input,
+        type: "agent.handoff.start.request",
+        requestId,
+      }),
+      options: { skipQueue: true },
+      timeout: 300_000, // Includes source shutdown, provider startup, and first prompt dispatch.
+      select: (msg) =>
+        msg.type === "agent.handoff.start.response" && msg.payload.requestId === requestId
+          ? msg.payload
+          : null,
+    });
+    if (payload.error || !payload.agent) throw new Error(payload.error ?? "Handoff failed");
+    return payload.agent;
   }
 
   async deleteAgent(agentId: string): Promise<void> {

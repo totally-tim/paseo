@@ -21,6 +21,9 @@ the agent runs through `ensureAgentLoaded()`, which resumes the durable provider
 same Paseo agent ID. Provider history is not appended again when the canonical timeline is already
 primed.
 
+Handed-off agents remain closed. Their conversation is read-only and comes from the saved handoff;
+opening it does not resume the old provider. Send new work to the linked successor.
+
 Idle agents remain resident indefinitely. Runtime closure happens only through an explicit lifecycle
 action such as archive, replacement, reload, workspace teardown, or daemon shutdown.
 
@@ -47,6 +50,27 @@ keeps its active foreground turn and replacement, reload, rewind, and Stop repor
 Accepting new work after an ambiguous interruption would create a split-brain session.
 
 ## Relationships
+
+### Continuations
+
+**Continue with…** stops the source agent and opens an independent successor in the same workspace.
+Choose a saved agent profile first, or expand **Custom configuration** to select a provider and
+model. Continuation can cross providers and account aliases. It preserves uncommitted files and saved conversation context; it does not
+transfer a provider's private session state. The `paseo-handoff` skill uses the same daemon operation.
+
+The source must acknowledge interruption and shutdown before the successor starts. A failed stop
+leaves continuation retryable and blocks new prompts to the source until shutdown succeeds. This
+prevents overlapping work when a provider's process is unresponsive. Once created, the successor ID
+is fixed across retries. Use **Retry** if a restart left that conversation empty. If a daemon
+crash leaves prompt delivery uncertain, Paseo exposes the existing successor and asks you to inspect
+it before sending more work. It never repeats that prompt automatically. Deleting the source also
+deletes its saved handoff files; the successor keeps context already sent to it.
+
+Continuation links do not establish parentage. Archiving the source cannot archive the successor.
+Existing subagents retain their original parent; the successor's briefing must account for their
+unfinished work. Agents owned by an execution service cannot use this transition.
+
+### Subagents
 
 Agents can launch other agents via the agent-scoped `create_agent` MCP tool. Agent-scoped creation is always asynchronous and always stamps `paseo.parent-agent-id`, pointing back at the caller. Omit `workspaceId` to use the caller's workspace, or pass an existing workspace ID returned by `create_workspace`. Placement never changes parentage.
 

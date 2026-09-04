@@ -11,6 +11,8 @@ import {
   isDelegatedAgent,
   isOpenAgentTabLabel,
   PARENT_AGENT_ID_LABEL,
+  HANDOFF_TO_AGENT_ID_LABEL,
+  HANDOFF_FROM_AGENT_ID_LABEL,
 } from "@getpaseo/protocol/agent-labels";
 import type { Logger } from "pino";
 import type { ProviderOptions, ToolPolicy } from "@getpaseo/protocol/agent-types";
@@ -120,7 +122,7 @@ export class AgentManagerShuttingDownError extends Error {
 }
 
 export class AgentRunCancellationError extends Error {
-  constructor(agentId: string, action: "reload" | "replace" | "rewind" | "stop") {
+  constructor(agentId: string, action: "reload" | "replace" | "rewind" | "stop" | "handoff") {
     super(
       `Cannot ${action} agent ${agentId} because its active run cancellation was not acknowledged`,
     );
@@ -1136,6 +1138,62 @@ export class AgentManager {
     return this.timelineStore.getRows(id);
   }
 
+  async readHandoffTimeline(id: string): Promise<AgentTimelineRow[]> {
+    validateAgentId(id, "readHandoffTimeline");
+    if (this.durableTimelineStore) return this.durableTimelineStore.getCommittedRows(id);
+    if (this.timelineStore.has(id)) return this.timelineStore.getRows(id);
+    return (await this.registry?.getHandoff(id))?.rows ?? [];
+  }
+
+  async fetchSavedTimeline(
+    id: string,
+    options?: AgentTimelineFetchOptions,
+  ): Promise<AgentTimelineFetchResult> {
+    validateAgentId(id, "fetchSavedTimeline");
+    if (this.durableTimelineStore) return this.durableTimelineStore.fetchCommitted(id, options);
+    if (this.timelineStore.has(id)) return this.timelineStore.fetch(id, options);
+    const saved = await this.registry?.getHandoff(id);
+    this.timelineStore.initialize(id, { rows: saved?.rows });
+    return this.timelineStore.fetch(id, options);
+  }
+
+  private async assertAgentNotHandedOff(id: string): Promise<void> {
+    const record = await this.registry?.get(id);
+    const successor = record?.labels[HANDOFF_TO_AGENT_ID_LABEL];
+    if (successor) throw new Error(`This agent continued in ${successor}. Send new work there.`);
+  }
+
+  async stopForHandoff(agentId: string, successorAgentId: string): Promise<void> {
+    await this.runLifecycleMutation(agentId, async () => {
+      const record = await this.requireRegistry().get(agentId);
+      if (!record || record.internal) throw new Error(`Agent not found: ${agentId}`);
+      if (record.archivedAt) throw new Error("Restore the source agent before continuing its work");
+      const existingTarget = record.labels[HANDOFF_TO_AGENT_ID_LABEL];
+      if (existingTarget && existingTarget !== successorAgentId) {
+        throw new Error(`Agent already continued in ${existingTarget}`);
+      }
+      await this.writeLabels(agentId, { [HANDOFF_TO_AGENT_ID_LABEL]: successorAgentId });
+      const agent = this.agents.get(agentId);
+      if (!agent) return;
+      await this.cancelAgentRunBefore(agentId, "handoff");
+      const closed = await this.waitWithTimeout({
+        operation: agent.session.close(),
+        timeoutMs: this.rescueTimeouts.reloadSessionCloseMs,
+      });
+      if (closed !== "completed") throw new Error("Source agent did not acknowledge shutdown");
+      await this.drainSessionEvents(agentId);
+      this.cancelRunningProviderSubagents(agentId);
+      const snapshot = this.prepareAgentForClosure(agent, "continued in another agent");
+      await this.persistSnapshot(snapshot);
+      this.emitClosedAgent(snapshot, { persist: false });
+    });
+  }
+
+  assertAgentCanAcceptPrompt(agentId: string): void {
+    const successor = this.getAgent(agentId)?.labels[HANDOFF_TO_AGENT_ID_LABEL];
+    if (successor) throw new Error(`This agent continued in ${successor}. Send new work there.`);
+  }
+
   fetchTimeline(id: string, options?: AgentTimelineFetchOptions): AgentTimelineFetchResult {
     this.requireAgent(id);
     return this.timelineStore.fetch(id, options);
@@ -1189,6 +1247,7 @@ export class AgentManager {
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
     const resolvedAgentId = validateAgentId(agentId ?? this.idFactory(), "createAgent");
+    await this.assertAgentNotHandedOff(resolvedAgentId);
     await this.deleteAgentState(resolvedAgentId);
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
       config,
@@ -1210,6 +1269,12 @@ export class AgentManager {
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const createOptions = this.buildCreateSessionOptions(options);
     const session = await client.createSession(providerLaunchConfig, launchContext, createOptions);
+    try {
+      await this.assertAgentNotHandedOff(resolvedAgentId);
+    } catch (error) {
+      await session.close();
+      throw error;
+    }
     await this.requireExternalMcpSupport(session, storedConfig);
     return this.registerSession(session, storedConfig, resolvedAgentId, {
       labels: options.labels,
@@ -1269,6 +1334,7 @@ export class AgentManager {
       "resumeAgentFromPersistence",
     );
     const metadata = (handle.metadata ?? {}) as Partial<AgentSessionConfig>;
+    await this.assertAgentNotHandedOff(resolvedAgentId);
     const mergedConfig = {
       ...metadata,
       ...overrides,
@@ -1300,6 +1366,12 @@ export class AgentManager {
       launchContext,
       resumeOptions,
     );
+    try {
+      await this.assertAgentNotHandedOff(resolvedAgentId);
+    } catch (error) {
+      await session.close();
+      throw error;
+    }
     await this.requireExternalMcpSupport(session, storedConfig);
     return this.registerSession(session, storedConfig, resolvedAgentId, {
       ...options,
@@ -1875,8 +1947,21 @@ export class AgentManager {
   async setLabels(agentId: string, labels: Record<string, string>): Promise<void> {
     await this.runLifecycleMutation(agentId, async () => {
       const agent = this.requireAgent(agentId);
+      this.assertHandoffLinkUnchanged(agent.labels, labels);
       await this.writeLabels(agent.id, labels);
     });
+  }
+
+  private assertHandoffLinkUnchanged(
+    current: Record<string, string>,
+    patch: Record<string, string>,
+  ): void {
+    for (const label of [HANDOFF_FROM_AGENT_ID_LABEL, HANDOFF_TO_AGENT_ID_LABEL]) {
+      const value = patch[label];
+      if (value !== undefined && value !== current[label]) {
+        throw new Error("Continuation links are managed by Paseo");
+      }
+    }
   }
 
   private async writeLabels(agentId: string, patch: AgentLabelPatch): Promise<WriteLabelsResult> {
@@ -2075,6 +2160,10 @@ export class AgentManager {
       labels?: Record<string, string>;
     },
   ): Promise<void> {
+    if (updates.labels) {
+      const record = await this.requireRegistry().get(agentId);
+      this.assertHandoffLinkUnchanged(record?.labels ?? {}, updates.labels);
+    }
     const liveAgent = this.getAgent(agentId);
     if (liveAgent) {
       if (updates.title) {
@@ -2265,6 +2354,7 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
   ): AsyncGenerator<AgentStreamEvent> {
+    this.assertAgentCanAcceptPrompt(agentId);
     const existingAgent = this.requireSessionAgent(agentId);
     this.logger.trace(
       {
@@ -2871,7 +2961,7 @@ export class AgentManager {
 
   private async cancelAgentRunBefore(
     agentId: string,
-    action: "reload" | "replace" | "rewind",
+    action: "reload" | "replace" | "rewind" | "handoff",
   ): Promise<void> {
     const result = await this.cancelAgentRun(agentId);
     if (result.status === "refused") {
@@ -3273,6 +3363,7 @@ export class AgentManager {
       });
 
       this.assertAcceptingAgentRegistrations();
+      await this.assertAgentNotHandedOff(resolvedAgentId);
       this.agents.set(resolvedAgentId, managed);
       registered = true;
       // Initialize previousStatus to track transitions

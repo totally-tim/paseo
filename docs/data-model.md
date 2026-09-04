@@ -52,6 +52,9 @@ $PASEO_HOME/
 ├── agents/
 │   └── {sanitized-cwd}/
 │       └── {agentId}.json               # One file per agent
+├── agents-handoffs/
+│   ├── {sourceAgentId}.json             # Continuation journal, briefing, and saved timeline
+│   └── {sourceAgentId}.context.json     # Context for providers without Paseo tools; excludes runtime config
 ├── schedules/
 │   └── {scheduleId}.json                # One file per schedule
 ├── projects/

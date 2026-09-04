@@ -64,7 +64,10 @@ import { loadPersistedConfig } from "./persisted-config.js";
 import { releaseWorkspaceServicePortPlan } from "./workspace-service-port-registry.js";
 import { getErrorMessage, getErrorMessageOr } from "@getpaseo/protocol/error-utils";
 import { getAgentStatusPriority } from "@getpaseo/protocol/agent-state-bucket";
-import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
+import {
+  getParentAgentIdFromLabels,
+  HANDOFF_TO_AGENT_ID_LABEL,
+} from "@getpaseo/protocol/agent-labels";
 import type { WorkspaceGitRuntimeSnapshot, WorkspaceGitService } from "./workspace-git-service.js";
 import type { ProjectUpdate } from "./workspace-reconciliation-service.js";
 import {
@@ -121,6 +124,7 @@ import {
   type TimelineProjectionMode,
 } from "./agent/timeline-projection.js";
 import { buildAgentForkContextAttachment } from "./agent/activity-curator.js";
+import { handoffAgent } from "./agent/handoff-agent.js";
 import { buildAgentPrompt } from "./agent/prompt-attachments.js";
 import type { StructuredGenerationDaemonConfig } from "./agent/structured-generation-providers.js";
 import {
@@ -2326,6 +2330,8 @@ export class Session {
       }
       case "agent.fork_context.request":
         return this.handleAgentForkContextRequest(msg);
+      case "agent.handoff.start.request":
+        return this.handleHandoffAgentRequest(msg);
       default:
         return undefined;
     }
@@ -7169,6 +7175,18 @@ export class Session {
     return this.selectProjectedTimelineProjection(input);
   }
 
+  private async fetchSavedProjectionFallback(input: {
+    agentId: string;
+    projection: TimelineProjectionMode;
+    timeline: AgentTimelineFetchResult;
+    pageLimit: number;
+  }): Promise<AgentTimelineFetchResult | undefined> {
+    if (input.projection === "canonical" || !this.shouldUseFullTimelineForProjectedPage(input)) {
+      return undefined;
+    }
+    return this.agentManager.fetchSavedTimeline(input.agentId, { direction: "tail", limit: 0 });
+  }
+
   private async handleFetchAgentTimelineRequest(
     msg: Extract<SessionInboundMessage, { type: "fetch_agent_timeline_request" }>,
     source?: object,
@@ -7185,18 +7203,27 @@ export class Session {
       : undefined;
 
     try {
-      const snapshot = await ensureAgentLoaded(msg.agentId, {
-        agentManager: this.agentManager,
-        agentStorage: this.agentStorage,
-        logger: this.sessionLogger,
-      });
-      const agentPayload = await this.buildAgentPayload(snapshot);
+      const stored = await this.agentStorage.get(msg.agentId);
+      const handedOff = Boolean(stored?.labels[HANDOFF_TO_AGENT_ID_LABEL]);
+      const snapshot = handedOff
+        ? null
+        : await ensureAgentLoaded(msg.agentId, {
+            agentManager: this.agentManager,
+            agentStorage: this.agentStorage,
+            logger: this.sessionLogger,
+          });
+      const agentPayload = snapshot
+        ? await this.buildAgentPayload(snapshot)
+        : await this.enrichAgentPayload(this.buildStoredAgentPayload(stored!));
 
-      const fetchedControlTimeline = this.agentManager.fetchTimeline(msg.agentId, {
+      const fetchOptions = {
         direction,
         cursor,
         limit: pageLimit,
-      });
+      };
+      const fetchedControlTimeline = handedOff
+        ? await this.agentManager.fetchSavedTimeline(msg.agentId, fetchOptions)
+        : this.agentManager.fetchTimeline(msg.agentId, fetchOptions);
       const selectedTimeline = this.selectTimelineProjection({
         agentId: msg.agentId,
         projection,
@@ -7204,6 +7231,16 @@ export class Session {
         direction,
         ...(cursor ? { cursor } : {}),
         pageLimit,
+        ...(handedOff
+          ? {
+              fullTimeline: await this.fetchSavedProjectionFallback({
+                agentId: msg.agentId,
+                projection,
+                timeline: fetchedControlTimeline,
+                pageLimit,
+              }),
+            }
+          : {}),
       });
       const startCursor =
         selectedTimeline.startSeq !== null
@@ -7238,7 +7275,7 @@ export class Session {
             ...(msg.mergeWindow === true ? { mergeWindow: true } : {}),
             entries: entries.map((entry) => {
               const payloadEntry = {
-                provider: snapshot.provider,
+                provider: agentPayload.provider,
                 item: entry.item,
                 timestamp: entry.timestamp,
                 seqStart: entry.seqStart,
@@ -7519,6 +7556,38 @@ export class Session {
           itemCount: 0,
           boundaryCursor: msg.boundaryCursor ?? null,
           boundaryMessageId: msg.boundaryMessageId ?? null,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
+  }
+
+  private async handleHandoffAgentRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.handoff.start.request" }>,
+  ): Promise<void> {
+    try {
+      const record = await handoffAgent(
+        {
+          agentManager: this.agentManager,
+          agentStorage: this.agentStorage,
+          providerSnapshotManager: this.providerSnapshotManager,
+          logger: this.sessionLogger,
+          getWorkspace: (id) => this.workspaceRegistry.get(id),
+        },
+        msg,
+      );
+      const agent = await this.enrichAgentPayload(this.buildStoredAgentPayload(record));
+      this.emit({
+        type: "agent.handoff.start.response",
+        payload: { requestId: msg.requestId, sourceAgentId: msg.sourceAgentId, agent, error: null },
+      });
+    } catch (error) {
+      this.emit({
+        type: "agent.handoff.start.response",
+        payload: {
+          requestId: msg.requestId,
+          sourceAgentId: msg.sourceAgentId,
+          agent: null,
           error: error instanceof Error ? error.message : String(error),
         },
       });

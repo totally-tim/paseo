@@ -2,6 +2,21 @@ import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
 
 export const fr: TranslationResources = {
+  agentHandoff: {
+    custom: "Configuration personnalisée",
+    action: "Continuer avec…",
+    description:
+      "Ouvrez une nouvelle conversation dans cet espace avec le contexte enregistré. L’agent actuel s’arrêtera. Choisir un autre fournisseur lui transmet ce contexte.",
+    model: "Fournisseur et modèle",
+    mode: "Mode d’autorisation",
+    defaultMode: "Valeur par défaut du fournisseur",
+    continue: "Démarrer la suite",
+    source: "Conversation précédente",
+    successor: "Ouvrir la suite",
+    stopped: "Continuation demandée",
+    briefing: "Instructions supplémentaires (facultatif)",
+    thinking: "Raisonnement : {{value}}",
+  },
   common: {
     back: "Dos",
     loading: "Chargement...",
