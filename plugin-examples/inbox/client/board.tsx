@@ -1,24 +1,18 @@
 import type { PluginSurfaceProps, PluginTheme, PluginWorkspacePanelProps } from "@getpaseo/plugin";
 import { usePaseo } from "@getpaseo/plugin";
-import { useToast } from "@getpaseo/plugin/react-native";
-import { useMutation } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { type CardActions, InboxCardView } from "./card";
 import { keyToAction, resolveKeyAction } from "./keyboard";
-import { type InboxCard, type Lane, type Lanes, projectLanes } from "./lanes";
+import { type InboxCard, type Lane, type Lanes } from "./lanes";
 import { PeekModal } from "./peek-modal";
-import { getInboxStore, type InboxSnapshot } from "./store";
-import type { PaseoApi, PermissionResponse } from "./types";
+import { EMPTY_SNAPSHOT, getInboxStore, type InboxSnapshot, type InboxStore } from "./store";
+import type { PaseoApi } from "./types";
+import { ActionButton } from "./question-card";
+import { FilterControls } from "./filter-controls";
+import { boardLanes, boardReady } from "./review";
 import { isTextTarget, subscribeKeydown, type WebKeyEvent } from "./web";
 
-const EMPTY: InboxSnapshot = {
-  agents: new Map(),
-  workspaces: new Map(),
-  lanes: { needsYou: [], working: [], done: [] },
-  loaded: false,
-  pendingOpenAgentId: null,
-};
 const KEY_HINT = "j/k move · Enter open · 1-9 answer · y/n allow/deny";
 const LANE_ORDER: readonly Lane[] = ["needsYou", "working", "done"];
 const LANE_TITLE: Record<Lane, string> = {
@@ -32,17 +26,18 @@ function useInboxSnapshot(): InboxSnapshot {
   const store = getInboxStore();
   return useSyncExternalStore(
     (listener) => store?.subscribe(listener) ?? NO_STORE_UNSUBSCRIBE,
-    () => store?.getSnapshot() ?? EMPTY,
-    () => store?.getSnapshot() ?? EMPTY,
+    () => store?.getSnapshot() ?? EMPTY_SNAPSHOT,
+    () => store?.getSnapshot() ?? EMPTY_SNAPSHOT,
   );
 }
 
-function useNow(intervalMs = 30_000): number {
+function useNow(active: boolean, intervalMs = 30_000): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
+    if (!active) return;
     const timer = setInterval(() => setNow(Date.now()), intervalMs);
     return () => clearInterval(timer);
-  }, [intervalMs]);
+  }, [active, intervalMs]);
   return now;
 }
 
@@ -53,6 +48,19 @@ function useBoardStyles(theme: PluginTheme, compact: boolean) {
       screen: { flex: 1, backgroundColor: theme.colors.surface0 },
       loading: { color: theme.colors.foregroundMuted, padding },
       compactContent: { padding, gap: 8 },
+      toolbar: { paddingHorizontal: padding, paddingTop: 12, gap: 10 },
+      toolbarRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 },
+      status: { color: theme.colors.foregroundMuted, fontSize: 13 },
+      error: { color: theme.colors.statusDanger, fontSize: 13 },
+      needsYou: {
+        flex: 1.4,
+        backgroundColor: theme.colors.surface0,
+        borderColor: theme.colors.border,
+        borderWidth: 1,
+        borderRadius: 12,
+        paddingHorizontal: 12,
+        paddingTop: 6,
+      },
       lanes: { flex: 1, flexDirection: "row", gap: 16, padding },
       lane: {
         flex: 1,
@@ -137,6 +145,7 @@ function LaneHeader({
 
 function LaneBody({
   cards,
+  emptyText,
   styles,
   theme,
   paseo,
@@ -145,6 +154,7 @@ function LaneBody({
   focusedId,
 }: {
   cards: InboxCard[];
+  emptyText: string;
   styles: BoardStyles;
   theme: PluginTheme;
   paseo: PaseoApi;
@@ -153,7 +163,7 @@ function LaneBody({
   focusedId: string | null;
 }) {
   if (cards.length === 0) {
-    return <Text style={styles.empty}>None</Text>;
+    return <Text style={styles.empty}>{emptyText}</Text>;
   }
   return (
     <View style={styles.cards}>
@@ -172,6 +182,74 @@ function LaneBody({
   );
 }
 
+function BoardToolbar({
+  workspaceId,
+  store,
+  snapshot,
+  theme,
+  styles,
+  changeFilters,
+  setFiltersOpen,
+  isActive,
+  lanes,
+  filtered,
+  next,
+  retryLoad,
+}: {
+  workspaceId?: string;
+  store: InboxStore | null;
+  snapshot: InboxSnapshot;
+  theme: PluginTheme;
+  styles: BoardStyles;
+  changeFilters(): void;
+  setFiltersOpen(open: boolean): void;
+  isActive: boolean;
+  lanes: Lanes;
+  filtered: boolean;
+  next(): void;
+  retryLoad(): void;
+}) {
+  return (
+    <View style={styles.toolbar}>
+      {!workspaceId && store ? (
+        <FilterControls
+          snapshot={snapshot}
+          store={store}
+          theme={theme}
+          onChange={changeFilters}
+          onOpenChange={setFiltersOpen}
+          active={isActive}
+        />
+      ) : null}
+      <View style={styles.toolbarRow}>
+        <Text style={styles.status}>
+          {lanes.needsYou.length} needing you{filtered ? " in these projects" : ""}
+        </Text>
+        <ActionButton
+          theme={theme}
+          label="Review next"
+          onPress={next}
+          disabled={!lanes.needsYou.length}
+        />
+        <ActionButton
+          theme={theme}
+          label={snapshot.loading ? "Refreshing…" : "Refresh"}
+          onPress={retryLoad}
+          disabled={snapshot.loading}
+        />
+      </View>
+      {snapshot.loadError ? (
+        <View style={styles.toolbarRow}>
+          <Text accessibilityRole="alert" style={styles.error}>
+            Could not load agents: {snapshot.loadError}
+          </Text>
+          <ActionButton theme={theme} label="Retry loading" onPress={retryLoad} />
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 const INITIAL_COLLAPSED: Record<Lane, boolean> = { needsYou: false, working: true, done: true };
 
 export function InboxBoard({
@@ -180,132 +258,187 @@ export function InboxBoard({
   navigation,
   workspaceId,
   keyboard = false,
-}: Pick<PluginSurfaceProps, "theme" | "layout" | "navigation"> & {
+  isActive: activity,
+}: Pick<PluginSurfaceProps, "theme" | "layout" | "navigation" | "isActive"> & {
   workspaceId?: string;
   /** Bind board shortcuts. Only the global surface does, so a panel never doubles them. */
   keyboard?: boolean;
 }) {
+  const isActive = activity === true;
   const paseo = usePaseo();
-  const toast = useToast();
   const snapshot = useInboxSnapshot();
-  const now = useNow();
+  const now = useNow(isActive);
   const styles = useBoardStyles(theme, layout.compact);
+  const [peekAgentId, setPeekAgentId] = useState<string | null>(null);
   const [openCardId, setOpenCardId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Record<Lane, boolean>>(INITIAL_COLLAPSED);
 
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [focusedId, setFocusedId] = useState<string | null>(null);
 
-  const lanes: Lanes = useMemo(
-    () =>
-      workspaceId
-        ? projectLanes(snapshot.agents.values(), snapshot.workspaces, { workspaceId })
-        : snapshot.lanes,
-    [snapshot, workspaceId],
-  );
-  const ordered = useMemo(() => LANE_ORDER.flatMap((lane) => lanes[lane]), [lanes]);
-  const openCard = useMemo(
-    () => ordered.find((card) => card.agent.id === openCardId) ?? null,
-    [ordered, openCardId],
-  );
-
-  // A Command Center item asked for a specific card; open it once and clear the request.
   const store = getInboxStore();
+  const interactionRevision = useRef(0);
+  const lanes = useMemo(() => boardLanes(snapshot, workspaceId), [snapshot, workspaceId]);
+  const ordered = useMemo(() => LANE_ORDER.flatMap((lane) => lanes[lane]), [lanes]);
+  const openCard = ordered.find((card) => card.agent.id === openCardId) ?? null;
+  const open = useCallback((card: InboxCard) => {
+    interactionRevision.current += 1;
+    setOpenCardId(card.agent.id);
+    setPeekAgentId(card.subject.id);
+    setFocusedId(card.agent.id);
+  }, []);
+  const selectMember = useCallback((agentId: string) => {
+    interactionRevision.current += 1;
+    setPeekAgentId(agentId);
+  }, []);
+  const closePeek = useCallback(() => {
+    interactionRevision.current += 1;
+    setOpenCardId(null);
+  }, []);
+  const changeFilters = useCallback(() => {
+    interactionRevision.current += 1;
+    setOpenCardId(null);
+    setFocusedId(null);
+  }, []);
+
+  useEffect(() => {
+    interactionRevision.current += 1;
+  }, [isActive]);
   const pendingOpenAgentId = snapshot.pendingOpenAgentId;
   useEffect(() => {
-    if (!pendingOpenAgentId || !store) return;
-    setOpenCardId(pendingOpenAgentId);
-    setFocusedId(pendingOpenAgentId);
+    if (!isActive || workspaceId || !pendingOpenAgentId || !store) return;
+    const card = ordered.find((item) => item.agent.id === pendingOpenAgentId);
+    if (!card) return;
+    open(card);
     store.clearPendingOpen();
-  }, [pendingOpenAgentId, store]);
+  }, [isActive, workspaceId, pendingOpenAgentId, store, ordered, open]);
 
-  // Presence of the two host methods is the compatibility gate: an app bundle
-  // that predates them renders the hand-off text instead of answer controls.
+  const candidates = useCallback(() => {
+    const current = store?.getSnapshot();
+    if (!current) return [];
+    return boardLanes(current, workspaceId).needsYou;
+  }, [store, workspaceId]);
+  const next = useCallback(() => {
+    const queue = candidates();
+    const index = queue.findIndex((card) => card.agent.id === openCardId);
+    const card = queue[(index + 1) % queue.length];
+    if (card) open(card);
+  }, [candidates, open, openCardId]);
+
   const probe = paseo.agents.ref("__inbox_probe__");
   const canRespond =
     typeof probe.respondToPermission === "function" && typeof probe.clearAttention === "function";
-
-  const respond = useMutation({
-    mutationFn: async (input: {
-      agentId: string;
-      requestId: string;
-      response: PermissionResponse;
-    }) => {
-      await paseo.agents.ref(input.agentId).respondToPermission(input.requestId, input.response);
-    },
-    onError: (error: unknown) => {
-      toast.error(error instanceof Error ? error.message : "The answer did not reach the agent.");
-    },
-  });
-  const reply = useMutation({
-    mutationFn: async (input: { agentId: string; text: string }) => {
-      await paseo.agents.ref(input.agentId).send(input.text);
-    },
-    onSuccess: () => setOpenCardId(null),
-    onError: (error: unknown) => {
-      toast.error(error instanceof Error ? error.message : "The reply did not reach the agent.");
-    },
-  });
-  const markRead = useMutation({
-    mutationFn: async (agentId: string) => {
-      await paseo.agents.ref(agentId).clearAttention();
-    },
-    onError: (error: unknown) => {
-      toast.error(error instanceof Error ? error.message : "Could not clear attention.");
-    },
-  });
-
-  const respondMutate = respond.mutate;
-  const replyMutate = reply.mutate;
-  const markReadMutate = markRead.mutate;
-  const responding = respond.isPending;
   const actions: CardActions = useMemo(
     () => ({
       canRespond,
-      responding,
-      onRespond: (agentId, requestId, response) => respondMutate({ agentId, requestId, response }),
-      onReply: (agentId, text) => replyMutate({ agentId, text }),
-      onMarkRead: (agentId) => markReadMutate(agentId),
-      onOpen: (card) => setOpenCardId(card.agent.id),
+      active: isActive,
+      drafts: snapshot.drafts,
+      draftsReady: snapshot.draftsReady,
+      draftsError: snapshot.draftsError,
+      onRetryDrafts: () => store?.retryDrafts(),
+      operations: snapshot.operations,
+      onDraft: (agentId, text) => store?.setDraft(agentId, text),
+      onRespond: (agentId, requestId, response) => {
+        if (!store || !isActive || !canRespond) return;
+        const revision = interactionRevision.current;
+        void store.respond(agentId, requestId, response).then((sent) => {
+          // A slow response must not pull the user away from a card they opened meanwhile.
+          if (!sent || revision !== interactionRevision.current) return undefined;
+          const card = candidates()[0];
+          setFocusedId(card?.agent.id ?? null);
+          if (openCardId) {
+            setOpenCardId(card?.agent.id ?? null);
+            setPeekAgentId(card?.subject.id ?? null);
+          }
+          return undefined;
+        });
+      },
+      onReply: (agentId) => {
+        if (isActive) void store?.sendReply(agentId);
+      },
+      onMarkRead: (agentId) => {
+        if (isActive) void store?.markRead(agentId);
+      },
+      onOpen: open,
     }),
-    [canRespond, markReadMutate, replyMutate, respondMutate, responding],
+    [
+      canRespond,
+      isActive,
+      snapshot.drafts,
+      snapshot.draftsReady,
+      snapshot.draftsError,
+      snapshot.operations,
+      store,
+      candidates,
+      openCardId,
+      open,
+    ],
   );
 
   const toggleLane = useCallback(
     (lane: Lane) => setCollapsed((value) => ({ ...value, [lane]: !value[lane] })),
     [],
   );
-  const closePeek = useCallback(() => setOpenCardId(null), []);
 
-  const showsKeyHint = keyboard && layout.platform === "web" && !layout.compact;
+  const showsKeyHint = isActive && keyboard && layout.platform === "web" && !layout.compact;
   useEffect(() => {
-    if (!keyboard || layout.platform !== "web") return;
+    if (!isActive || filtersOpen || !keyboard || layout.platform !== "web") return;
     const handle = (event: WebKeyEvent) => {
-      if (isTextTarget(event.target)) return;
+      if (event.defaultPrevented || event.repeat || event.isComposing || isTextTarget(event.target))
+        return;
+      // The peek can select a child independently. Never answer a background card.
+      if (openCardId) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closePeek();
+        }
+        return;
+      }
       const action = keyToAction(event);
       if (!action) return;
       const effect = resolveKeyAction(action, { ordered, focusedId, openCardId });
       if (!effect) return;
       event.preventDefault();
+      interactionRevision.current += 1;
       if (effect.kind === "focus") setFocusedId(effect.agentId);
       else if (effect.kind === "open") {
         setFocusedId(effect.agentId);
-        setOpenCardId(effect.agentId);
+        const card = ordered.find((item) => item.agent.id === effect.agentId);
+        if (card) open(card);
       } else if (effect.kind === "close") setOpenCardId(null);
       else if (effect.card.request) {
-        respondMutate({
-          agentId: effect.card.requestAgentId,
-          requestId: effect.card.request.id,
-          response: effect.response,
-        });
-        setFocusedId(effect.nextFocusAgentId);
+        actions.onRespond(effect.card.subject.id, effect.card.request.id, effect.response);
       }
     };
     return subscribeKeydown(handle);
-  }, [focusedId, keyboard, layout.platform, openCardId, ordered, respondMutate]);
+  }, [
+    actions,
+    isActive,
+    filtersOpen,
+    focusedId,
+    keyboard,
+    layout.platform,
+    openCardId,
+    ordered,
+    closePeek,
+    open,
+  ]);
 
+  const retryLoad = useCallback(() => {
+    void store?.retryLoad();
+  }, [store]);
+  const filtered =
+    !workspaceId && (snapshot.filters.projectId !== null || snapshot.filters.projectGroup !== null);
+  const emptyText = filtered
+    ? "No matching agents in this lane. Clear filters to see all projects."
+    : "No agents in this lane. Idle agents without unread results are hidden.";
+  if (activity === undefined)
+    return <Text style={styles.loading}>Update this Paseo app to use Kanban.</Text>;
   let content: React.ReactNode;
-  if (!snapshot.loaded) {
-    content = <Text style={styles.loading}>Loading agents…</Text>;
+  if (!boardReady(snapshot, workspaceId)) {
+    content = snapshot.loading ? (
+      <Text style={styles.loading}>Loading agents and saved filters…</Text>
+    ) : null;
   } else if (layout.compact) {
     content = (
       <ScrollView contentContainerStyle={styles.compactContent}>
@@ -321,6 +454,7 @@ export function InboxBoard({
             {collapsed[lane] ? null : (
               <LaneBody
                 cards={lanes[lane]}
+                emptyText={emptyText}
                 styles={styles}
                 theme={theme}
                 paseo={paseo}
@@ -337,11 +471,12 @@ export function InboxBoard({
     content = (
       <View style={styles.lanes}>
         {LANE_ORDER.map((lane) => (
-          <View key={lane} style={styles.lane}>
+          <View key={lane} style={lane === "needsYou" ? styles.needsYou : styles.lane}>
             <LaneHeader lane={lane} count={lanes[lane].length} styles={styles} collapsed={null} />
             <ScrollView contentContainerStyle={styles.laneContent}>
               <LaneBody
                 cards={lanes[lane]}
+                emptyText={emptyText}
                 styles={styles}
                 theme={theme}
                 paseo={paseo}
@@ -358,23 +493,50 @@ export function InboxBoard({
 
   return (
     <View style={styles.screen}>
+      <BoardToolbar
+        workspaceId={workspaceId}
+        store={store}
+        snapshot={snapshot}
+        theme={theme}
+        styles={styles}
+        changeFilters={changeFilters}
+        setFiltersOpen={setFiltersOpen}
+        isActive={isActive}
+        lanes={lanes}
+        filtered={filtered}
+        next={next}
+        retryLoad={retryLoad}
+      />
       {content}
       {showsKeyHint ? <Text style={styles.hint}>{KEY_HINT}</Text> : null}
-      <PeekModal
-        card={openCard}
-        theme={theme}
-        paseo={paseo}
-        navigation={navigation}
-        actions={actions}
-        onClose={closePeek}
-      />
+      {openCard ? (
+        <PeekModal
+          key={openCard.agent.id}
+          selectedId={peekAgentId}
+          onSelect={selectMember}
+          card={openCard}
+          theme={theme}
+          paseo={paseo}
+          navigation={navigation}
+          actions={actions}
+          onClose={closePeek}
+          onNext={next}
+          remaining={lanes.needsYou.length}
+        />
+      ) : null}
     </View>
   );
 }
 
 export function InboxSurface(props: PluginSurfaceProps) {
   return (
-    <InboxBoard theme={props.theme} layout={props.layout} navigation={props.navigation} keyboard />
+    <InboxBoard
+      theme={props.theme}
+      layout={props.layout}
+      navigation={props.navigation}
+      isActive={props.isActive}
+      keyboard
+    />
   );
 }
 
@@ -385,6 +547,7 @@ export function InboxWorkspacePanel(props: PluginWorkspacePanelProps) {
       layout={props.layout}
       navigation={props.navigation}
       workspaceId={props.workspaceId}
+      isActive={props.isActive}
     />
   );
 }

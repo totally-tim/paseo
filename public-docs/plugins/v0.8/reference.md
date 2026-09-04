@@ -263,14 +263,24 @@ client.addSidebarItem({
 });
 ```
 
+`client.storage` provides device-local `getItem(key)`, `setItem(key, value)`, and
+`removeItem(key)` methods for strings. Keys are isolated by host and plugin. Calls for one
+key are ordered across plugin reloads, so a replacement instance reads pending writes from
+the previous instance. Use this for preferences and drafts; it is not a credential store.
+Data stays on this app installation and does not sync between devices. Older apps omit
+`storage`; gate features that require it and explain that the app needs an update.
+
 `PluginSurfaceProps` contains:
 
-| Field        | Meaning                                                                                                                      |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| `theme`      | Typed `PluginTheme` color tokens for the active Paseo theme.                                                                 |
-| `host`       | Selected host `id` and display `label`.                                                                                      |
-| `layout`     | `compact` and the `ios`, `android`, or `web` platform.                                                                       |
-| `navigation` | Optional client navigation. `openAgent({ agentId })` and `openWorkspace({ workspaceId })` open targets on the selected host. |
+| Field        | Meaning                                                                                                                                             |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `theme`      | Typed `PluginTheme` color tokens for the active Paseo theme.                                                                                        |
+| `host`       | Selected host `id` and display `label`.                                                                                                             |
+| `layout`     | `compact` and the `ios`, `android`, or `web` platform.                                                                                              |
+| `isActive`   | Whether this retained surface owns interaction. False while covered by a compact sidebar. Older apps omit it; do not register shortcuts without it. |
+| `navigation` | Optional client navigation. `openAgent({ agentId })` and `openWorkspace({ workspaceId })` open targets on the selected host.                        |
+
+Workspace and agent panel props also include `isActive`. Stop polling and release keyboard listeners when it is false.
 
 Paseo owns the route, header, close action, host picker, error boundary, and query client. The plugin owns the surface body.
 

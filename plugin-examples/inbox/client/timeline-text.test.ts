@@ -8,6 +8,13 @@ describe("timeline text", () => {
     expect(firstLine("x".repeat(200), 10)).toBe(`${"x".repeat(9)}…`);
   });
 
+  it("skips Markdown dividers and fences before a meaningful preview", () => {
+    expect(firstLine("\n---\n\nPERMISSION-DONE")).toBe("PERMISSION-DONE");
+    expect(firstLine("* * *\n## Result")).toBe("Result");
+    expect(firstLine("```sh\nprintf ok\n```")).toBe("printf ok");
+    expect(firstLine("---\n___\n***")).toBe("");
+  });
+
   it("maps rows to peek text and skips rows the peek does not show", () => {
     expect(itemToPeekRow({ type: "user_message", text: "hi" } as TimelineItem)).toEqual({
       role: "you",

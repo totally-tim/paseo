@@ -34,6 +34,8 @@ export interface PluginHostProps {
 }
 
 interface PluginNavigableHostProps extends PluginHostProps {
+  /** Whether this retained surface owns interaction. Undefined on older apps; do not bind shortcuts. */
+  readonly isActive?: boolean;
   /** Client-owned navigation. Undefined on older hosts; hide dependent affordances when absent. */
   readonly navigation?: {
     readonly openAgent: (input: { readonly agentId: string }) => void;
@@ -127,7 +129,16 @@ export interface PluginClientOpenPanelOptions extends PluginOpenPanelOptions {
   agentId?: string;
 }
 
+/** Device-local preferences, isolated by host and plugin. Not a secret store. */
+export interface PluginClientStorage {
+  getItem(key: string): Promise<string | null>;
+  setItem(key: string, value: string): Promise<void>;
+  removeItem(key: string): Promise<void>;
+}
+
 export interface PluginClientContext extends PluginCommandCapabilities {
+  /** Undefined on older apps. Gate features that require persistence. */
+  readonly storage?: PluginClientStorage;
   addSurface(id: string, Component: ComponentType<PluginSurfaceProps>): PluginCleanup;
   addSidebarItem(contribution: PluginSidebarContribution): PluginCleanup;
   addWorkspacePanel(contribution: PluginWorkspacePanelContribution): PluginCleanup;

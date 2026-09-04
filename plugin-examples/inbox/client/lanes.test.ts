@@ -58,8 +58,49 @@ describe("projectLanes", () => {
     );
     expect(lanes.needsYou).toHaveLength(1);
     expect(lanes.needsYou[0].agent.id).toBe("root");
-    expect(lanes.needsYou[0].requestAgentId).toBe("child");
+    expect(lanes.needsYou[0].subject.id).toBe("child");
     expect(lanes.needsYou[0].subagentCount).toBe(1);
+  });
+
+  it("uses the oldest requesting child's identity and attention time", () => {
+    const lanes = projectLanes(
+      [
+        agent({ id: "root", updatedAt: "2026-09-04T08:00:00Z" }),
+        agent({
+          id: "later",
+          labels: { "paseo.parent-agent-id": "root" },
+          pendingPermissions: [question],
+          attentionTimestamp: "2026-09-04T11:00:00Z",
+        }),
+        agent({
+          id: "earlier",
+          labels: { "paseo.parent-agent-id": "root" },
+          pendingPermissions: [question],
+          attentionTimestamp: "2026-09-04T10:00:00Z",
+        }),
+      ],
+      workspaces,
+    );
+    expect(lanes.needsYou[0].subject.id).toBe("earlier");
+    expect(lanes.needsYou[0].since).toBe("2026-09-04T10:00:00Z");
+    expect(lanes.needsYou[0].members).toHaveLength(3);
+  });
+
+  it("keeps unread child results available after the parent has been read", () => {
+    const lanes = projectLanes(
+      [
+        agent({ id: "root" }),
+        agent({
+          id: "child",
+          labels: { "paseo.parent-agent-id": "root" },
+          requiresAttention: true,
+          attentionReason: "finished",
+        }),
+      ],
+      workspaces,
+    );
+    expect(lanes.done[0].agent.id).toBe("root");
+    expect(lanes.done[0].subject.id).toBe("child");
   });
 
   it("keeps a cross-workspace subagent as its own card", () => {

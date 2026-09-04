@@ -1,9 +1,10 @@
 import type { PluginClientContext } from "@getpaseo/plugin";
 import { InboxSurface, InboxWorkspacePanel } from "./client/board";
 import { createInboxStore, setInboxStore } from "./client/store";
+import { boardLanes } from "./client/review";
 
 export default function contribute(client: PluginClientContext) {
-  const store = createInboxStore(client.paseo);
+  const store = createInboxStore(client.paseo, client.storage);
   setInboxStore(store);
   client.addSurface("board", InboxSurface);
   client.addSidebarItem({
@@ -38,7 +39,8 @@ export default function contribute(client: PluginClientContext) {
     keywords: ["kanban", "inbox", "attention", "permission", "question"],
     context: "global",
     onSelect({ openSurface }) {
-      const oldest = store.getSnapshot().lanes.needsYou[0];
+      const snapshot = store.getSnapshot();
+      const oldest = boardLanes(snapshot).needsYou[0];
       if (oldest) store.requestOpen(oldest.agent.id);
       openSurface("board");
     },
