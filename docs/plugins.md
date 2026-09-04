@@ -154,6 +154,8 @@ Shared files import contract helpers and types from `@getpaseo/plugin`. Server h
 `PluginHandlerContext` from `@getpaseo/plugin/server`. Client files import Paseo UI from
 `@getpaseo/plugin/react-native`. Its `Icon` resolves a Lucide name using the client's installed icon
 set; an unknown name renders nothing so it cannot break the plugin surface.
+Client preferences, draft persistence, and retained-view activity use the host capabilities in
+[the client reference](../public-docs/plugins/v0.8/reference.md).
 Its controlled modal keeps presentation metadata on `<Modal title="…" icon={…}>` and body UI in
 `<Modal.Content>`.
 Plugin UI runs on desktop and mobile across multiple themes: color every `Text` from

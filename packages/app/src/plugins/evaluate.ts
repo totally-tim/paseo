@@ -70,7 +70,7 @@ function requireId(value: string, label: string): string {
 
 export type PluginClientRuntime = Pick<
   PluginClientContext,
-  "paseo" | "rpc" | "openSurface" | "openPanel" | "addComposerPill"
+  "paseo" | "rpc" | "openSurface" | "openPanel" | "addComposerPill" | "storage"
 >;
 
 export function runPluginClientBundle(

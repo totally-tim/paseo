@@ -11,6 +11,7 @@ import { createPluginNavigation } from "./navigation";
 import { pluginComposerPillStore } from "./composer-pills/store";
 import { createPluginSurfaceRuntime } from "./surface-runtime";
 import type { InstalledPlugin } from "./types";
+import { createPluginClientStorage } from "./client-storage";
 
 export function createPluginClientRuntime(
   installation: InstalledPlugin,
@@ -26,6 +27,7 @@ export function createPluginClientRuntime(
   );
   return {
     ...capabilities,
+    storage: createPluginClientStorage(installation.serverId, installation.id),
     addComposerPill(contribution) {
       return pluginComposerPillStore.add(installation, contribution);
     },

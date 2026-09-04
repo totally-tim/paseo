@@ -6,6 +6,9 @@ export interface WebKeyEvent {
   metaKey: boolean;
   ctrlKey: boolean;
   altKey: boolean;
+  defaultPrevented: boolean;
+  repeat: boolean;
+  isComposing: boolean;
   target: unknown;
   preventDefault(): void;
 }
@@ -20,8 +23,11 @@ const NOOP = () => {};
 /** Web only. Native has no document, so the subscription is a no-op there. */
 export function subscribeKeydown(handler: (event: WebKeyEvent) => void): () => void {
   if (Platform.OS !== "web") return NOOP;
-  document.addEventListener("keydown", handler);
-  return () => document.removeEventListener("keydown", handler);
+  const listener = (event: WebKeyEvent) => {
+    if (!event.defaultPrevented && !event.repeat && !event.isComposing) handler(event);
+  };
+  document.addEventListener("keydown", listener);
+  return () => document.removeEventListener("keydown", listener);
 }
 
 /** True when the key event targets a text field, so board shortcuts must stay out of the way. */

@@ -1,4 +1,6 @@
 import { router, useLocalSearchParams } from "expo-router";
+import { useIsMobilePanelActive } from "@/mobile-panels/provider";
+import { useIsFocused } from "@react-navigation/native";
 import type { PluginSurfaceProps, PluginTheme } from "@getpaseo/plugin";
 import { ChevronDown, X } from "lucide-react-native";
 import { useCallback, useMemo, useRef, useState, type ComponentType } from "react";
@@ -68,9 +70,18 @@ function SurfaceRenderer({
   theme: PluginTheme;
 }) {
   const navigation = usePluginHostNavigation(host.id);
+  const isFocused = useIsFocused();
+  const isCenterActive = useIsMobilePanelActive("agent");
+  const isActive = isFocused && (!layout.compact || isCenterActive);
   return (
     <PluginRuntimeBoundary plugin={plugin} runtime={runtime}>
-      <Surface theme={theme} host={host} layout={layout} navigation={navigation} />
+      <Surface
+        theme={theme}
+        host={host}
+        layout={layout}
+        navigation={navigation}
+        isActive={isActive}
+      />
     </PluginRuntimeBoundary>
   );
 }
