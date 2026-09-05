@@ -954,7 +954,7 @@ function queueMessageImpl(ctx: QueueMessageContext): void {
   const trimmed = ctx.value.trim();
   if (!trimmed && ctx.attachments.length === 0) return;
   ctx.onQueue({ text: trimmed, attachments: ctx.attachments, cwd: ctx.cwd });
-  ctx.replaceText("");
+  // The host acknowledgement owns clearing; failed queue submissions retain this input.
   ctx.onMinimizeHeight();
 }
 

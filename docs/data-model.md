@@ -74,6 +74,12 @@ $PASEO_HOME/
 
 The `agents/{sanitized-cwd}/` directory name is derived from the agent's `cwd` by stripping the filesystem root and replacing path separators with `-` (Windows drive letters become a `C-` style prefix). Persistent server stores write atomically by writing a temp file in the target directory and then renaming it into place.
 
+### Continuation state
+
+`$PASEO_HOME/agent-continuations/{rootAgentId}.json` owns the active conversation, cancellation generation, recovery attempts, ordered queue, and dispatch receipts for one task chain. These fields commit together through serialized atomic replacement. This prevents another client or a restart from selecting a second successor or treating an acknowledged instruction as a new submission. The directory is private (`0700`), and records and retained uploads use `0600`.
+
+Uploaded queue files are retained under the root's private directory before acknowledgement; inline images remain in the atomic record. The provider dispatch journal is written before sending. A restart cannot prove whether an in-progress dispatch reached the provider, so it pauses for inspection instead of resending. Local drafts and failed submissions remain device-owned. Credentials, login challenges, and provider runtime configuration never belong in these records. See [agent lifecycle](agent-lifecycle.md#continuations) for the visible recovery behavior.
+
 ---
 
 ## 1. Agent Record

@@ -314,6 +314,9 @@ export function buildSerializableConfig(
   const serializable: SerializableAgentConfig = {
     ...(config.accountId ? { accountId: config.accountId } : {}),
     ...(config.accountSelection ? { accountSelection: config.accountSelection } : {}),
+    ...(config.continuationPolicy
+      ? { continuationPolicy: structuredClone(config.continuationPolicy) }
+      : {}),
     ...(config.accountSelectionReason
       ? { accountSelectionReason: config.accountSelectionReason }
       : {}),

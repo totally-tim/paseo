@@ -1,3 +1,4 @@
+import { ContinuationPolicyField } from "@/provider-accounts/continuation-policy-field";
 import { AccountSelectionField } from "@/provider-accounts/selection-field";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { Text, View } from "react-native";
@@ -280,6 +281,13 @@ function OpenAgentProfileEditModal({
           provider={state.provider}
           value={state.accountSelection}
           onChange={model.setAccountSelection}
+          disabled={state.isSubmitting}
+        />
+        <ContinuationPolicyField
+          serverId={serverId}
+          provider={state.provider}
+          value={state.continuationPolicy}
+          onChange={model.setContinuationPolicy}
           disabled={state.isSubmitting}
         />
         {state.disclosure.showModelField ? (

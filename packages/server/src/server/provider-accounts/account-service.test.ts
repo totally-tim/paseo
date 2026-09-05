@@ -108,6 +108,66 @@ function nextLoginResult(service: ProviderAccountService, id: string): Promise<P
   });
 }
 
+it("requires a fresh known reading for automatic recovery even when unknown usage is allowed", async () => {
+  const { service, add } = await setup();
+  const a = await add("recovery-a");
+  const b = await add("recovery-b");
+  a.backend.usedPct = 100;
+  b.backend.usedPct = null;
+  await service.setPolicy({ unknownQuota: "allow" });
+  const input = { provider: "codex" as const, accountIds: [a.account.id, b.account.id] };
+  expect((await service.recoveryChoice(input)).accountId).toBeNull();
+  b.backend.usedPct = 10;
+  expect((await service.recoveryChoice(input)).accountId).toBe(b.account.id);
+  await service.edit(b.account.id, { reservePercent: 95 });
+  expect((await service.recoveryChoice(input)).accountId).toBeNull();
+  await service.edit(b.account.id, { reservePercent: 0, interactiveOnly: true });
+  expect((await service.recoveryChoice(input)).accountId).toBeNull();
+});
+
+it("waits for all overlapping limits and ignores stale readings or disabled destinations", async () => {
+  const { service, add, advance } = await setup();
+  const { account, backend } = await add("overlap");
+  const input = { provider: "codex" as const, accountIds: [account.id] };
+  vi.spyOn(backend, "usage").mockResolvedValueOnce({
+    providerId: "codex",
+    displayName: "test",
+    status: "available",
+    planLabel: null,
+    windows: [
+      { id: "session", label: "Session", usedPct: 100, resetsAt: "2026-09-05T01:00:00Z" },
+      { id: "weekly", label: "Weekly", usedPct: 100, resetsAt: "2026-09-06T00:00:00Z" },
+    ],
+  });
+  expect(await service.recoveryChoice(input)).toMatchObject({
+    accountId: null,
+    resetsAt: "2026-09-06T00:00:00.000Z",
+  });
+  expect((await service.recoveryChoice(input)).accountId).toBe(account.id);
+  advance(24 * 60 * 60 * 1000);
+  backend.failUsage = true;
+  expect((await service.recoveryChoice(input)).accountId).toBeNull();
+  backend.failUsage = false;
+  await service.edit(account.id, { enabled: false });
+  expect(await service.recoveryChoice(input)).toMatchObject({
+    accountId: null,
+    needsAttention: true,
+  });
+});
+
+it("counts a host login and managed profile for the same identity only once during recovery", async () => {
+  const { service, backends, add } = await setup();
+  const a = await add("first");
+  const host = new TestAccountBackend();
+  backends.set("default:codex", host);
+  host.identity = a.backend.identity;
+  await service.inspect("default:codex");
+  const inspectA = vi.spyOn(a.backend, "inspect");
+  const inspectB = vi.spyOn(host, "inspect");
+  await service.recoveryChoice({ provider: "codex", accountIds: [a.account.id, "default:codex"] });
+  expect(inspectA.mock.calls.length + inspectB.mock.calls.length).toBe(1);
+});
+
 it("waits for in-flight identity inspection before closing the account store", async () => {
   const { service, store, add } = await setup();
   const { account, backend } = await add("closing");
@@ -272,7 +332,7 @@ describe("provider accounts", () => {
   });
 
   it("keeps failed and unknown quota separate from zero and applies only configured reserves", async () => {
-    const { service, add } = await setup();
+    const { service, add, advance } = await setup();
     const { account, backend } = await add("a");
     backend.usedPct = null;
     await service.setPolicy({ unknownQuota: "pause-unattended" });
@@ -284,6 +344,7 @@ describe("provider accounts", () => {
     interactive!.release();
     await service.edit(account.id, { reservePercent: 25 });
     backend.usedPct = 80;
+    advance(300_001);
     await expect(service.reserve({ provider: "codex", unattended: true })).rejects.toThrow(
       "No eligible account",
     );
@@ -292,8 +353,50 @@ describe("provider accounts", () => {
     unattended!.release();
     backend.failUsage = true;
     await service.edit(account.id, { label: "Renamed" });
+    advance(300_001);
     expect((await service.usage(account.id)).status).toBe("error");
     expect((await service.usage(account.id)).windows).toEqual([]);
+  });
+
+  it("preserves a usage reading across settings edits and invalidates it after login inspection", async () => {
+    const { service, add } = await setup();
+    const { account, backend } = await add("a");
+    const fetchUsage = vi.spyOn(backend, "usage");
+    await service.usage(account.id);
+    await service.edit(account.id, { label: "Renamed", reservePercent: 20 });
+    expect(service.usageSnapshot(account.id)).toMatchObject({
+      stale: false,
+      usage: { displayName: "Renamed", windows: [{ usedPct: 10 }] },
+    });
+    await service.usage(account.id);
+    expect(fetchUsage).toHaveBeenCalledTimes(1);
+    await service.inspect(account.id);
+    expect(service.usageSnapshot(account.id).stale).toBe(true);
+  });
+
+  it("uses the distinct host login when a managed account is exhausted and respects an explicit pool", async () => {
+    const { service, add, backends } = await setup();
+    const { account, backend } = await add("full", "claude");
+    backend.usedPct = 100;
+    const host = new TestAccountBackend();
+    host.identity = { key: "claude:host" };
+    host.usedPct = 49;
+    backends.set("default:claude", host);
+    await service.inspect("default:claude");
+    const lease = await service.reserve({ provider: "claude", unattended: false });
+    expect(lease?.accountId).toBe("default:claude");
+    expect(service.preview("claude").accountId).toBe("default:claude");
+    lease?.release();
+    await expect(
+      service.reserve({
+        provider: "claude",
+        unattended: false,
+        selection: { kind: "automatic", accountIds: [account.id] },
+      }),
+    ).rejects.toThrow("resets at");
+    expect(
+      service.catalogChoice("claude", { kind: "automatic", accountIds: [account.id] }).accountId,
+    ).toBe(account.id);
   });
 
   it("rejects exhausted accounts and never copies an account ID across providers", async () => {

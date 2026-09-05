@@ -8,7 +8,10 @@ export const en = {
     chooseRemoval: "Choose what happens to the login",
     removalHelp:
       "Close this account's agents before removing it. History stays linked to this account. Restore it to resume old agents.",
-    stale: "Usage is unknown or out of date",
+    stale: "Waiting for a fresh usage reading",
+    usageUnavailable: "The provider has not reported usage yet",
+    lastReported: "Last reported",
+    noAutomaticAccount: "No account available for automatic selection",
     title: "Provider accounts",
     account: "Account",
     automatic: "Automatic",
@@ -34,10 +37,12 @@ export const en = {
     submitCode: "Submit code",
     reserve: "Capacity reserved for interactive work (%)",
     interactiveOnly: "Use only for interactive work",
-    unknownUsage: "When usage is unknown",
-    choosePolicy: "Choose an unattended-work policy",
-    pauseUnattended: "Pause unattended starts; allow interactive starts",
-    allowUnknown: "Allow starts with unknown usage",
+    unknownUsage: "If remaining usage cannot be checked",
+    unknownUsageHelp:
+      "This applies to scheduled and background agents. You can still start an agent manually when the provider has not reported its usage.",
+    choosePolicy: "Choose how background agents start",
+    pauseUnattended: "Wait for a usage reading",
+    allowUnknown: "Start anyway",
     auth: {
       unknown: "Login not checked",
       "signed-out": "Signed out",

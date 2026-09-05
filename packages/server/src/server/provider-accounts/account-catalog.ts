@@ -33,11 +33,7 @@ export class AccountCatalog {
     accounts: ProviderAccountService,
     client: (provider: string, accountId: string) => AgentClient,
   ): Promise<AccountCatalogResult> {
-    // A fixed account's catalog must stay readable when its quota is exhausted.
-    const choice =
-      input.selection?.kind === "fixed"
-        ? { accountId: input.selection.accountId, reason: "Fixed account" }
-        : accounts.preview(input.provider, input.selection, input.model);
+    const choice = accounts.catalogChoice(input.provider, input.selection);
     if (!choice.accountId) return { ...choice, entry: null, error: choice.reason };
     const account = accounts.store.get(choice.accountId);
     if (account.provider !== input.provider) throw new Error("Account and provider do not match.");

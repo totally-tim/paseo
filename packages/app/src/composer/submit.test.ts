@@ -104,7 +104,7 @@ describe("submitAgentInput", () => {
     expect(clearDraft).toHaveBeenCalledWith("sent");
   });
 
-  it("queues while the agent is running and clears the composer immediately", async () => {
+  it("queues while the agent is running and clears the composer after acknowledgement", async () => {
     const queueMessage = vi.fn();
     const submitMessage = vi.fn();
     const clearDraft = vi.fn();
@@ -136,8 +136,8 @@ describe("submitAgentInput", () => {
     expect(submitMessage).not.toHaveBeenCalled();
     expect(setUserInput).toHaveBeenCalledWith("");
     expect(setAttachments).toHaveBeenCalledWith([]);
-    expect(setSendError).not.toHaveBeenCalled();
-    expect(setIsProcessing).not.toHaveBeenCalled();
+    expect(setSendError).toHaveBeenCalledWith(null);
+    expect(setIsProcessing.mock.calls).toEqual([[true], [false]]);
     expect(clearDraft).not.toHaveBeenCalled();
   });
 
@@ -250,4 +250,58 @@ describe("submitAgentInput", () => {
     });
     expect(clearDraft).toHaveBeenCalledWith("sent");
   });
+});
+
+it("retains text and attachments until the host acknowledges queued work", async () => {
+  let acknowledge!: () => void;
+  const retained = new Promise<void>((resolve) => {
+    acknowledge = resolve;
+  });
+  const setUserInput = vi.fn();
+  const setAttachments = vi.fn();
+  const submission = submitAgentInput({
+    message: "Keep this draft",
+    attachments: [{ id: "image" }],
+    isAgentRunning: true,
+    canSubmit: true,
+    queueMessage: () => retained,
+    submitMessage: vi.fn(),
+    clearDraft: vi.fn(),
+    setUserInput,
+    setAttachments,
+    setSendError: vi.fn(),
+    setIsProcessing: vi.fn(),
+  });
+  expect(setUserInput).not.toHaveBeenCalled();
+  expect(setAttachments).not.toHaveBeenCalled();
+  acknowledge();
+  await expect(submission).resolves.toBe("queued");
+  expect(setUserInput).toHaveBeenCalledWith("");
+  expect(setAttachments).toHaveBeenCalledWith([]);
+});
+
+it("keeps a failed queue submission recoverable in the local composer", async () => {
+  const setUserInput = vi.fn();
+  const setAttachments = vi.fn();
+  const setSendError = vi.fn();
+  await expect(
+    submitAgentInput({
+      message: "Retry this",
+      attachments: [{ id: "file" }],
+      isAgentRunning: true,
+      canSubmit: true,
+      queueMessage: async () => {
+        throw new Error("Host disconnected");
+      },
+      submitMessage: vi.fn(),
+      clearDraft: vi.fn(),
+      setUserInput,
+      setAttachments,
+      setSendError,
+      setIsProcessing: vi.fn(),
+    }),
+  ).resolves.toBe("failed");
+  expect(setUserInput).not.toHaveBeenCalled();
+  expect(setAttachments).not.toHaveBeenCalled();
+  expect(setSendError).toHaveBeenCalledWith("Host disconnected");
 });

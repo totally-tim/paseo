@@ -21,7 +21,7 @@ afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });
 
-async function setup() {
+async function setup(usedPct = 10) {
   const directory = await mkdtemp(path.join(tmpdir(), "paseo-agent-accounts-"));
   const logger = createTestLogger();
   const store = new ProviderAccountStore(directory);
@@ -34,7 +34,7 @@ async function setup() {
       displayName: account.label,
       status: "available",
       planLabel: null,
-      windows: [{ id: "weekly", label: "Weekly", usedPct: 10, resetsAt: null }],
+      windows: [{ id: "weekly", label: "Weekly", usedPct, resetsAt: null }],
     }),
   }));
   await accounts.initialize();
@@ -282,6 +282,27 @@ describe("agent account boundaries", () => {
     await expect(manager.getAccountCatalog({ ...request, provider: "claude" })).rejects.toThrow(
       "do not match",
     );
+  });
+
+  it("keeps automatic model discovery available when generation capacity is exhausted", async () => {
+    const { add, manager, accounts, directory, accountClients } = await setup(100);
+    const account = await add("codex", "Full account");
+    const client = createTestAgentClient("codex");
+    vi.spyOn(client, "fetchCatalog").mockResolvedValue({
+      models: [{ id: "test-model", label: "Test model" }],
+      modes: [],
+    });
+    accountClients.set(account.id, client);
+    await accounts.usage(account.id);
+    expect(accounts.preview("codex").accountId).toBeNull();
+    const result = await manager.getAccountCatalog({
+      provider: "codex",
+      cwd: directory,
+      selection: { kind: "automatic" },
+    });
+    expect(result.entry?.models?.[0].id).toBe("test-model");
+    expect(accounts.hasRuntime(account.id)).toBe(false);
+    await expect(accounts.reserve({ provider: "codex", unattended: false })).rejects.toThrow();
   });
 
   it("keeps concurrent account handoff requests distinct and retries a failed B startup", async () => {

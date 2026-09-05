@@ -1,3 +1,4 @@
+import { AgentContinuationPolicySchema } from "@getpaseo/protocol/agent-continuation";
 import { AccountSelectionSchema } from "@getpaseo/protocol/provider-accounts";
 import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
@@ -17,6 +18,7 @@ const SERIALIZABLE_CONFIG_SCHEMA = z
   .object({
     accountId: z.string().optional(),
     accountSelection: AccountSelectionSchema.optional(),
+    continuationPolicy: AgentContinuationPolicySchema.optional(),
     accountSelectionReason: z.string().optional(),
     modeId: z.string().nullable().optional(),
     model: z.string().nullable().optional(),
@@ -87,6 +89,7 @@ export type SerializableAgentConfig = Pick<
   AgentSessionConfig,
   | "accountId"
   | "accountSelection"
+  | "continuationPolicy"
   | "accountSelectionReason"
   | "modeId"
   | "model"

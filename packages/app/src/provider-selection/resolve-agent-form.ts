@@ -1,3 +1,4 @@
+import type { AgentContinuationPolicy } from "@getpaseo/protocol/agent-continuation";
 import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import type { AgentProviderDefinition } from "@getpaseo/protocol/provider-manifest";
 import type {
@@ -13,6 +14,8 @@ import {
 import { findModelByReference } from "./model-catalog";
 
 export interface FormInitialValues {
+  accountSelection?: AccountSelection;
+  continuationPolicy?: AgentContinuationPolicy;
   serverId?: string | null;
   provider?: AgentProvider;
   modeId?: string | null;
@@ -23,6 +26,7 @@ export interface FormInitialValues {
 
 export interface FormState {
   accountSelection?: AccountSelection;
+  continuationPolicy?: AgentContinuationPolicy;
   serverId: string | null;
   provider: AgentProvider | null;
   modeId: string;
@@ -93,6 +97,7 @@ export type AgentFormAction =
   | {
       type: "APPLY_PROFILE_FROM_USER";
       accountSelection?: AccountSelection;
+      continuationPolicy?: AgentContinuationPolicy;
       provider: AgentProvider;
       modelId: string;
       modeId: string;
@@ -606,6 +611,7 @@ function applyProfile(state: AgentFormReducerState, action: ApplyProfileAction) 
       ...state.form,
       provider: action.provider,
       accountSelection: action.accountSelection,
+      continuationPolicy: action.continuationPolicy,
       model: nextModelId,
       modeId: nextModeId,
       thinkingOptionId: nextThinkingOptionId,
@@ -618,6 +624,13 @@ function applyProfile(state: AgentFormReducerState, action: ApplyProfileAction) 
       thinkingOptionId: true,
     },
   };
+}
+
+function continuationOnHost(state: AgentFormReducerState["form"], host: string | null) {
+  return state.serverId === host ? state.continuationPolicy : undefined;
+}
+function continuationOnProvider(state: AgentFormReducerState["form"], provider: string | null) {
+  return state.provider === provider ? state.continuationPolicy : undefined;
 }
 
 function accountOnHost(state: FormState, host: string | null): AccountSelection | undefined {
@@ -654,6 +667,7 @@ export function resolveAgentForm(
           ...state.form,
           serverId: action.value,
           accountSelection: accountOnHost(state.form, action.value),
+          continuationPolicy: continuationOnHost(state.form, action.value),
         },
       };
 
@@ -664,6 +678,7 @@ export function resolveAgentForm(
           ...state.form,
           serverId: action.value,
           accountSelection: accountOnHost(state.form, action.value),
+          continuationPolicy: continuationOnHost(state.form, action.value),
         },
         userModified: { ...state.userModified, serverId: true },
       };
@@ -692,6 +707,7 @@ export function resolveAgentForm(
           ...state.form,
           provider: action.provider,
           accountSelection: accountOnProvider(state.form, action.provider),
+          continuationPolicy: continuationOnProvider(state.form, action.provider),
           model: nextModelId,
           modeId: nextModeId,
           thinkingOptionId: nextThinkingOptionId,

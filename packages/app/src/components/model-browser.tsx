@@ -517,6 +517,7 @@ type ModelBrowserRowTone = "default" | "elevated" | "drillDown";
 function ModelBrowserRow({
   label,
   description,
+  accountSummary,
   leadingSlot,
   trailingSlot,
   selected = false,
@@ -529,6 +530,7 @@ function ModelBrowserRow({
 }: {
   label: string;
   description?: string;
+  accountSummary?: string;
   leadingSlot: React.ReactNode;
   trailingSlot?: React.ReactNode;
   selected?: boolean;
@@ -551,8 +553,8 @@ function ModelBrowserRow({
     [spacing, tone],
   );
   const contentStyle = useMemo(
-    () => [styles.browserRowText, description && styles.browserRowTextInline],
-    [description],
+    () => [styles.browserRowText, description && !accountSummary && styles.browserRowTextInline],
+    [description, accountSummary],
   );
   const hasTrailing = selected || trailingSlot;
 
@@ -578,6 +580,9 @@ function ModelBrowserRow({
             <Text numberOfLines={1} style={styles.browserRowDescription}>
               {description}
             </Text>
+          ) : null}
+          {accountSummary ? (
+            <Text style={styles.browserRowDescription}>{accountSummary}</Text>
           ) : null}
         </View>
         {hasTrailing ? (
@@ -860,6 +865,7 @@ function AgentProfilePickerRowView({
     <ModelBrowserRow
       label={row.name}
       description={row.summary}
+      accountSummary={row.accountSummary}
       tone="elevated"
       onPress={handlePress}
       leadingSlot={leadingSlot}

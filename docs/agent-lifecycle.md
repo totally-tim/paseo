@@ -70,6 +70,14 @@ Continuation links do not establish parentage. Archiving the source cannot archi
 Existing subagents retain their original parent; the successor's briefing must account for their
 unfinished work. Agents owned by an execution service cannot use this transition.
 
+An opted-in [account policy](provider-accounts.md#selection-and-capacity) lets the daemon initiate the same handoff after a live, confirmed capacity rejection. Warnings and historical events do not trigger it. Manual and automatic operations share task ownership and one successor. Automatic continuation preserves the running configuration, including permission mode and tool restrictions. Pending approvals, active subagents, or an interrupted tool with no confirmed outcome require attention.
+
+The existing task tab follows the successor without changing its position or taking focus. The account transition links back to the previous conversation. Opening that conversation explicitly keeps it as a history view. Unsent drafts stay on their originating device and remain unsent across the transition.
+
+When accounts have no confirmed capacity, the daemon releases the provider runtime and retains an indefinite wait. Restart renews eligibility checks before resumption. If the original account recovers before a successor exists, the daemon resumes its saved session when supported. **Cancel wait**, **Stop**, and archiving the active task or workspace durably cancel recovery. Archiving a predecessor does not cancel the current task. Cancellation preserves queued instructions for inspection.
+
+**Queued** means that the daemon has retained the instruction and attachments. All clients read and edit the same queue, which follows the task after the interrupted turn. Queued instructions are excluded from the handoff briefing. A delivery that was in progress at restart requires inspection and is never retried automatically. Failed submissions remain in the device's draft. See [continuation persistence](data-model.md#continuation-state) for the ownership boundary.
+
 ### Subagents
 
 Agents can launch other agents via the agent-scoped `create_agent` MCP tool. Agent-scoped creation is always asynchronous and always stamps `paseo.parent-agent-id`, pointing back at the caller. Omit `workspaceId` to use the caller's workspace, or pass an existing workspace ID returned by `create_workspace`. Placement never changes parentage.

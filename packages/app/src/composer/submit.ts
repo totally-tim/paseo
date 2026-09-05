@@ -11,7 +11,7 @@ export interface AgentInputSubmitActionInput<TAttachment> {
   forceSend?: boolean;
   isAgentRunning: boolean;
   canSubmit: boolean;
-  queueMessage: (input: { message: string; attachments: TAttachment[] }) => void;
+  queueMessage: (input: { message: string; attachments: TAttachment[] }) => Promise<void> | void;
   submitMessage: (input: { message: string; attachments: TAttachment[] }) => Promise<void>;
   clearDraft: (lifecycle: "sent" | "abandoned") => void;
   setUserInput: (text: string) => void;
@@ -43,12 +43,25 @@ export async function submitAgentInput<TAttachment>(
   }
 
   if (input.isAgentRunning && !input.forceSend) {
-    input.queueMessage({ message: trimmedMessage, attachments });
-    if (shouldClearOnSubmit) {
-      input.setUserInput("");
-      input.setAttachments([]);
+    input.setIsProcessing(true);
+    input.setSendError(null);
+    try {
+      await input.queueMessage({ message: trimmedMessage, attachments });
+      if (shouldClearOnSubmit) {
+        input.setUserInput("");
+        input.setAttachments([]);
+      }
+      return "queued";
+    } catch (error) {
+      input.setSendError(
+        error instanceof Error
+          ? error.message
+          : "Could not queue this message. Your draft is retained.",
+      );
+      return "failed";
+    } finally {
+      input.setIsProcessing(false);
     }
-    return "queued";
   }
 
   // Clear immediately so the submitted timeline row and composer state stay in sync.

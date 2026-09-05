@@ -1,3 +1,4 @@
+import type { AgentContinuationService } from "../agent-continuation/service.js";
 import { AccountCatalog } from "../provider-accounts/account-catalog.js";
 import pLimit from "p-limit";
 import type { ProviderAccountService, AccountLease } from "../provider-accounts/account-service.js";
@@ -171,6 +172,8 @@ function buildStoredAgentConfig(record: StoredAgentRecord): AgentSessionConfig {
   }
   if (record.config.accountId) config.accountId = record.config.accountId;
   if (record.config.accountSelection) config.accountSelection = record.config.accountSelection;
+  if (record.config.continuationPolicy)
+    config.continuationPolicy = record.config.continuationPolicy;
   if (record.config.modeId != null) config.modeId = record.config.modeId;
   if (record.config.model != null) config.model = record.config.model;
   if (record.config.thinkingOptionId != null) {
@@ -699,6 +702,12 @@ function detachedAgentLabelPatch(labels: Record<string, string>): AgentLabelPatc
 }
 
 export class AgentManager {
+  continuations?: AgentContinuationService;
+
+  async cancelContinuation(agentId: string): Promise<void> {
+    await this.continuations?.cancelExisting(agentId);
+  }
+
   readonly accounts?: ProviderAccountService;
   private readonly createAccountClient?: AgentManagerOptions["createAccountClient"];
   private readonly accountCatalog = new AccountCatalog();
@@ -1262,25 +1271,34 @@ export class AgentManager {
         throw new Error(`Agent already continued in ${existingTarget}`);
       }
       await this.writeLabels(agentId, { [HANDOFF_TO_AGENT_ID_LABEL]: successorAgentId });
-      const agent = this.agents.get(agentId);
-      if (!agent) return;
-      await this.cancelAgentRunBefore(agentId, "handoff");
-      const closed = await this.waitWithTimeout({
-        operation: agent.session.close(),
-        timeoutMs: this.rescueTimeouts.reloadSessionCloseMs,
-      });
-      if (closed !== "completed") throw new Error("Source agent did not acknowledge shutdown");
-      this.accountLeases.get(agentId)?.release();
-      this.accountLeases.delete(agentId);
-      await this.drainSessionEvents(agentId);
-      this.cancelRunningProviderSubagents(agentId);
-      const snapshot = this.prepareAgentForClosure(agent, "continued in another agent");
-      await this.persistSnapshot(snapshot);
-      this.emitClosedAgent(snapshot, { persist: false });
+      await this.closeContinuationRuntime(agentId);
     });
   }
 
-  assertAgentCanAcceptPrompt(agentId: string): void {
+  async suspendForContinuation(agentId: string): Promise<void> {
+    await this.runLifecycleMutation(agentId, () => this.closeContinuationRuntime(agentId));
+  }
+
+  private async closeContinuationRuntime(agentId: string): Promise<void> {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    await this.cancelAgentRunBefore(agentId, "handoff");
+    const closed = await this.waitWithTimeout({
+      operation: agent.session.close(),
+      timeoutMs: this.rescueTimeouts.reloadSessionCloseMs,
+    });
+    if (closed !== "completed") throw new Error("Source agent did not acknowledge shutdown");
+    await this.drainSessionEvents(agentId);
+    this.accountLeases.get(agentId)?.release();
+    this.accountLeases.delete(agentId);
+    this.cancelRunningProviderSubagents(agentId);
+    const snapshot = this.prepareAgentForClosure(agent, "continuation paused the provider");
+    await this.persistSnapshot(snapshot);
+    this.emitClosedAgent(snapshot, { persist: false });
+  }
+
+  assertAgentCanAcceptPrompt(agentId: string, continuationOperationId?: string): void {
+    this.continuations?.assertPromptAllowed(agentId, continuationOperationId);
     const successor = this.getAgent(agentId)?.labels[HANDOFF_TO_AGENT_ID_LABEL];
     if (successor) throw new Error(`This agent continued in ${successor}. Send new work there.`);
   }
@@ -1332,12 +1350,46 @@ export class AgentManager {
     return this.registerOnce(id, () => this.createAgentWithAccount(config, id, options));
   }
 
+  private validateContinuationConfig(
+    config: AgentSessionConfig,
+    options: CreateAgentOptions,
+  ): AgentSessionConfig {
+    if (config.continuationPolicy) {
+      if (
+        !this.accounts ||
+        !["claude", "codex"].includes(config.provider) ||
+        options.owner ||
+        config.internal ||
+        options.labels?.[PARENT_AGENT_ID_LABEL] ||
+        options.labels?.["paseo.schedule-id"]
+      )
+        throw new Error(
+          "Automatic continuation is available only for ordinary Claude and Codex agents.",
+        );
+      const ids = [...new Set(config.continuationPolicy.accountIds)];
+      if (
+        !ids.length ||
+        ids.some(
+          (id) =>
+            !this.accounts!.list().some(
+              (account) =>
+                account.id === id && account.provider === config.provider && !account.removedAt,
+            ),
+        )
+      )
+        throw new Error("Choose existing accounts from this provider for automatic continuation.");
+      config = { ...config, continuationPolicy: { accountIds: ids } };
+    }
+    return config;
+  }
+
   private async createAgentWithAccount(
     config: AgentSessionConfig,
     agentId: string | undefined,
     options: CreateAgentOptions,
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
+    config = this.validateContinuationConfig(config, options);
     if (!this.accounts) return this.createAgentInternal(config, agentId, options);
     const id = validateAgentId(agentId ?? this.idFactory(), "createAgent");
     const existing = await this.registry?.get(id);
@@ -1965,6 +2017,7 @@ export class AgentManager {
   }
 
   async archiveAgent(agentId: string): Promise<{ archivedAt: string }> {
+    await this.cancelContinuation(agentId);
     return this.runLifecycleMutation(agentId, () => this.archiveAgentUnlocked(agentId));
   }
 
@@ -2333,6 +2386,7 @@ export class AgentManager {
   }
 
   async archiveSnapshot(agentId: string, archivedAt: string): Promise<StoredAgentRecord> {
+    await this.cancelContinuation(agentId);
     const registry = this.requireRegistry();
     const liveAgent = this.getAgent(agentId);
     if (liveAgent) {
@@ -2602,6 +2656,7 @@ export class AgentManager {
   }): Promise<string> {
     const { agent, agentId, pendingRun, prompt, options } = params;
     try {
+      this.assertAgentCanAcceptPrompt(agentId, options?.continuationOperationId);
       const result = await agent.session.startTurn(prompt, options);
       if (pendingRun.settled) {
         throw new Error(`Agent ${agentId} run was canceled before its turn started`);
@@ -2630,7 +2685,7 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
   ): AsyncGenerator<AgentStreamEvent> {
-    this.assertAgentCanAcceptPrompt(agentId);
+    this.assertAgentCanAcceptPrompt(agentId, options?.continuationOperationId);
     const existingAgent = this.requireSessionAgent(agentId);
     this.logger.trace(
       {
@@ -3167,6 +3222,7 @@ export class AgentManager {
   }
 
   async cancelAgentRun(agentId: string): Promise<AgentRunCancellationResult> {
+    await this.cancelContinuation(agentId);
     return this.runForegroundMutation(agentId, () => this.cancelAgentRunNow(agentId));
   }
 
@@ -3239,7 +3295,7 @@ export class AgentManager {
     agentId: string,
     action: "reload" | "replace" | "rewind" | "handoff",
   ): Promise<void> {
-    const result = await this.cancelAgentRun(agentId);
+    const result = await this.runForegroundMutation(agentId, () => this.cancelAgentRunNow(agentId));
     if (result.status === "refused") {
       throw new AgentRunCancellationError(agentId, action);
     }

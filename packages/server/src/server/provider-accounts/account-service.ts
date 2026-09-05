@@ -43,6 +43,11 @@ export interface AccountChoice {
   reason: string;
 }
 
+export interface RecoveryAccountChoice extends AccountChoice {
+  needsAttention: boolean;
+  resetsAt?: string;
+}
+
 export class AccountOperationError extends Error {}
 
 const USAGE_TTL_MS = 5 * 60_000;
@@ -126,7 +131,7 @@ export class ProviderAccountService {
       throw new AccountOperationError("An account operation is still in progress.");
     this.busy.add(id);
     try {
-      return await this.update(id, changes);
+      return await this.update(id, changes, true);
     } finally {
       this.busy.delete(id);
     }
@@ -355,14 +360,14 @@ export class ProviderAccountService {
     });
   }
 
-  async usage(id: string): Promise<ProviderUsage> {
+  async usage(id: string, fresh = false): Promise<ProviderUsage> {
     const account = this.store.get(id);
     const unavailable = () =>
       unavailableUsage({ providerId: account.provider, displayName: account.label });
     if (account.removedAt || account.authState !== "ready" || this.busy.has(id))
       return unavailable();
     const cached = this.usageCache.get(id);
-    if (cached?.revision === account.revision && this.now() - cached.at < USAGE_TTL_MS)
+    if (!fresh && cached?.revision === account.revision && this.now() - cached.at < USAGE_TTL_MS)
       return cached.usage;
     const key = `${id}:${account.revision}`;
     const pending = this.usageRequests.get(key);
@@ -399,6 +404,82 @@ export class ProviderAccountService {
     }
   }
 
+  async recoveryChoice(input: {
+    provider: AccountProvider;
+    accountIds: string[];
+    model?: string;
+    exclude?: string[];
+  }): Promise<RecoveryAccountChoice> {
+    this.assertOpen();
+    const selection = { kind: "automatic" as const, accountIds: input.accountIds };
+    const configured = this.automaticCandidates(input.provider, selection);
+    if (!configured.length)
+      return {
+        accountId: null,
+        needsAttention: true,
+        reason: "No permitted account is enabled and signed in. Check the profile's accounts.",
+      };
+    const verified = new Set<string>();
+    await Promise.all(
+      configured.map(async (account) => {
+        // The provider owns authentication. Inspect its identity again before sending more work.
+        try {
+          await this.inspect(account.id);
+        } catch {
+          return;
+        }
+        await this.usage(account.id, true);
+        verified.add(account.id);
+      }),
+    );
+    const considered = this.automaticCandidates(input.provider, selection);
+    const eligible = considered.filter((account) => {
+      if (!verified.has(account.id) || input.exclude?.includes(account.id)) return false;
+      const windows = applicableWindows(this.currentUsage(account), input.model);
+      return (
+        windows.length > 0 &&
+        windows.every((window) => typeof window.usedPct === "number") &&
+        this.eligibility(account, true, false, input.model).accountId !== null
+      );
+    });
+    eligible.sort(
+      (a, b) => this.score(b, input.model) - this.score(a, input.model) || a.id.localeCompare(b.id),
+    );
+    if (eligible[0])
+      return {
+        accountId: eligible[0].id,
+        reason: "Confirmed capacity for automatic continuation",
+        needsAttention: false,
+      };
+    const resets = considered
+      .map((account) => this.recoveryReset(account, input.model))
+      .filter((value): value is number => value !== null);
+    return {
+      accountId: null,
+      needsAttention: considered.length === 0,
+      reason: considered.length
+        ? "Waiting for confirmed account capacity"
+        : "The permitted accounts need attention. Check their login and enabled state.",
+      ...(resets.length ? { resetsAt: new Date(Math.min(...resets)).toISOString() } : {}),
+    };
+  }
+
+  private recoveryReset(account: ProviderAccount, model?: string): number | null {
+    const windows = applicableWindows(this.currentUsage(account), model);
+    const deadlines = windows
+      .filter(
+        (window) =>
+          typeof window.usedPct === "number" &&
+          100 - window.usedPct <= (account.reservePercent ?? 0),
+      )
+      .map((window) => Date.parse(window.resetsAt ?? ""));
+    if (!account.capacityLimit?.model || account.capacityLimit.model === model)
+      deadlines.push(Date.parse(account.capacityLimit?.resetsAt ?? ""));
+    const future = deadlines.filter((at) => Number.isFinite(at) && at > this.now());
+    // Every blocking window must reset before this account can run again.
+    return future.length ? Math.max(...future) : null;
+  }
+
   choice(
     provider: AccountProvider,
     selection: AccountSelection,
@@ -425,14 +506,11 @@ export class ProviderAccountService {
       }
       return this.eligibility(account, unattended, true, model);
     }
-    const eligible = candidates
-      .filter(
-        (account) =>
-          account.ownership === "managed" &&
-          (!selection.accountIds || selection.accountIds.includes(account.id)),
-      )
-      .map((account) => ({ account, choice: this.eligibility(account, unattended, false, model) }))
-      .filter((entry) => entry.choice.accountId !== null);
+    const considered = this.automaticCandidates(provider, selection).map((account) => ({
+      account,
+      choice: this.eligibility(account, unattended, false, model),
+    }));
+    const eligible = considered.filter((entry) => entry.choice.accountId !== null);
     eligible.sort(
       (a, b) =>
         this.score(b.account, model) - this.score(a.account, model) ||
@@ -441,10 +519,48 @@ export class ProviderAccountService {
     return (
       eligible[0]?.choice ?? {
         accountId: null,
-        reason:
-          "No eligible account has capacity. Check account usage, reset times, and reserve settings.",
+        reason: considered.length
+          ? `No eligible account: ${[...new Set(considered.map((entry) => entry.choice.reason))].join(" ")}`
+          : "No enabled account is signed in. Check accounts in Settings.",
       }
     );
+  }
+
+  private automaticCandidates(
+    provider: AccountProvider,
+    selection: Extract<AccountSelection, { kind: "automatic" }>,
+  ): ProviderAccount[] {
+    const candidates = this.list().filter(
+      (account) =>
+        account.provider === provider &&
+        account.enabled &&
+        !account.removedAt &&
+        account.authState === "ready" &&
+        (!selection.accountIds || selection.accountIds.includes(account.id)),
+    );
+    // A host login can also have a managed context. Count its subscription once.
+    return candidates.filter(
+      (account) =>
+        account.ownership !== "external" ||
+        !candidates.some(
+          (other) =>
+            other.ownership === "managed" &&
+            other.identity?.key &&
+            other.identity.key === account.identity?.key,
+        ),
+    );
+  }
+
+  catalogChoice(provider: AccountProvider, selection?: AccountSelection): AccountChoice {
+    if (selection?.kind === "fixed")
+      return { accountId: selection.accountId, reason: "Fixed account" };
+    const available = this.preview(provider, selection);
+    if (available.accountId || selection?.kind === "default") return available;
+    // Reading model names does not consume a subscription's generation quota.
+    const account = this.automaticCandidates(provider, selection ?? { kind: "automatic" }).find(
+      (candidate) => !this.busy.has(candidate.id),
+    );
+    return account ? { accountId: account.id, reason: "Account model catalog" } : available;
   }
 
   preview(provider: string, selection?: AccountSelection, model?: string): AccountChoice {
@@ -507,7 +623,9 @@ export class ProviderAccountService {
     if (selection.kind !== "default") {
       // Fetch before admission; the synchronous decision and reservation below cannot interleave.
       const ids =
-        selection.kind === "fixed" ? [selection.accountId] : managed.map((account) => account.id);
+        selection.kind === "fixed"
+          ? [selection.accountId]
+          : this.automaticCandidates(provider, selection).map((account) => account.id);
       for (let offset = 0; offset < ids.length; offset += 2) {
         await Promise.all(ids.slice(offset, offset + 2).map((id) => this.usage(id)));
       }
@@ -581,13 +699,15 @@ export class ProviderAccountService {
       const policy = this.store.getPolicy();
       if (!policy)
         return no(
-          "Choose the unknown-usage policy in account settings before starting unattended work.",
+          "In account settings, choose whether scheduled and background agents may start when remaining usage cannot be checked.",
         );
       if (policy.unknownQuota === "pause-unattended")
-        return no("Unattended work waits until account usage is available.");
+        return no("Scheduled and background agents wait until remaining usage can be checked.");
     }
     let reason = fixed ? "Fixed account" : "Available capacity balanced with active agents";
-    if (unknown) reason = "Usage is unknown";
+    if (unknown)
+      reason =
+        "The provider has not reported remaining usage. You can still start an agent manually.";
     return { accountId: account.id, reason };
   }
 
@@ -624,10 +744,14 @@ export class ProviderAccountService {
     };
   }
 
-  private update(id: string, changes: Partial<ProviderAccount>): Promise<ProviderAccount> {
+  private update(
+    id: string,
+    changes: Partial<ProviderAccount>,
+    preserveUsage = false,
+  ): Promise<ProviderAccount> {
     const next = (this.updates.get(id) ?? Promise.resolve())
       .catch(() => undefined)
-      .then(() => this.applyUpdate(id, changes));
+      .then(() => this.applyUpdate(id, changes, preserveUsage));
     this.updates.set(id, next);
     void next
       .finally(() => {
@@ -640,6 +764,7 @@ export class ProviderAccountService {
   private async applyUpdate(
     id: string,
     changes: Partial<ProviderAccount>,
+    preserveUsage: boolean,
   ): Promise<ProviderAccount> {
     const account = this.store.get(id);
     const next = {
@@ -649,7 +774,16 @@ export class ProviderAccountService {
       updatedAt: new Date(this.now()).toISOString(),
     };
     await this.store.save(next);
-    this.usageCache.delete(id);
+    const cached = this.usageCache.get(id);
+    if (preserveUsage && cached?.revision === account.revision) {
+      this.usageCache.set(id, {
+        ...cached,
+        revision: next.revision,
+        usage: { ...cached.usage, displayName: next.label },
+      });
+    } else {
+      this.usageCache.delete(id);
+    }
     const saved = this.store.get(id);
     for (const listener of this.listeners) listener(saved);
     return saved;

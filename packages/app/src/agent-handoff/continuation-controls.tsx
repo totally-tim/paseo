@@ -1,3 +1,4 @@
+import { AgentRecoveryStatus } from "./recovery-status";
 import { AgentAccountLabel } from "@/provider-accounts/agent-label";
 import { useCallback, useState, type ReactNode } from "react";
 import { useShallow } from "zustand/shallow";
@@ -112,6 +113,7 @@ export function AgentContinuationControls({
   if (!supported) return children;
   return (
     <>
+      <AgentRecoveryStatus serverId={serverId} agentId={agentId} />
       <View style={styles.row}>
         {accountId ? <AgentAccountLabel serverId={serverId} accountId={accountId} /> : null}
         {from ? (

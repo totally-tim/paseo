@@ -1,3 +1,4 @@
+import type { AgentContinuationPolicy } from "@getpaseo/protocol/agent-continuation";
 import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { Keyboard, ScrollView, StyleSheet as RNStyleSheet, Text, View } from "react-native";
@@ -68,6 +69,7 @@ const DRAFT_CAPABILITIES: AgentCapabilityFlags = {
 
 interface AutoSubmitConfig {
   accountSelection?: AccountSelection;
+  continuationPolicy?: AgentContinuationPolicy;
   provider: string;
   modeId: string | null;
   model: string | null;
@@ -78,6 +80,7 @@ interface AutoSubmitConfig {
 function resolveAutoSubmitConfig(
   pending: {
     accountSelection?: AccountSelection;
+    continuationPolicy?: AgentContinuationPolicy;
     provider: string;
     modeId?: string | null;
     model?: string | null;
@@ -89,6 +92,7 @@ function resolveAutoSubmitConfig(
   return {
     provider: pending.provider,
     accountSelection: pending.accountSelection,
+    continuationPolicy: pending.continuationPolicy,
     modeId: pending.modeId ?? null,
     model: pending.model ?? null,
     thinkingOptionId: pending.thinkingOptionId ?? null,
@@ -160,6 +164,7 @@ async function submitDraftCreateRequest(input: {
   composerState: {
     selectedProvider: string | null;
     accountSelection?: AccountSelection;
+    continuationPolicy?: AgentContinuationPolicy;
     selectedMode: string;
     modeOptions: readonly { id: string }[];
     effectiveModelId: string | null;
@@ -199,6 +204,9 @@ async function submitDraftCreateRequest(input: {
   });
   const config = buildWorkspaceDraftAgentConfig({
     accountSelection: draftAccountSelection(autoSubmitConfig, composerState.accountSelection),
+    continuationPolicy: autoSubmitConfig
+      ? autoSubmitConfig.continuationPolicy
+      : composerState.continuationPolicy,
     provider,
     cwd,
     ...modeIdOverride,
@@ -238,6 +246,7 @@ function buildDraftAgentSnapshot(input: {
     selectedMode: string;
     selectedProvider: string | null;
     accountSelection?: AccountSelection;
+    continuationPolicy?: AgentContinuationPolicy;
     agentControls: { features?: Agent["features"] };
   };
   selectModelMessage: string;

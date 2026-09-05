@@ -79,6 +79,14 @@ async function startOrReplaceRun(
   return { iterator, replaced };
 }
 
+function assertPromptOwnership(
+  manager: AgentRunController,
+  agentId: string,
+  options?: StartAgentRunOptions,
+) {
+  manager.assertAgentCanAcceptPrompt?.(agentId, options?.runOptions?.continuationOperationId);
+}
+
 export async function startAgentRun(
   agentManager: AgentRunController,
   agentId: string,
@@ -86,7 +94,7 @@ export async function startAgentRun(
   logger: Logger,
   options?: StartAgentRunOptions,
 ): Promise<{ disposition: PromptDispatchDisposition }> {
-  agentManager.assertAgentCanAcceptPrompt?.(agentId);
+  assertPromptOwnership(agentManager, agentId, options);
   const snapshot = agentManager.getAgent(agentId);
   logger.trace(
     {

@@ -1,3 +1,4 @@
+import type { AgentContinuationPolicy } from "@getpaseo/protocol/agent-continuation";
 import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import type { AgentConfigApply, AgentProfile } from "@getpaseo/protocol/messages";
 
@@ -9,6 +10,7 @@ import type { AgentConfigApply, AgentProfile } from "@getpaseo/protocol/messages
  */
 export interface MaterializedAgentProfile {
   accountSelection?: AccountSelection;
+  continuationPolicy?: AgentContinuationPolicy;
   provider: string;
   /** Empty when the profile names no model, meaning "leave the model alone". */
   modelId: string;
@@ -25,6 +27,9 @@ export function materializeAgentProfile(profile: AgentProfile): MaterializedAgen
   return {
     provider: trimmed(profile.provider),
     ...(profile.accountSelection ? { accountSelection: profile.accountSelection } : {}),
+    ...(profile.continuationPolicy
+      ? { continuationPolicy: structuredClone(profile.continuationPolicy) }
+      : {}),
     modelId: trimmed(profile.model),
     modeId: trimmed(profile.modeId),
     thinkingOptionId: trimmed(profile.thinkingOptionId),

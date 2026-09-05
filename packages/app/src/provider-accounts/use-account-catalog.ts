@@ -37,10 +37,9 @@ function useAccountCatalogEntry(
   const accounts = useProviderAccounts(input.serverId);
   const client = useHostRuntimeClient(input.serverId);
   const selection = input.provider === provider ? input.selection : undefined;
-  const managed =
+  const providerAccounts =
     accounts.data?.accounts.filter(
-      (account) =>
-        account.provider === provider && account.ownership === "managed" && !account.removedAt,
+      (account) => account.provider === provider && !account.removedAt,
     ) ?? [];
   const enabled =
     accounts.supported &&
@@ -48,8 +47,9 @@ function useAccountCatalogEntry(
     input.entries?.find((entry) => entry.provider === provider)?.enabled !== false &&
     Boolean(client) &&
     selection?.kind !== "default" &&
-    (managed.some((account) => account.enabled) || selection?.kind === "fixed");
-  const revision = managed
+    (providerAccounts.some((account) => account.ownership === "managed" && account.enabled) ||
+      selection?.kind === "fixed");
+  const revision = providerAccounts
     .map((account) => `${account.id}:${account.revision}`)
     .sort()
     .join("|");
@@ -59,9 +59,8 @@ function useAccountCatalogEntry(
       "account-catalog",
       input.serverId,
       provider,
-      selection,
+      selection ?? { kind: "automatic" },
       input.cwd,
-      input.model,
       revision,
     ],
     enabled,
@@ -73,7 +72,6 @@ function useAccountCatalogEntry(
         provider,
         selection,
         cwd: input.cwd ?? undefined,
-        model: input.model,
       });
       if (result.error || !result.entry) throw new Error(result.error ?? result.reason);
       return result.entry;

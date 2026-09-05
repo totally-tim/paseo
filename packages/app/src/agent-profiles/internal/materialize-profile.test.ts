@@ -50,6 +50,14 @@ describe("materializeAgentProfile", () => {
       "claude-opus-5",
     );
   });
+
+  it("copies the explicit continuation policy and excludes it from running-agent edits", () => {
+    const saved = profile({ continuationPolicy: { accountIds: ["account-a", "account-b"] } });
+    const applied = materializeAgentProfile(saved);
+    saved.continuationPolicy!.accountIds.push("later-account");
+    expect(applied.continuationPolicy?.accountIds).toEqual(["account-a", "account-b"]);
+    expect(toAgentConfigApply(applied)).not.toHaveProperty("continuationPolicy");
+  });
 });
 
 describe("toAgentConfigApply", () => {

@@ -246,6 +246,47 @@ test("briefings stay bounded while paged history preserves all recorded context"
   expect(text).toContain("request 39");
 });
 
+test("successive briefings link earlier decisions without embedding generated prompts", async () => {
+  const { source, agentStorage } = await setup();
+  const record = await agentStorage.get(source.id);
+  if (!record) throw new Error("missing record");
+  record.labels[HANDOFF_FROM_AGENT_ID_LABEL] = "earlier-agent";
+  const rows: AgentTimelineRow[] = [
+    {
+      seq: 1,
+      timestamp: new Date().toISOString(),
+      item: {
+        type: "user_message",
+        clientMessageId: "handoff:earlier",
+        text: "Generated handoff instruction",
+      },
+    },
+    {
+      seq: 2,
+      timestamp: new Date().toISOString(),
+      item: {
+        type: "user_message",
+        clientMessageId: "continuation:reset",
+        text: "Generated resume instruction",
+      },
+    },
+    {
+      seq: 3,
+      timestamp: new Date().toISOString(),
+      item: { type: "user_message", text: "Keep the original acceptance criteria." },
+    },
+  ];
+  const context = buildHandoffContext({ source: record, rows });
+  expect(context.prompt).toContain(
+    "Read that agent's saved handoff for the original task and earlier decisions",
+  );
+  expect(context.prompt).toContain("earlier-agent");
+  expect(context.prompt).toContain("Keep the original acceptance criteria.");
+  expect(context.prompt).not.toContain("Generated handoff instruction");
+  expect(context.prompt).not.toContain("Generated resume instruction");
+  expect(context.rows).toEqual(rows);
+});
+
 test("the handoff skill tools use the same transition and expose context without runtime config", async () => {
   const { deps, source } = await setup();
   const providers = createProviderSnapshotManagerStub();

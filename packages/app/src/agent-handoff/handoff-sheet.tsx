@@ -66,6 +66,7 @@ export function AgentHandoffSheet({
         sourceAgentId: agentId,
         provider: selection.provider,
         accountSelection: selection.accountSelection,
+        continuationPolicy: selection.continuationPolicy,
         model: selection.modelId || undefined,
         modeId: selection.modeId || undefined,
         thinkingOptionId: selection.thinkingOptionId || undefined,

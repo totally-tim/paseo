@@ -1,3 +1,4 @@
+import { useSessionStore } from "@/stores/session-store";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Linking, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
@@ -137,6 +138,7 @@ export function ProviderAccountsSettingsSection({ serverId }: { serverId: string
         disabled={pending || !accounts.connected}
         size={size}
       />
+      <Text style={styles.text}>{t("providerAccounts.unknownUsageHelp")}</Text>
       {liveEditing ? (
         <AccountEditor
           key={liveEditing.id}
@@ -191,14 +193,48 @@ function AccountRow({
           {t("providerAccounts.next", { account: account.label })} · {next.reason}
         </Text>
       ) : null}
+      <AccountCapacityStatus account={account} usage={usage} />
       {usageEntry?.stale ? <Text style={styles.text}>{t("providerAccounts.stale")}</Text> : null}
       {usage ? <ProviderUsageCard usage={usage} compact showIdentity={false} /> : null}
     </View>
   );
 }
 
+function AccountCapacityStatus({
+  account,
+  usage,
+}: {
+  account: ProviderAccount;
+  usage: import("@getpaseo/protocol/messages").ProviderUsage | null | undefined;
+}) {
+  return (
+    <>
+      {account.capacityLimit ? (
+        <Text style={styles.text}>
+          {account.capacityLimit.model
+            ? `Capacity limit for ${account.capacityLimit.model}`
+            : "Account capacity exhausted"}
+          {account.capacityLimit.resetsAt
+            ? ` · Reported reset ${new Date(account.capacityLimit.resetsAt).toLocaleString()}`
+            : ""}
+        </Text>
+      ) : null}
+      {account.authState === "ready" &&
+      (!usage ||
+        (usage.status === "available" &&
+          !usage.windows.some((window) => typeof window.usedPct === "number"))) ? (
+        <Text style={styles.text}>Usage unknown</Text>
+      ) : null}
+    </>
+  );
+}
+
+function isVerifiedAccount(account: ProviderAccount): boolean {
+  return account.authState === "ready" && Boolean(account.identity);
+}
+
 function AccountEditor({
-  serverId: _serverId,
+  serverId,
   account,
   manage,
   refresh,
@@ -213,6 +249,11 @@ function AccountEditor({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
+  const host =
+    useSessionStore((state) => state.sessions[serverId]?.serverInfo?.hostname) ?? serverId;
+  const [advanced, setAdvanced] = useState(false);
+  const toggleAdvanced = useCallback(() => setAdvanced((value) => !value), []);
+  const verified = isVerifiedAccount(account);
   const size = useIsCompactFormFactor() ? "md" : "sm";
   const [form] = useState(() => openAccountForm(account));
   const state = useSyncExternalStore(form.subscribe, form.getState, form.getState);
@@ -284,10 +325,10 @@ function AccountEditor({
   const toggle = useCallback(() => {
     void operate({ kind: "edit", accountId: account.id, changes: { enabled: !account.enabled } });
   }, [account.id, account.enabled, operate]);
-  const save = useCallback(() => {
+  const save = useCallback(async () => {
     const operation = form.saveOperation();
-    if (operation) void operate(operation);
-  }, [form, operate]);
+    if (operation && (await operate(operation))) onClose();
+  }, [form, operate, onClose]);
   const cancelLogin = useCallback(() => {
     const login = activeLogin.current;
     if (login) void operate({ kind: "login-cancel", accountId: account.id, loginId: login.id });
@@ -323,13 +364,14 @@ function AccountEditor({
   const header = useMemo(() => ({ title: t("providerAccounts.manage") }), [t]);
   const footer = useMemo(
     () => (
-      <Button onPress={save} disabled={state.pending || !connected}>
+      <Button onPress={save} disabled={state.pending || !connected || !verified}>
         {t("providerAccounts.save")}
       </Button>
     ),
-    [save, state.pending, connected, t],
+    [save, state.pending, connected, verified, t],
   );
   const disabled = state.pending || !connected;
+  const loginDisabled = disabled || Boolean(state.login);
   return (
     <AdaptiveModalSheet
       visible
@@ -340,16 +382,12 @@ function AccountEditor({
       testID="account-editor"
     >
       <View style={styles.form}>
-        <Field label={t("providerAccounts.label")}>
-          <FormTextInput
-            initialValue={state.label}
-            onChangeText={form.setLabel}
-            maxLength={120}
-            editable={!disabled}
-            size={size}
-            testID="account-label"
-          />
-        </Field>
+        <Text style={styles.text}>Host: {host}</Text>
+        <Text style={styles.title}>
+          {verified
+            ? "Name this account and select its permitted use"
+            : "Connect and verify your account"}
+        </Text>
         <AccountStatus account={account} error={state.error} />
         <View style={styles.actions}>
           <Button variant="outline" size="sm" onPress={inspect} disabled={disabled}>
@@ -361,17 +399,12 @@ function AccountEditor({
                 variant="outline"
                 size="sm"
                 onPress={startLogin}
-                disabled={disabled || Boolean(state.login)}
+                disabled={loginDisabled}
                 testID="account-login"
               >
                 {t("providerAccounts.signIn")}
               </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onPress={logout}
-                disabled={disabled || Boolean(state.login)}
-              >
+              <Button variant="ghost" size="sm" onPress={logout} disabled={loginDisabled}>
                 {t("providerAccounts.signOut")}
               </Button>
             </>
@@ -422,31 +455,51 @@ function AccountEditor({
           </View>
         ) : null}
         {account.ownership === "managed" ? (
-          <AccountRemoval
-            account={account}
-            operate={operate}
-            disabled={disabled || Boolean(state.login)}
-          />
+          <AccountRemoval account={account} operate={operate} disabled={loginDisabled} />
         ) : null}
-        <Field label={t("providerAccounts.reserve")}>
-          <FormTextInput
-            initialValue={state.reserve}
-            onChangeText={form.setReserve}
-            keyboardType="decimal-pad"
-            editable={!disabled}
-            size={size}
-            testID="account-reserve"
-          />
-        </Field>
-        <View style={styles.actions}>
-          <Text style={styles.text}>{t("providerAccounts.interactiveOnly")}</Text>
-          <Switch
-            value={state.interactiveOnly}
-            onValueChange={form.setInteractiveOnly}
-            disabled={disabled}
-            accessibilityLabel={t("providerAccounts.interactiveOnly")}
-          />
-        </View>
+        {verified ? (
+          <>
+            <Field label={t("providerAccounts.label")}>
+              <FormTextInput
+                initialValue={state.label}
+                onChangeText={form.setLabel}
+                maxLength={120}
+                editable={!disabled}
+                size={size}
+                testID="account-label"
+              />
+            </Field>
+            <Text style={styles.text}>Permitted use</Text>
+            <View style={styles.actions}>
+              <Text style={styles.text}>{t("providerAccounts.interactiveOnly")}</Text>
+              <Switch
+                value={state.interactiveOnly}
+                onValueChange={form.setInteractiveOnly}
+                disabled={disabled}
+                accessibilityLabel={t("providerAccounts.interactiveOnly")}
+              />
+            </View>
+            <Text style={styles.text}>
+              Allow background work to make this account eligible for automatic continuation. Select
+              the exact permitted accounts in each profile.
+            </Text>
+            <Button variant="ghost" size="sm" onPress={toggleAdvanced}>
+              {advanced ? "Hide advanced options" : "Advanced options"}
+            </Button>
+            {advanced ? (
+              <Field label={t("providerAccounts.reserve")}>
+                <FormTextInput
+                  initialValue={state.reserve}
+                  onChangeText={form.setReserve}
+                  keyboardType="decimal-pad"
+                  editable={!disabled}
+                  size={size}
+                  testID="account-reserve"
+                />
+              </Field>
+            ) : null}
+          </>
+        ) : null}
       </View>
     </AdaptiveModalSheet>
   );

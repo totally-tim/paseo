@@ -236,7 +236,6 @@ function finalizeProcessedTimeline(input: {
   result: ProcessTimelineResponseOutput;
   synchronized: boolean;
   recoverGap: (agentId: string, cursor: { epoch: string; endSeq: number }) => void;
-  drainQueuedAgentMessage: (agentId: string) => void;
 }): void {
   for (const effect of input.result.sideEffects) {
     if (effect.type === "catch_up") input.recoverGap(input.agentId, effect.cursor);
@@ -248,9 +247,6 @@ function finalizeProcessedTimeline(input: {
     useCreateFlowStore
       .getState()
       .clearByAgent({ serverId: input.serverId, agentId: input.agentId });
-    const session = useSessionStore.getState().sessions[input.serverId];
-    const agent = session?.agents.get(input.agentId) ?? session?.agentDetails.get(input.agentId);
-    if (agent && agent.status !== "running") input.drainQueuedAgentMessage(input.agentId);
   }
   if (input.result.initResolution === "resolve") resolveInitDeferred(input.initKey);
 }
@@ -260,7 +256,6 @@ function applyAuthoritativeTimelineResponse(input: {
   payload: TimelineResponsePayload;
   cachedCursor?: AgentTimelineCursorState;
   recoverGap: (agentId: string, cursor: { epoch: string; endSeq: number }) => void;
-  drainQueuedAgentMessage: (agentId: string) => void;
 }): boolean {
   const { serverId, payload } = input;
   const agentId = payload.agentId;
@@ -300,7 +295,6 @@ function applyAuthoritativeTimelineResponse(input: {
     result,
     synchronized,
     recoverGap: input.recoverGap,
-    drainQueuedAgentMessage: input.drainQueuedAgentMessage,
   });
   return true;
 }
@@ -354,7 +348,6 @@ export function createViewedTimelineOwner(input: {
   serverId: string;
   replica: TimelineReplica;
   replaceDemandedAgentIds: (agentIds: string[]) => void;
-  drainQueuedAgentMessage: (agentId: string) => void;
   ports: ViewedTimelineOwnerPorts;
 }): ViewedTimelineOwner {
   const sync = createViewedTimelineSync({
@@ -378,7 +371,6 @@ export function createViewedTimelineOwner(input: {
         payload,
         cachedCursor: input.replica.readRange(payload.agentId),
         recoverGap: (agentId, cursor) => sync.recoverGap(agentId, cursor),
-        drainQueuedAgentMessage: input.drainQueuedAgentMessage,
       });
       if (accepted) input.replica.timelineUpdated(payload.agentId);
     },

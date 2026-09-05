@@ -2500,9 +2500,18 @@ export class DaemonClient {
   // Agent Lifecycle
   // ============================================================================
 
+  private requireContinuationSupport(config: AgentSessionConfig): void {
+    if (
+      config.continuationPolicy &&
+      this.lastServerInfoMessage?.features?.agentContinuation !== true
+    )
+      throw new Error("Update this host to start a profile with automatic continuation.");
+  }
+
   async createAgent(options: CreateAgentRequestOptions): Promise<AgentSnapshotPayload> {
     const requestId = this.createRequestId(options.requestId);
     const config = resolveAgentConfig(options);
+    this.requireContinuationSupport(config);
 
     const message = SessionInboundMessageSchema.parse({
       type: "create_agent_request",
@@ -2577,6 +2586,30 @@ export class DaemonClient {
     return this.sendNamespacedCorrelatedSessionRequest<"provider.accounts.manage.response">({
       requestId,
       message: { type: "provider.accounts.manage.request", operation },
+    });
+  }
+
+  async inspectAgentContinuation(agentId: string) {
+    return this.sendNamespacedCorrelatedSessionRequest<"agent.continuation.inspect.response">({
+      requestId: this.createRequestId(),
+      message: { type: "agent.continuation.inspect.request", agentId },
+    });
+  }
+
+  async cancelAgentContinuation(agentId: string) {
+    return this.sendNamespacedCorrelatedSessionRequest<"agent.continuation.cancel.response">({
+      requestId: this.createRequestId(),
+      message: { type: "agent.continuation.cancel.request", agentId },
+    });
+  }
+
+  async manageAgentQueue(
+    agentId: string,
+    operation: import("@getpaseo/protocol/messages").AgentQueueOperation,
+  ) {
+    return this.sendNamespacedCorrelatedSessionRequest<"agent.queue.manage.response">({
+      requestId: this.createRequestId(),
+      message: { type: "agent.queue.manage.request", agentId, operation },
     });
   }
 

@@ -1,3 +1,4 @@
+import type { AgentContinuationPolicy } from "@getpaseo/protocol/agent-continuation";
 import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import type {
   AgentFeature,
@@ -63,6 +64,7 @@ export interface AgentProfileFormSnapshot {
  */
 export interface AgentProfileFeatureRequest {
   accountSelection?: AccountSelection;
+  continuationPolicy?: AgentContinuationPolicy;
   provider: string;
   model?: string;
   modeId?: string;
@@ -80,6 +82,7 @@ export interface AgentProfileFormDisclosure {
 
 export interface AgentProfileFormState {
   accountSelection?: AccountSelection;
+  continuationPolicy?: AgentContinuationPolicy;
   mode: "create" | "edit";
   name: string;
   icon: string;
@@ -115,6 +118,7 @@ export interface AgentProfileFormState {
 }
 
 export interface AgentProfileFormModel {
+  setContinuationPolicy: (value: AgentContinuationPolicy | undefined) => void;
   setAccountSelection: (value: AccountSelection) => void;
   getState: () => AgentProfileFormState;
   subscribe: (listener: () => void) => () => void;
@@ -344,7 +348,11 @@ export function buildFeatureRequestKey(request: AgentProfileFeatureRequest | nul
 function buildSubmitValue(state: AgentProfileFormState): AgentProfileValue | null {
   const name = state.name.trim();
   const notes = state.notes.trim();
-  if (!name || !state.provider) {
+  if (
+    !name ||
+    !state.provider ||
+    (state.continuationPolicy && !state.continuationPolicy.accountIds.length)
+  ) {
     return null;
   }
   return {
@@ -353,6 +361,9 @@ function buildSubmitValue(state: AgentProfileFormState): AgentProfileValue | nul
     ...(state.color ? { color: state.color } : {}),
     provider: state.provider,
     ...(state.accountSelection ? { accountSelection: state.accountSelection } : {}),
+    ...(state.continuationPolicy
+      ? { continuationPolicy: structuredClone(state.continuationPolicy) }
+      : {}),
     ...(state.modelId ? { model: state.modelId } : {}),
     ...(state.modeId ? { modeId: state.modeId } : {}),
     ...(state.thinkingOptionId ? { thinkingOptionId: state.thinkingOptionId } : {}),
@@ -391,6 +402,7 @@ function buildInitialState(snapshot: AgentProfileFormSnapshot): AgentProfileForm
   return {
     mode: snapshot.mode,
     accountSelection: profile.accountSelection,
+    continuationPolicy: profile.continuationPolicy,
     name,
     icon: profile.icon ?? "",
     color: profile.color ?? "",
@@ -557,6 +569,8 @@ export function openAgentProfileForm(snapshot: AgentProfileFormSnapshot): AgentP
       resolvedFeatures = [];
       publish((current) => current);
     },
+    setContinuationPolicy: (value) =>
+      publish((current) => ({ ...current, continuationPolicy: value })),
     setAccountSelection: (value) => publish((current) => ({ ...current, accountSelection: value })),
     setName: (value) => publish((current) => ({ ...current, name: value })),
     setAppearance: (value) =>
@@ -574,6 +588,7 @@ export function openAgentProfileForm(snapshot: AgentProfileFormSnapshot): AgentP
           ...current,
           provider: providerId,
           accountSelection: undefined,
+          continuationPolicy: undefined,
           providerDisplay: display,
           modelId: "",
           modelDisplay: null,

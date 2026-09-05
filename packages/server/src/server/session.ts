@@ -1,3 +1,4 @@
+import { handleContinuationRequest } from "./agent-continuation/session.js";
 import { handleAccountCatalog } from "./provider-accounts/account-catalog.js";
 import { handleAccountList, handleAccountOperation } from "./provider-accounts/account-session.js";
 import equal from "fast-deep-equal";
@@ -696,6 +697,7 @@ export class Session {
   private readonly pushNotifications: PushNotifications;
   private readonly pluginRuntime: SessionOptions["pluginRuntime"];
   private readonly orchestrationSkills: SessionOptions["orchestrationSkills"];
+  private unsubscribeContinuation?: () => void;
   private unsubscribeAgentEvents: (() => void) | null = null;
   private unsubscribeProjectMutations: (() => void) | null = null;
   private unsubscribePluginChanges: (() => void) | null = null;
@@ -1694,10 +1696,16 @@ export class Session {
   }
 
   private subscribeToAgentEvents(): void {
+    this.unsubscribeContinuation?.();
     if (this.unsubscribeAgentEvents) {
       this.unsubscribeAgentEvents();
     }
 
+    this.unsubscribeContinuation = this.agentManager.continuations?.subscribe(
+      (rootAgentId, agentId) => {
+        this.emit({ type: "agent.continuation.changed", payload: { rootAgentId, agentId } });
+      },
+    );
     this.unsubscribeAgentEvents = this.agentManager.subscribe(
       (event) => {
         if (event.type === "timeline_replacement") {
@@ -1826,6 +1834,7 @@ export class Session {
     const storedRecord = await this.agentStorage.get(payload.id);
     payload.title = storedRecord?.title ?? null;
     payload.archivedAt = storedRecord?.archivedAt ?? null;
+    payload.continuation = this.agentManager.continuations?.statusFor(payload.id);
     return payload;
   }
 
@@ -1837,7 +1846,10 @@ export class Session {
     record: StoredAgentRecord,
     registeredProviderIds = new Set(this.providerSnapshotManager.listRegisteredProviderIds()),
   ): AgentSnapshotPayload {
-    return buildStoredAgentPayload(record, registeredProviderIds);
+    return {
+      ...buildStoredAgentPayload(record, registeredProviderIds),
+      continuation: this.agentManager.continuations?.statusFor(record.id),
+    };
   }
 
   private isProviderVisibleToClient(provider: string): boolean {
@@ -2340,6 +2352,12 @@ export class Session {
         return handleAccountOperation(this.agentManager.accounts, msg, (message) =>
           this.emit(message),
         );
+      case "agent.continuation.inspect.request":
+      case "agent.continuation.cancel.request":
+      case "agent.queue.manage.request":
+        return handleContinuationRequest(this.agentManager.continuations, msg, (message) =>
+          this.emit(message),
+        );
       case "agent.handoff.start.request":
         return this.handleHandoffAgentRequest(msg);
       default:
@@ -2806,6 +2824,7 @@ export class Session {
   }
 
   private async handleDeleteAgentRequest(agentId: string, requestId: string): Promise<void> {
+    await this.agentManager.cancelContinuation(agentId);
     this.sessionLogger.info({ agentId }, `Deleting agent ${agentId} from registry`);
 
     const knownWorkspaceId =
@@ -4402,6 +4421,7 @@ export class Session {
         const sessionConfig: AgentSessionConfig = {
           provider: draftConfig.provider,
           accountSelection: draftConfig.accountSelection,
+          continuationPolicy: draftConfig.continuationPolicy,
           cwd: expandTilde(draftConfig.cwd),
           ...(draftConfig.modeId ? { modeId: draftConfig.modeId } : {}),
           ...(draftConfig.model ? { model: draftConfig.model } : {}),
@@ -7890,6 +7910,7 @@ export class Session {
     this.sessionLogger.trace({}, "agent.session.lifecycle.cleanup");
     this.isCleanedUp = true;
 
+    this.unsubscribeContinuation?.();
     if (this.unsubscribeAgentEvents) {
       this.unsubscribeAgentEvents();
       this.unsubscribeAgentEvents = null;

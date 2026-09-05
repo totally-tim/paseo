@@ -1,3 +1,4 @@
+import type { AgentContinuationPolicy } from "@getpaseo/protocol/agent-continuation";
 import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import { isDeepStrictEqual } from "node:util";
 import { randomUUID } from "node:crypto";
@@ -12,7 +13,7 @@ import { startCreatedAgentInitialPrompt } from "./agent-prompt.js";
 import { ensureAgentLoaded } from "./agent-loading.js";
 import type { AgentHandoffState } from "./handoff-state.js";
 
-interface HandoffDependencies {
+export interface HandoffDependencies {
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   providerSnapshotManager: Pick<ProviderSnapshotManager, "resolveCreateConfig">;
@@ -20,7 +21,16 @@ interface HandoffDependencies {
   getWorkspace: (id: string) => Promise<{ cwd: string; archivedAt?: string | null } | null>;
 }
 
+export interface HandoffExecution {
+  operationId?: string;
+  unattended?: boolean;
+  preserveConfiguration?: boolean;
+  assertCurrent?: () => Promise<void>;
+  onCreated?: (successor: StoredAgentRecord) => Promise<void>;
+}
+
 export interface HandoffAgentInput {
+  continuationPolicy?: AgentContinuationPolicy;
   accountSelection?: AccountSelection;
   sourceAgentId: string;
   provider: string;
@@ -35,6 +45,7 @@ export function handoffAgent(
   deps: HandoffDependencies,
   {
     sourceAgentId,
+    continuationPolicy,
     accountSelection,
     provider,
     model,
@@ -43,10 +54,12 @@ export function handoffAgent(
     featureValues,
     briefing,
   }: HandoffAgentInput,
+  execution?: HandoffExecution,
 ): Promise<StoredAgentRecord> {
   // Compare the selection, not transport fields such as an RPC request ID.
   const input = {
     sourceAgentId,
+    continuationPolicy,
     accountSelection,
     provider,
     model,
@@ -55,9 +68,12 @@ export function handoffAgent(
     featureValues,
     briefing,
   };
-  return deps.agentStorage.runHandoff(input.sourceAgentId, input, () =>
-    performHandoff(deps, input),
-  );
+  // Acquire task ownership before the handoff lock in both manual and automatic paths.
+  const run = (context?: HandoffExecution) =>
+    deps.agentStorage.runHandoff(sourceAgentId, input, () => performHandoff(deps, input, context));
+  return !execution && deps.agentManager.continuations
+    ? deps.agentManager.continuations.manualHandoff(sourceAgentId, run)
+    : run(execution);
 }
 
 function assertHandoffSelection(
@@ -77,37 +93,76 @@ function assertHandoffSelection(
   }
 }
 
+async function resolveHandoffConfig(
+  deps: HandoffDependencies,
+  input: HandoffAgentInput,
+  source: StoredAgentRecord,
+  execution?: HandoffExecution,
+): Promise<AgentSessionConfig> {
+  const selected = execution?.preserveConfiguration ? effectiveHandoffInput(source, input) : input;
+  const resolved = await deps.providerSnapshotManager.resolveCreateConfig({
+    cwd: source.cwd,
+    provider: selected.provider,
+    accountSelection: selected.accountSelection,
+    model: selected.model,
+    requestedMode: selected.modeId,
+    featureValues: selected.featureValues,
+    parent: null,
+    // Automatic account admission does not grant a broader provider permission mode.
+    unattended: false,
+  });
+  return {
+    provider: selected.provider,
+    accountSelection: selected.accountSelection,
+    continuationPolicy: selected.continuationPolicy,
+    cwd: source.cwd,
+    model: selected.model,
+    modeId: resolved.modeId,
+    thinkingOptionId: selected.thinkingOptionId,
+    featureValues: resolved.featureValues,
+    ...(execution?.preserveConfiguration ? preservedOptions(source) : {}),
+    systemPrompt: source.config?.systemPrompt ?? undefined,
+    mcpServers: source.config?.mcpServers ?? undefined,
+  };
+}
+
+function preservedOptions(
+  source: StoredAgentRecord,
+): Pick<AgentSessionConfig, "toolPolicy" | "providerOptions"> {
+  return {
+    toolPolicy: source.config?.toolPolicy ?? undefined,
+    providerOptions: source.config?.providerOptions ?? undefined,
+  };
+}
+
+function effectiveHandoffInput(
+  source: StoredAgentRecord,
+  input: HandoffAgentInput,
+): HandoffAgentInput {
+  return {
+    ...input,
+    model: source.runtimeInfo?.model ?? source.config?.model ?? input.model,
+    modeId: source.lastModeId ?? source.config?.modeId ?? input.modeId,
+    thinkingOptionId:
+      source.runtimeInfo?.thinkingOptionId ??
+      source.config?.thinkingOptionId ??
+      input.thinkingOptionId,
+    featureValues: source.config?.featureValues ?? input.featureValues,
+  };
+}
+
 async function prepareHandoff(
   deps: HandoffDependencies,
   input: HandoffAgentInput,
   source: StoredAgentRecord & { workspaceId: string },
+  execution?: HandoffExecution,
 ): Promise<AgentHandoffState> {
   const { agentManager, agentStorage } = deps;
   let state = await agentStorage.getHandoff(source.id);
   const savedSuccessor = state ? await agentStorage.get(state.successorAgentId) : null;
   if (savedSuccessor) assertHandoffSelection(savedSuccessor, state, input);
   if (!state || (state.phase === "prepared" && !savedSuccessor)) {
-    const resolved = await deps.providerSnapshotManager.resolveCreateConfig({
-      cwd: source.cwd,
-      provider: input.provider,
-      accountSelection: input.accountSelection,
-      model: input.model,
-      requestedMode: input.modeId,
-      featureValues: input.featureValues,
-      parent: null,
-      unattended: false,
-    });
-    const config: AgentSessionConfig = {
-      provider: input.provider,
-      accountSelection: input.accountSelection,
-      cwd: source.cwd,
-      model: input.model,
-      modeId: resolved.modeId,
-      thinkingOptionId: input.thinkingOptionId,
-      featureValues: resolved.featureValues,
-      systemPrompt: source.config?.systemPrompt ?? undefined,
-      mcpServers: source.config?.mcpServers ?? undefined,
-    };
+    const config = await resolveHandoffConfig(deps, input, source, execution);
     const rows = await agentManager.readHandoffTimeline(source.id);
     if (!rows.length && source.lastUserMessageAt) {
       throw new Error("Open the source conversation to load its saved history before continuing.");
@@ -136,16 +191,26 @@ async function prepareHandoff(
 async function performHandoff(
   deps: HandoffDependencies,
   input: HandoffAgentInput,
+  execution: HandoffExecution = {},
 ): Promise<StoredAgentRecord> {
   const { agentManager, agentStorage, logger } = deps;
+  const assertCurrent = execution.assertCurrent ?? (() => Promise.resolve());
   const source = await agentStorage.get(input.sourceAgentId);
   if (!source || source.internal) throw new Error("Source agent not found");
-  if (source.archivedAt) throw new Error("Restore the source agent before continuing its work");
+  await assertSourceRestored(source, execution, agentStorage);
   if (!source.workspaceId) throw new Error("Source agent has no workspace");
   if (source.owner) throw new Error("This agent is managed by an execution service");
+  await assertCurrent();
   await assertWorkspaceActive(deps, source.workspaceId);
-  let state = await prepareHandoff(deps, input, { ...source, workspaceId: source.workspaceId });
-  await agentManager.stopForHandoff(source.id, state.successorAgentId);
+  let state = await prepareHandoff(
+    deps,
+    input,
+    { ...source, workspaceId: source.workspaceId },
+    execution,
+  );
+  await assertCurrent();
+  await stopHandoffSource(deps, source, state.successorAgentId);
+  await assertCurrent();
   let successor = await agentStorage.get(state.successorAgentId);
   if (!successor) {
     if (state.phase === "started" || state.phase === "dispatching") {
@@ -162,8 +227,10 @@ async function performHandoff(
     });
     state = { ...state, ...context };
     await agentStorage.saveHandoff(state);
+    await assertCurrent();
     const created = await agentManager.createAgent(state.config, state.successorAgentId, {
       workspaceId: state.workspaceId,
+      unattended: execution.unattended,
       initialTitle: state.title,
       labels: { [HANDOFF_FROM_AGENT_ID_LABEL]: source.id },
     });
@@ -175,6 +242,10 @@ async function performHandoff(
     await agentStorage.saveHandoff(state);
   }
 
+  const linked = await agentStorage.get(state.successorAgentId);
+  if (linked) await execution.onCreated?.(linked);
+  await assertCurrent();
+
   if (state.phase === "prepared" || state.phase === "created") {
     await assertWorkspaceActive(deps, state.workspaceId);
     const currentTarget = await agentStorage.get(state.successorAgentId);
@@ -185,12 +256,16 @@ async function performHandoff(
     // the existing successor stays available for the user to inspect and prompt.
     state = { ...state, phase: "dispatching" };
     await agentStorage.saveHandoff(state);
+    await assertCurrent();
     await startCreatedAgentInitialPrompt({
       agentManager,
       agentId: state.successorAgentId,
       prompt: state.prompt,
       logger,
-      runOptions: { clientMessageId: `handoff:${source.id}` },
+      runOptions: {
+        clientMessageId: `handoff:${source.id}`,
+        continuationOperationId: execution.operationId,
+      },
     });
     state = { ...state, phase: "started" };
     await agentStorage.saveHandoff(state);
@@ -203,6 +278,25 @@ async function performHandoff(
     );
   }
   return successor;
+}
+
+async function assertSourceRestored(
+  source: StoredAgentRecord,
+  execution: HandoffExecution,
+  storage: AgentStorage,
+): Promise<void> {
+  if (source.archivedAt && !(execution.operationId && (await storage.getHandoff(source.id))))
+    throw new Error("Restore the source agent before continuing its work");
+}
+
+async function stopHandoffSource(
+  deps: HandoffDependencies,
+  source: StoredAgentRecord,
+  successorId: string,
+): Promise<void> {
+  if (!source.archivedAt) await deps.agentManager.stopForHandoff(source.id, successorId);
+  else if (!(await deps.agentStorage.get(successorId)))
+    throw new Error("The archived source has no continuation to resume");
 }
 
 async function assertWorkspaceActive(

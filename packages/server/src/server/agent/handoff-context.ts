@@ -10,7 +10,16 @@ export function buildHandoffContext(input: {
   briefing?: string;
   contextPath?: string;
 }): { prompt: string; rows: AgentTimelineRow[] } {
-  const items = projectTimelineRows({ rows: input.rows, mode: "projected" }).map((row) => row.item);
+  const items = projectTimelineRows({ rows: input.rows, mode: "projected" })
+    .map((row) => row.item)
+    .filter(
+      (item) =>
+        !(
+          item.type === "user_message" &&
+          (item.clientMessageId?.startsWith("handoff:") ||
+            item.clientMessageId?.startsWith("continuation:"))
+        ),
+    );
   const firstRequest = items.find((item) => item.type === "user_message");
   const recent = curateAgentActivity(items.slice(-20), {
     maxItems: 20,
@@ -29,7 +38,7 @@ export function buildHandoffContext(input: {
   const previousSource = input.source.labels[HANDOFF_FROM_AGENT_ID_LABEL];
   if (previousSource)
     sections.push(
-      `This source was itself a continuation of Paseo agent ${previousSource}. If its initial prompt did not arrive, read that agent's saved handoff to recover the original task.`,
+      `This source was itself a continuation of Paseo agent ${previousSource}. Read that agent's saved handoff for the original task and earlier decisions. Follow earlier continuation links as needed.`,
     );
   if (input.contextPath)
     sections.push(

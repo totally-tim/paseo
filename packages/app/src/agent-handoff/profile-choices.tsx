@@ -39,6 +39,7 @@ function ProfileChoice({
       <View style={styles.content}>
         <Text style={styles.name}>{row.name}</Text>
         <Text style={styles.summary}>{row.summary}</Text>
+        {row.accountSummary ? <Text style={styles.summary}>{row.accountSummary}</Text> : null}
       </View>
     </Pressable>
   );

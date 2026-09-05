@@ -63,20 +63,22 @@ export function attachAgentStoragePersistence(
 }
 
 export function buildConfigOverrides(record: StoredAgentRecord): Partial<AgentSessionConfig> {
+  const config = record.config ?? {};
   return stripInternalPaseoMcpServer({
     provider: record.provider,
     cwd: record.cwd,
-    accountId: record.config?.accountId,
-    accountSelection: record.config?.accountSelection,
-    accountSelectionReason: record.config?.accountSelectionReason,
-    modeId: record.config?.modeId ?? undefined,
-    model: record.config?.model ?? undefined,
-    thinkingOptionId: record.config?.thinkingOptionId ?? undefined,
-    featureValues: record.config?.featureValues ?? undefined,
-    providerOptions: record.config?.providerOptions ?? undefined,
-    toolPolicy: record.config?.toolPolicy ?? undefined,
-    systemPrompt: record.config?.systemPrompt ?? undefined,
-    mcpServers: record.config?.mcpServers ?? undefined,
+    accountId: config.accountId,
+    accountSelection: config.accountSelection,
+    continuationPolicy: config.continuationPolicy,
+    accountSelectionReason: config.accountSelectionReason,
+    modeId: config.modeId ?? undefined,
+    model: config.model ?? undefined,
+    thinkingOptionId: config.thinkingOptionId ?? undefined,
+    featureValues: config.featureValues ?? undefined,
+    providerOptions: config.providerOptions ?? undefined,
+    toolPolicy: config.toolPolicy ?? undefined,
+    systemPrompt: config.systemPrompt ?? undefined,
+    mcpServers: config.mcpServers ?? undefined,
   });
 }
 
@@ -93,6 +95,7 @@ export function buildSessionConfig(
     cwd: record.cwd,
     accountId: overrides.accountId,
     accountSelection: overrides.accountSelection,
+    continuationPolicy: overrides.continuationPolicy,
     accountSelectionReason: overrides.accountSelectionReason,
     modeId: overrides.modeId,
     model: overrides.model,

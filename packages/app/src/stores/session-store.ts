@@ -22,7 +22,6 @@ import {
   type MessageSubmissionRejectionOutcome,
 } from "@/composer/submission/model";
 import type { PendingPermission } from "@/types/shared";
-import type { ComposerAttachment } from "@/attachments/types";
 import type { AgentLifecycleStatus } from "@getpaseo/protocol/agent-lifecycle";
 import type {
   AgentPermissionRequest,
@@ -421,12 +420,6 @@ export interface SessionState {
 
   // File explorer
   fileExplorer: Map<string, AgentFileExplorerState>;
-
-  // Queued messages
-  queuedMessages: Map<
-    string,
-    Array<{ id: string; text: string; attachments: ComposerAttachment[] }>
-  >;
 }
 
 // Global store state
@@ -605,16 +598,6 @@ interface SessionStoreActions {
       | ((prev: Map<string, AgentFileExplorerState>) => Map<string, AgentFileExplorerState>),
   ) => void;
 
-  // Queued messages
-  setQueuedMessages: (
-    serverId: string,
-    value:
-      | Map<string, Array<{ id: string; text: string; attachments: ComposerAttachment[] }>>
-      | ((
-          prev: Map<string, Array<{ id: string; text: string; attachments: ComposerAttachment[] }>>,
-        ) => Map<string, Array<{ id: string; text: string; attachments: ComposerAttachment[] }>>),
-  ) => void;
-
   // Hydration
   setHasHydratedAgents: (serverId: string, hydrated: boolean) => void;
   setHasHydratedWorkspaces: (serverId: string, hydrated: boolean) => void;
@@ -667,7 +650,6 @@ function createInitialSessionState(
     restoringWorkspaces: new Map(),
     pendingPermissions: new Map(),
     fileExplorer: new Map(),
-    queuedMessages: new Map(),
   };
 }
 
@@ -1839,27 +1821,6 @@ export const useSessionStore = create<SessionStore>()(
             sessions: {
               ...prev.sessions,
               [serverId]: { ...session, fileExplorer: nextState },
-            },
-          };
-        });
-      },
-
-      // Queued messages
-      setQueuedMessages: (serverId, value) => {
-        set((prev) => {
-          const session = prev.sessions[serverId];
-          if (!session) {
-            return prev;
-          }
-          const nextValue = typeof value === "function" ? value(session.queuedMessages) : value;
-          if (session.queuedMessages === nextValue) {
-            return prev;
-          }
-          return {
-            ...prev,
-            sessions: {
-              ...prev.sessions,
-              [serverId]: { ...session, queuedMessages: nextValue },
             },
           };
         });
