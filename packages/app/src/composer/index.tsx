@@ -1438,6 +1438,10 @@ function ComposerContentImpl({
   const hasAgent = agentState.status !== null;
 
   const queueSubmissionInFlight = useRef(false);
+  const userInputRef = useRef(userInput);
+  userInputRef.current = userInput;
+  const selectedAttachmentsRef = useRef(selectedAttachments);
+  selectedAttachmentsRef.current = selectedAttachments;
   const queueMessage = useCallback(
     async (queuedMessage: string, queuedAttachments: ComposerAttachment[]) => {
       if (queueSubmissionInFlight.current) throw new Error("This message is already being queued.");
@@ -1458,12 +1462,19 @@ function ComposerContentImpl({
           kind: "enqueue",
           message: { id: attempt.id, text: queuedMessage, images, attachments: wire.attachments },
         });
-        replaceUserInput("");
-        setSelectedAttachments([]);
-        resetSuppression();
+        // The composer stays editable while the host answers. Anything typed since is a new
+        // draft the user never submitted, so clearing it would throw those characters away.
+        const edited =
+          userInputRef.current !== queuedMessage ||
+          selectedAttachmentsRef.current.length !== queuedAttachments.length;
+        if (!edited) {
+          replaceUserInput("");
+          setSelectedAttachments([]);
+          resetSuppression();
+          clearDraft("sent");
+          await flushDraftPersistStorage();
+        }
         clearSentAttachments(queuedAttachments);
-        clearDraft("sent");
-        await flushDraftPersistStorage();
         await attempt.finish();
       } finally {
         queueSubmissionInFlight.current = false;

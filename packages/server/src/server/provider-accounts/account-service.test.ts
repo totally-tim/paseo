@@ -8,7 +8,11 @@ import type {
 } from "@getpaseo/protocol/provider-accounts";
 import type { ProviderUsage } from "../messages.js";
 import { ProviderAccountStore } from "./account-store.js";
-import { ProviderAccountService, type AccountBackend } from "./account-service.js";
+import {
+  AccountHelperShutdownError,
+  ProviderAccountService,
+  type AccountBackend,
+} from "./account-service.js";
 
 class TestAccountBackend implements AccountBackend {
   identity: ProviderAccountIdentity | null = null;
@@ -639,4 +643,28 @@ it("follows the host CLI login when the user signs in as somebody else", async (
     authState: "ready",
     identity: { key: "codex:second" },
   });
+});
+
+it("keeps the account locked when a login helper will not shut down", async () => {
+  const { service, store, add } = await setup();
+  const { account, backend } = await add("stranded");
+  vi.spyOn(backend, "login").mockRejectedValue(new AccountHelperShutdownError());
+  const login = await service.startLogin(account.id);
+  expect(login.accountId).toBe(account.id);
+  await vi.waitFor(() => expect(store.get(account.id)).toMatchObject({ authState: "error" }));
+  // The helper may still hold the credential files, so nothing may change this login.
+  await expect(service.logout(account.id)).rejects.toThrow();
+  await expect(service.startLogin(account.id)).rejects.toThrow();
+});
+
+it("keeps the running login visible through a status check and a submitted code", async () => {
+  const { service, add } = await setup();
+  const { account, backend } = await add("polling");
+  backend.identity = null;
+  const started = await service.startLogin(account.id);
+  expect(service.activeLogin(account.id)).toMatchObject({ id: started.id });
+  expect(service.activeLogin(account.id, started.id)).toMatchObject({ id: started.id });
+  expect(service.activeLogin(account.id, "other-login")).toBeNull();
+  await service.cancelLogin(account.id, started.id);
+  expect(service.activeLogin(account.id)).toBeNull();
 });

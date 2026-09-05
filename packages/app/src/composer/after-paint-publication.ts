@@ -25,6 +25,16 @@ export const browserAfterPaintScheduler: AfterPaintScheduler = {
   },
 };
 
+const live = new Set<AfterPaintPublication<unknown>>();
+
+/**
+ * Publish everything the editors have staged for after the next paint. A reader that needs the
+ * user's current text — a continuation moving a draft, for one — cannot wait for that frame.
+ */
+export function flushStagedEditorInput(): void {
+  for (const publication of Array.from(live)) publication.flush();
+}
+
 export class AfterPaintPublication<T> {
   private pending: T | null = null;
   private cancelScheduled: (() => void) | null = null;
@@ -32,7 +42,14 @@ export class AfterPaintPublication<T> {
   constructor(
     private readonly publish: (value: T) => void,
     private readonly scheduler: AfterPaintScheduler = browserAfterPaintScheduler,
-  ) {}
+  ) {
+    live.add(this as AfterPaintPublication<unknown>);
+  }
+
+  /** Stop tracking this publication for global flushes. */
+  dispose(): void {
+    live.delete(this as AfterPaintPublication<unknown>);
+  }
 
   stage(value: T): void {
     this.pending = value;

@@ -3,13 +3,18 @@ import type { AgentContinuationSnapshot } from "@getpaseo/protocol/messages";
 
 vi.mock("@react-native-async-storage/async-storage", () => ({
   default: {
-    getItem: async () => null,
-    setItem: async () => {},
-    removeItem: async () => {},
+    getItem: async (key: string) => local.storage.get(key) ?? null,
+    setItem: async (key: string, value: string) => {
+      local.storage.set(key, value);
+    },
+    removeItem: async (key: string) => {
+      local.storage.delete(key);
+    },
   },
 }));
 vi.mock("@/data/query-client", () => ({ queryClient: { invalidateQueries: vi.fn() } }));
 const local = vi.hoisted(() => ({
+  storage: new Map<string, string>(),
   knownAgents: new Map<string, object>(),
   drafts: new Map<string, { text: string; attachments: never[] }>(),
   flush: vi.fn(async () => {}),
@@ -58,6 +63,7 @@ const snapshot: AgentContinuationSnapshot = {
   },
 };
 beforeEach(() => {
+  local.storage.clear();
   local.knownAgents.clear();
   local.knownAgents.set("successor", {});
   local.drafts.clear();
@@ -139,6 +145,7 @@ test("a successor opened by directory reconciliation does not replace the origin
 });
 
 test("an event that precedes the directory waits before retargeting", async () => {
+  local.storage.clear();
   local.knownAgents.clear();
   await retargetContinuationTab("host", "source", snapshot);
   expect(
@@ -192,4 +199,117 @@ test("a history tab stays historical after a later account transition", async ()
     },
   });
   expect(collectAllTabs(layout.root)[0].target).toEqual({ kind: "agent", agentId: "source" });
+});
+
+test("a tab opened while the previous successor was current follows the next transition", async () => {
+  // A -> B at 1000, the user opened B's task tab at 2000, B -> C at 3000.
+  const layout = useWorkspaceLayoutStore.getState().layoutByWorkspace[key];
+  collectAllTabs(layout.root)[0].createdAt = 2000;
+  local.knownAgents.set("third", {});
+  await retargetContinuationTab("host", "source", {
+    rootAgentId: "root",
+    agentId: "third",
+    queuedMessages: [],
+    retiredAt: new Date(3000).toISOString(),
+    continuation: {
+      rootAgentId: "root",
+      agentId: "third",
+      previousAgentId: "source",
+      status: "active",
+      reason: "Capacity limit",
+      updatedAt: new Date(3000).toISOString(),
+      firstTransitionedAt: new Date(1000).toISOString(),
+      transitionedAt: new Date(3000).toISOString(),
+    },
+  });
+  const next = useWorkspaceLayoutStore.getState().layoutByWorkspace[key];
+  expect(collectAllTabs(next.root)[0].target).toEqual({ kind: "agent", agentId: "third" });
+});
+
+test("an unresolved queue attempt follows the task so a retry reuses its message id", async () => {
+  local.storage.set(
+    "paseo:queue-submission:host:source",
+    JSON.stringify({ id: "msg-1", content: "Queued instruction" }),
+  );
+  await retargetContinuationTab("host", "source", snapshot);
+  expect(local.storage.get("paseo:queue-submission:host:source")).toBeUndefined();
+  expect(local.storage.get("paseo:queue-submission:host:successor")).toBe(
+    JSON.stringify({ id: "msg-1", content: "Queued instruction" }),
+  );
+});
+
+test("removing a duplicate successor tab does not move focus to another pane", async () => {
+  useWorkspaceLayoutStore.setState({
+    layoutByWorkspace: {
+      [key]: {
+        focusedPaneId: "left",
+        root: {
+          kind: "group",
+          group: {
+            id: "root",
+            direction: "horizontal",
+            sizes: [0.5, 0.5],
+            children: [
+              {
+                kind: "pane",
+                pane: {
+                  id: "left",
+                  tabIds: ["task"],
+                  focusedTabId: "task",
+                  tabs: [
+                    { tabId: "task", target: { kind: "agent", agentId: "source" }, createdAt: 500 },
+                  ],
+                },
+              },
+              {
+                kind: "pane",
+                pane: {
+                  id: "right",
+                  tabIds: ["duplicate", "other"],
+                  focusedTabId: "duplicate",
+                  tabs: [
+                    {
+                      tabId: "duplicate",
+                      target: { kind: "agent", agentId: "successor" },
+                      createdAt: 600,
+                    },
+                    {
+                      tabId: "other",
+                      target: { kind: "agent", agentId: "another" },
+                      createdAt: 600,
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      } as never,
+    },
+  });
+  await retargetContinuationTab("host", "source", snapshot);
+  const layout = useWorkspaceLayoutStore.getState().layoutByWorkspace[key];
+  expect(layout.focusedPaneId).toBe("left");
+  expect(collectAllTabs(layout.root).map((tab) => [tab.tabId, tab.target.kind])).toEqual([
+    ["task", "agent"],
+    ["other", "agent"],
+  ]);
+});
+
+test("continuation protection ends when the successor is archived elsewhere", async () => {
+  await retargetContinuationTab("host", "source", snapshot);
+  expect(useWorkspaceLayoutStore.getState().continuationPendingIdsByWorkspace[key]).toContain(
+    "successor",
+  );
+  useWorkspaceLayoutStore.getState().reconcileTabs(key, {
+    agentsHydrated: true,
+    terminalsHydrated: true,
+    activeAgentIds: ["another"],
+    autoOpenAgentIds: ["another"],
+    knownAgentIds: ["another"],
+    standaloneTerminalIds: [],
+  });
+  expect(
+    useWorkspaceLayoutStore.getState().continuationPendingIdsByWorkspace[key] ?? [],
+  ).not.toContain("successor");
 });

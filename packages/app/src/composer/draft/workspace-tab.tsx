@@ -308,6 +308,12 @@ function buildDraftInitialValues(input: {
     modeId: input.initialSetup.modeId,
     model: input.initialSetup.model,
     thinkingOptionId: input.initialSetup.thinkingOptionId,
+    ...(input.initialSetup.accountSelection
+      ? { accountSelection: input.initialSetup.accountSelection }
+      : {}),
+    ...(input.initialSetup.continuationPolicy
+      ? { continuationPolicy: input.initialSetup.continuationPolicy }
+      : {}),
   };
 }
 

@@ -195,6 +195,7 @@ export function useAgentInputDraft(input: UseAgentInputDraftInput): AgentInputDr
         window.removeEventListener("pagehide", flush);
       }
       textPublication.flush();
+      textPublication.dispose();
     };
   }, [textPublication]);
 

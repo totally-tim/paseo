@@ -2506,6 +2506,17 @@ export class DaemonClient {
       this.lastServerInfoMessage?.features?.agentContinuation !== true
     )
       throw new Error("Update this host to start a profile with automatic continuation.");
+    this.requireAccountSupport(config.accountSelection);
+  }
+
+  /**
+   * An older host drops the account fields from the request and launches with whatever
+   * credentials it already has, which would silently spend the wrong subscription.
+   */
+  private requireAccountSupport(selection: AccountSelection | null | undefined): void {
+    if (!selection || selection.kind === "default") return;
+    if (this.lastServerInfoMessage?.features?.providerAccounts !== true)
+      throw new Error("Update this host to start an agent with a selected provider account.");
   }
 
   async createAgent(options: CreateAgentRequestOptions): Promise<AgentSnapshotPayload> {

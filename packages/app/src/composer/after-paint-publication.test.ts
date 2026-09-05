@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { AfterPaintPublication, type AfterPaintScheduler } from "./after-paint-publication";
+import {
+  AfterPaintPublication,
+  flushStagedEditorInput,
+  type AfterPaintScheduler,
+} from "./after-paint-publication";
 
 function createManualScheduler(): AfterPaintScheduler & {
   run: () => void;
@@ -69,5 +73,22 @@ describe("AfterPaintPublication", () => {
     scheduler.run();
 
     expect(published).toEqual([]);
+  });
+});
+
+describe("flushStagedEditorInput", () => {
+  it("publishes text staged for after the next paint and stops after dispose", () => {
+    const published: string[] = [];
+    const publication = new AfterPaintPublication<string>((value) => published.push(value), {
+      schedule: () => () => {},
+    });
+    publication.stage("typed just now");
+    expect(published).toEqual([]);
+    flushStagedEditorInput();
+    expect(published).toEqual(["typed just now"]);
+    publication.stage("after dispose");
+    publication.dispose();
+    flushStagedEditorInput();
+    expect(published).toEqual(["typed just now"]);
   });
 });

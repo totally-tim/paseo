@@ -110,3 +110,17 @@ describe("SessionAuthorization", () => {
     expect(() => parseDaemonPermissions(["hub.execution.*"])).toThrow("Invalid daemon permission");
   });
 });
+
+test("a mutation response reaches the principal that was allowed to make the mutation", () => {
+  const writer = new SessionAuthorization(parseDaemonPermissions(["workspace.write"]));
+  for (const [request, response] of [
+    ["agent.handoff.start.request", "agent.handoff.start.response"],
+    ["agent.continuation.cancel.request", "agent.continuation.cancel.response"],
+    ["agent.queue.manage.request", "agent.queue.manage.response"],
+  ] as const) {
+    expect(writer.allowsInbound(inboundMessage(request))).toBe(true);
+    expect(writer.allowsOutbound(outboundMessage(response))).toBe(true);
+  }
+  // Inspection stays a read, and a writer without read authority does not get the stream.
+  expect(writer.allowsOutbound(outboundMessage("agent.continuation.inspect.response"))).toBe(false);
+});

@@ -216,10 +216,12 @@ const OUTBOUND_PERMISSION = {
   "agent.config.apply.response": "workspace.write",
   "agent.detach.response": "workspace.write",
   "agent.fork_context.response": "workspace.read",
-  "agent.handoff.start.response": "workspace.read",
+  // A response rides the permission of the request that produced it, or a principal that may
+  // change state without reading would time out on an operation it already performed.
+  "agent.handoff.start.response": "workspace.write",
   "agent.continuation.inspect.response": "workspace.read",
-  "agent.continuation.cancel.response": "workspace.read",
-  "agent.queue.manage.response": "workspace.read",
+  "agent.continuation.cancel.response": "workspace.write",
+  "agent.queue.manage.response": "workspace.write",
   "agent.continuation.changed": "workspace.read",
   "agent.provider_subagents.list.response": "workspace.read",
   "agent.provider_subagents.timeline.get.response": "workspace.read",

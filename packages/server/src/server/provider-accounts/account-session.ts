@@ -60,6 +60,8 @@ export async function handleAccountOperation(
         break;
       case "inspect":
         account = await service.inspect(operation.accountId);
+        // Check login must not drop the challenge and Cancel control of a running login.
+        login = service.activeLogin(operation.accountId);
         break;
       case "login-start":
         login = await service.startLogin(operation.accountId);
@@ -77,6 +79,7 @@ export async function handleAccountOperation(
         break;
       case "login-code":
         service.submitCode(operation.accountId, operation.loginId, operation.code);
+        login = service.activeLogin(operation.accountId, operation.loginId);
         break;
       case "logout":
         await service.logout(operation.accountId);

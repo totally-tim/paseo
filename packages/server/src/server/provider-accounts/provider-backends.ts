@@ -6,7 +6,7 @@ import type {
   ProviderAccountIdentity,
 } from "@getpaseo/protocol/provider-accounts";
 import type { ProviderUsage } from "../messages.js";
-import type { AccountBackend } from "./account-service.js";
+import { AccountHelperShutdownError, type AccountBackend } from "./account-service.js";
 import type { ProviderAccountContext } from "../agent/provider-account-context.js";
 import {
   createProviderEnv,
@@ -124,8 +124,7 @@ class ProviderAccountBackend {
         gracefulTimeoutMs: 2_000,
         forceTimeoutMs: 1_000,
       });
-      if (result === "kill-timeout")
-        throw new Error("Account helper shutdown was not acknowledged.");
+      if (result === "kill-timeout") throw new AccountHelperShutdownError();
       if (recordId) await this.options.managedProcesses?.remove(recordId);
     };
     try {

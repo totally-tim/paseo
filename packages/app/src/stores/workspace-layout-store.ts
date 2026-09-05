@@ -1156,6 +1156,8 @@ export function createWorkspaceLayoutStore(
             const source = collectAllTabs(layout.root).find((tab) => tab.tabId === tabId);
             if (source?.target.kind !== "agent" || source.target.agentId !== sourceId) return state;
             // Directory reconciliation may have opened the successor before this event arrived.
+            // Closing it focuses that pane's next tab, which a background transition must not do.
+            const focusedPaneId = layout.focusedPaneId;
             for (const tab of collectAllTabs(layout.root)) {
               if (
                 tab.tabId !== tabId &&
@@ -1164,6 +1166,7 @@ export function createWorkspaceLayoutStore(
               )
                 layout = closeTabInLayout({ layout, tabId: tab.tabId }) ?? layout;
             }
+            if (layout.focusedPaneId !== focusedPaneId) layout = { ...layout, focusedPaneId };
             const replaced = replaceTabTargetInLayout({
               layout,
               tabId,
@@ -1279,12 +1282,19 @@ export function createWorkspaceLayoutStore(
               currentLayout.focusedPaneId,
             );
             let continuationPendingIdsByWorkspace = state.continuationPendingIdsByWorkspace;
-            for (const id of snapshot.activeAgentIds) {
-              continuationPendingIdsByWorkspace = removeAgentIdFromWorkspaceSet(
-                continuationPendingIdsByWorkspace,
-                normalizedWorkspaceKey,
-                id,
-              );
+            // Protection ends when the successor arrives, and also when it is archived or
+            // deleted elsewhere; otherwise its tab stays pinned to a workspace forever.
+            const protectedIds =
+              state.continuationPendingIdsByWorkspace[normalizedWorkspaceKey] ?? [];
+            const active = new Set(snapshot.activeAgentIds);
+            const known = new Set([...active, ...snapshot.knownAgentIds]);
+            for (const id of protectedIds) {
+              if (active.has(id) || (snapshot.agentsHydrated && !known.has(id)))
+                continuationPendingIdsByWorkspace = removeAgentIdFromWorkspaceSet(
+                  continuationPendingIdsByWorkspace,
+                  normalizedWorkspaceKey,
+                  id,
+                );
             }
             if (
               nextLayout === rawLayout &&

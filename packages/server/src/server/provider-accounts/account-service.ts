@@ -51,6 +51,13 @@ export interface RecoveryAccountChoice extends AccountChoice {
 
 export class AccountOperationError extends Error {}
 
+/** A login helper that would not terminate may still hold the account's credential files. */
+export class AccountHelperShutdownError extends Error {
+  constructor() {
+    super("The account helper did not shut down. Check its status before changing this login.");
+  }
+}
+
 const USAGE_TTL_MS = 5 * 60_000;
 const LOGIN_TIMEOUT_MS = 10 * 60_000;
 
@@ -106,6 +113,13 @@ export class ProviderAccountService {
 
   activeLogins(): AccountLogin[] {
     return [...this.logins.values()].map((login) => structuredClone(login.view));
+  }
+
+  /** The login still running for this account, so a status read cannot discard its controls. */
+  activeLogin(accountId: string, loginId?: string): AccountLogin | null {
+    const active = this.logins.get(accountId);
+    if (!active || (loginId && active.view.id !== loginId)) return null;
+    return structuredClone(active.view);
   }
 
   async add(provider: AccountProvider, label: string): Promise<ProviderAccount> {
@@ -195,6 +209,7 @@ export class ProviderAccountService {
         challenge: { kind: "starting" },
       };
       const active: ActiveLogin = { view, abort, done: Promise.resolve() };
+      let stranded = false;
       this.logins.set(id, active);
       const timer = setTimeout(() => abort.abort(), LOGIN_TIMEOUT_MS);
       timer.unref();
@@ -219,17 +234,23 @@ export class ProviderAccountService {
             return;
           }
           await this.commitIdentity(account, identity);
-        } catch {
+        } catch (error) {
+          // An unconfirmed helper shutdown keeps the account locked: another login or logout
+          // could otherwise mutate credentials the previous helper still has open.
+          stranded = error instanceof AccountHelperShutdownError;
+          const incomplete = abort.signal.aborted
+            ? "Login canceled or expired. Sign in again."
+            : "Login did not complete. Try again.";
           await this.update(id, {
-            authState: "signed-out",
-            error: abort.signal.aborted
-              ? "Login canceled or expired. Sign in again."
-              : "Login did not complete. Try again.",
+            authState: stranded ? "error" : "signed-out",
+            error: stranded
+              ? "The account helper did not shut down. Check its status before changing this login."
+              : incomplete,
           });
         } finally {
           clearTimeout(timer);
           this.logins.delete(id);
-          this.busy.delete(id);
+          if (!stranded) this.busy.delete(id);
         }
       })();
       // Persistence failure is visible on the next read; never leak provider output through logs.

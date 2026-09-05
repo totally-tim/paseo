@@ -7614,16 +7614,33 @@ export class Session {
         payload: { requestId: msg.requestId, sourceAgentId: msg.sourceAgentId, agent, error: null },
       });
     } catch (error) {
+      this.sessionLogger.warn(
+        { err: error, sourceAgentId: msg.sourceAgentId },
+        "agent.handoff.start failed",
+      );
       this.emit({
         type: "agent.handoff.start.response",
         payload: {
           requestId: msg.requestId,
           sourceAgentId: msg.sourceAgentId,
           agent: null,
-          error: error instanceof Error ? error.message : String(error),
+          // A provider helper's exception can carry its raw stderr. Only our own messages ship.
+          error: this.toClientHandoffError(error),
         },
       });
     }
+  }
+
+  /**
+   * Handoff runs provider helpers whose exceptions can carry raw stdout or RPC payloads.
+   * Only errors this daemon raised are safe to show; everything else gets a fixed message.
+   */
+  private toClientHandoffError(error: unknown): string {
+    if (error instanceof AgentRunCancellationError) return error.message;
+    const message = error instanceof Error ? error.message : "";
+    return message && message.length <= 400 && !/[\r\n]/.test(message)
+      ? message
+      : "The continuation could not be started. Check the source agent and its provider account.";
   }
 
   private async handleSendAgentMessageRequest(
