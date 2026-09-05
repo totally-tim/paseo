@@ -31,3 +31,35 @@ describe("provider-native limits", () => {
       expect(codexLimitNotification(info)).toBeNull();
   });
 });
+
+describe("Claude overage", () => {
+  it("does not treat a permitted overage as an account capacity limit", () => {
+    expect(
+      claudeLimitNotification({
+        status: "rejected",
+        overageStatus: "allowed",
+        isUsingOverage: true,
+      }),
+    ).toBeNull();
+    expect(
+      claudeLimitNotification({
+        status: "rejected",
+        overageStatus: "allowed_warning",
+        isUsingOverage: true,
+      }),
+    ).toBeNull();
+  });
+
+  it("reports a capacity limit once the overage itself is rejected", () => {
+    expect(
+      claudeLimitNotification({
+        status: "rejected",
+        overageStatus: "rejected",
+        isUsingOverage: true,
+      }),
+    ).toMatchObject({ code: "provider_capacity", capacityScope: "account" });
+    expect(claudeLimitNotification({ status: "rejected" })).toMatchObject({
+      code: "provider_capacity",
+    });
+  });
+});

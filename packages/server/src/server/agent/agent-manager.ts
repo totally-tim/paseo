@@ -1992,11 +1992,13 @@ export class AgentManager {
       "agent.manager.close.complete",
     );
 
+    // The live agent is already removed, so keeping its reservation would strand the account:
+    // close finds nothing to retry, resume refuses, and logout demands closing a missing agent.
+    this.accountLeases.get(agentId)?.release();
+    this.accountLeases.delete(agentId);
     if (closeError !== undefined) {
       throw closeError;
     }
-    this.accountLeases.get(agentId)?.release();
-    this.accountLeases.delete(agentId);
     if (persistError !== undefined) {
       throw persistError;
     }

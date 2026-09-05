@@ -762,3 +762,33 @@ test("cancelling a queued upload releases its retained copy, and deleting the ta
   expect(f.store.forAgent(f.source.id)).toBeUndefined();
   expect(await readdir(path.join(f.directory, "agent-continuations"))).toEqual([]);
 });
+
+test("recovery skips a destination that cannot run the model and keeps searching", async () => {
+  const f = await setup();
+  const c = await f.accounts.add("codex", "C");
+  await f.accounts.inspect(c.id);
+  f.used.set(c.id, 20);
+  // B has the most remaining quota but does not offer the running model; C does.
+  f.used.set(f.b, 5);
+  await f.agentStorage.upsert({
+    ...(await f.agentStorage.get(f.source.id))!,
+    config: {
+      ...(await f.agentStorage.get(f.source.id))!.config,
+      model: "test-model",
+      continuationPolicy: { accountIds: [f.a, f.b, c.id] },
+    },
+  });
+  const stored = (await f.agentStorage.get(f.source.id))!;
+  const running = stored.runtimeInfo?.model ?? stored.config?.model;
+  vi.spyOn(f.agentManager, "getAccountCatalog").mockImplementation(async (input) => ({
+    entry:
+      input.selection?.kind === "fixed" && input.selection.accountId === f.b
+        ? { models: [{ provider: "codex", id: "other-model", label: "Other" }] }
+        : { models: [{ provider: "codex", id: running!, label: "Running" }] },
+  }));
+  await f.service.reportCapacity(f.source.id, "limit");
+  await f.service.flush();
+  const snapshot = await f.service.inspect(f.source.id);
+  expect(snapshot.continuation).toMatchObject({ status: "active", accountId: c.id });
+  expect(snapshot.agentId).not.toBe(f.source.id);
+});

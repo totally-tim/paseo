@@ -30,14 +30,17 @@ const CodexWindowSchema = z.object({
   windowDurationMins: z.number().nullish(),
   resetsAt: z.number().nullish(),
 });
+const CodexBucketSchema = z.object({
+  primary: CodexWindowSchema.nullish(),
+  secondary: CodexWindowSchema.nullish(),
+  limitName: z.string().nullish(),
+  planType: z.string().nullish(),
+  spendControlReached: z.boolean().nullish(),
+  rateLimitReachedType: z.string().nullish(),
+});
 const CodexUsageSchema = z.object({
-  rateLimits: z.object({
-    primary: CodexWindowSchema.nullish(),
-    secondary: CodexWindowSchema.nullish(),
-    planType: z.string().nullish(),
-    spendControlReached: z.boolean().nullish(),
-    rateLimitReachedType: z.string().nullish(),
-  }),
+  rateLimits: CodexBucketSchema,
+  rateLimitsByLimitId: z.record(z.string(), CodexBucketSchema).nullish(),
 });
 
 export function normalizeClaudeAccountUsage(label: string, raw: unknown): ProviderUsage {
@@ -53,16 +56,18 @@ export function normalizeClaudeAccountUsage(label: string, raw: unknown): Provid
     ["seven_day_sonnet", "Weekly · Sonnet"],
   ] as const) {
     const value = result.rate_limits[id];
-    if (value)
-      windows.push(
-        windowFromUsedPct({
-          id,
-          label: name,
-          utilizationPct: value.utilization,
-          resetsAt: value.resets_at,
-          tone: toneFromUsedPct(value.utilization),
-        }),
-      );
+    // An explicit null is a window the provider has but could not read. Keep it as an
+    // unknown reading so it still blocks automatic admission; an absent key does not apply.
+    if (value === undefined) continue;
+    windows.push(
+      windowFromUsedPct({
+        id,
+        label: name,
+        utilizationPct: value?.utilization ?? null,
+        resetsAt: value?.resets_at ?? null,
+        ...(value ? { tone: toneFromUsedPct(value.utilization) } : {}),
+      }),
+    );
   }
   for (const [index, value] of (result.rate_limits.model_scoped ?? []).entries()) {
     windows.push(
@@ -85,36 +90,50 @@ export function normalizeClaudeAccountUsage(label: string, raw: unknown): Provid
 }
 
 export function normalizeCodexAccountUsage(label: string, raw: unknown): ProviderUsage {
-  const { rateLimits } = CodexUsageSchema.parse(raw);
+  const { rateLimits, rateLimitsByLimitId } = CodexUsageSchema.parse(raw);
+  // `rateLimits` is the compatibility view of one metered bucket that also appears in the
+  // map. Reading both would count that bucket twice and hide the other buckets' limits.
+  const buckets = Object.entries(rateLimitsByLimitId ?? {});
+  const metered: Array<[string, z.infer<typeof CodexBucketSchema>]> = buckets.length
+    ? buckets
+    : [["", rateLimits]];
   const windows: ProviderUsageWindow[] = [];
-  for (const [id, value] of [
-    ["primary", rateLimits.primary],
-    ["secondary", rateLimits.secondary],
-  ] as const) {
-    if (!value) continue;
-    const minutes = value.windowDurationMins;
-    let name = id === "primary" ? "Primary window" : "Secondary window";
-    if (minutes != null) name = `${minutes / 60}-hour window`;
-    if (minutes === 10_080) name = "Weekly";
-    windows.push(
-      windowFromUsedPct({
-        id,
-        label: name,
-        utilizationPct: value.usedPercent,
-        resetsAt: value.resetsAt == null ? null : toIsoStringOrNull(value.resetsAt * 1000),
-        tone: toneFromUsedPct(value.usedPercent),
-      }),
-    );
+  for (const [limitId, bucket] of metered) {
+    const prefix = limitId ? `${limitId}:` : "";
+    const title = bucket.limitName ?? limitId;
+    for (const [id, value] of [
+      ["primary", bucket.primary],
+      ["secondary", bucket.secondary],
+    ] as const) {
+      if (!value) continue;
+      const minutes = value.windowDurationMins;
+      let name = id === "primary" ? "Primary window" : "Secondary window";
+      if (minutes != null) name = `${minutes / 60}-hour window`;
+      if (minutes === 10_080) name = "Weekly";
+      windows.push(
+        windowFromUsedPct({
+          id: `${prefix}${id}`,
+          label: title ? `${name} · ${title}` : name,
+          utilizationPct: value.usedPercent,
+          resetsAt: value.resetsAt == null ? null : toIsoStringOrNull(value.resetsAt * 1000),
+          tone: toneFromUsedPct(value.usedPercent),
+        }),
+      );
+    }
+    if (bucket.spendControlReached || bucket.rateLimitReachedType)
+      windows.push(
+        windowFromUsedPct({
+          id: `${prefix}account_limit`,
+          label: title ? `Account limit · ${title}` : "Account limit",
+          utilizationPct: 100,
+        }),
+      );
   }
-  if (rateLimits.spendControlReached || rateLimits.rateLimitReachedType)
-    windows.push(
-      windowFromUsedPct({ id: "account_limit", label: "Account limit", utilizationPct: 100 }),
-    );
   return {
     providerId: "codex",
     displayName: label,
     status: "available",
-    planLabel: rateLimits.planType ?? null,
+    planLabel: rateLimits.planType ?? metered[0]?.[1].planType ?? null,
     windows,
     error: null,
   };

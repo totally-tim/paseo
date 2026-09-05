@@ -75,4 +75,55 @@ describe("provider-owned quota controls", () => {
       }),
     ).toThrow();
   });
+
+  it("keeps a Claude window the provider could not read as an unknown reading", () => {
+    const result = normalizeClaudeAccountUsage("A", {
+      subscription_type: "max",
+      rate_limits_available: true,
+      rate_limits: { five_hour: { utilization: 10, resets_at: null }, seven_day: null },
+    });
+    expect(result.windows).toEqual([
+      expect.objectContaining({ id: "five_hour", usedPct: 10 }),
+      expect.objectContaining({ id: "seven_day", usedPct: null, remainingPct: null }),
+    ]);
+  });
+
+  it("reads every Codex bucket once when the provider reports them by limit", () => {
+    const result = normalizeCodexAccountUsage("A", {
+      rateLimits: {
+        primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: null },
+        planType: "plus",
+      },
+      rateLimitsByLimitId: {
+        codex: {
+          limitName: "Codex",
+          primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: null },
+          planType: "plus",
+        },
+        "codex-mini": {
+          limitName: "Codex Mini",
+          primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: null },
+        },
+      },
+    });
+    expect(result.windows.map((window) => [window.id, window.usedPct])).toEqual([
+      ["codex:primary", 12],
+      ["codex-mini:primary", 100],
+    ]);
+    expect(result.planLabel).toBe("plus");
+  });
+
+  it("reports a per-bucket account limit without dropping the other buckets", () => {
+    const result = normalizeCodexAccountUsage("A", {
+      rateLimits: { primary: { usedPercent: 5, windowDurationMins: 300, resetsAt: null } },
+      rateLimitsByLimitId: {
+        codex: { primary: { usedPercent: 5, windowDurationMins: 300, resetsAt: null } },
+        other: { spendControlReached: true },
+      },
+    });
+    expect(result.windows.map((window) => window.id)).toEqual([
+      "codex:primary",
+      "other:account_limit",
+    ]);
+  });
 });

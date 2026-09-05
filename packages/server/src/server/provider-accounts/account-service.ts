@@ -161,7 +161,14 @@ export class ProviderAccountService {
     this.busy.add(id);
     try {
       const identity = await this.backend(account, this.store.context(id)).inspect();
-      if (identity && account.identity && account.identity.key !== identity.key) {
+      // A managed account owns its directory, so a different identity there is a mistake. The
+      // host CLI login is the user's own and can legitimately change outside Paseo.
+      if (
+        identity &&
+        account.ownership === "managed" &&
+        account.identity &&
+        account.identity.key !== identity.key
+      ) {
         return await this.update(id, {
           authState: "error",
           error:
@@ -234,22 +241,41 @@ export class ProviderAccountService {
     }
   }
 
+  private duplicateOf(
+    account: ProviderAccount,
+    identity: ProviderAccountIdentity,
+  ): ProviderAccount | undefined {
+    if (account.ownership !== "managed") return undefined;
+    return this.list().find(
+      (other) =>
+        other.id !== account.id &&
+        other.ownership === "managed" &&
+        !other.removedAt &&
+        other.identity?.key === identity.key &&
+        other.provider === account.provider,
+    );
+  }
+
+  private async quarantineDuplicate(
+    account: ProviderAccount,
+    identity: ProviderAccountIdentity,
+  ): Promise<void> {
+    const duplicate = this.duplicateOf(account, identity);
+    if (!duplicate) return;
+    await this.update(account.id, {
+      authState: "error",
+      identity,
+      enabled: false,
+      error: `This identity is already registered as ${duplicate.label}.`,
+    });
+  }
+
   private commitIdentity(
     account: ProviderAccount,
     identity: ProviderAccountIdentity,
   ): Promise<ProviderAccount> {
     const commit = this.identityQueue.then(async () => {
-      const duplicate =
-        account.ownership === "managed"
-          ? this.list().find(
-              (other) =>
-                other.id !== account.id &&
-                other.ownership === "managed" &&
-                !other.removedAt &&
-                other.identity?.key === identity.key &&
-                other.provider === account.provider,
-            )
-          : undefined;
+      const duplicate = this.duplicateOf(account, identity);
       if (duplicate)
         return this.update(account.id, {
           authState: "error",
@@ -288,7 +314,9 @@ export class ProviderAccountService {
     this.assertMutable(id);
     this.busy.add(id);
     try {
-      await this.update(id, { removedAt: undefined, enabled: false });
+      const account = await this.update(id, { removedAt: undefined, enabled: false });
+      // Another account may have taken this identity while this one was removed.
+      if (account.identity) await this.quarantineDuplicate(account, account.identity);
     } finally {
       this.busy.delete(id);
     }
@@ -426,7 +454,7 @@ export class ProviderAccountService {
         needsAttention: true,
         reason: "No permitted account is enabled and signed in. Check the profile's accounts.",
       };
-    const verified = new Set<string>();
+    const readings = new Map<string, ProviderUsage>();
     await Promise.all(
       configured.map(async (account) => {
         // The provider owns authentication. Inspect its identity again before sending more work.
@@ -435,14 +463,19 @@ export class ProviderAccountService {
         } catch {
           return;
         }
-        await this.usage(account.id, true);
-        verified.add(account.id);
+        // Inspection and usage both return the stored value while another operation holds the
+        // account. A skipped read is not a reading, so it cannot establish capacity.
+        if (this.busy.has(account.id)) return;
+        const usage = await this.usage(account.id, true);
+        if (usage.status === "available") readings.set(account.id, usage);
       }),
     );
     const considered = this.automaticCandidates(input.provider, selection);
+    const excluded = this.identityClosure(considered, input.exclude ?? []);
     const eligible = considered.filter((account) => {
-      if (!verified.has(account.id) || input.exclude?.includes(account.id)) return false;
-      const windows = applicableWindows(this.currentUsage(account), input.model);
+      const usage = readings.get(account.id);
+      if (!usage || excluded.has(account.id)) return false;
+      const windows = applicableWindows(usage, input.model);
       return (
         windows.length > 0 &&
         windows.every((window) => typeof window.usedPct === "number") &&
@@ -469,6 +502,20 @@ export class ProviderAccountService {
         : "The permitted accounts need attention. Check their login and enabled state.",
       ...(resets.length ? { resetsAt: new Date(Math.min(...resets)).toISOString() } : {}),
     };
+  }
+
+  /** One subscription can appear as a host login and a managed context. Exclude it once. */
+  private identityClosure(candidates: ProviderAccount[], excluded: string[]): Set<string> {
+    const all = this.list();
+    const keys = new Set(
+      excluded
+        .map((id) => all.find((account) => account.id === id)?.identity?.key)
+        .filter((key): key is string => Boolean(key)),
+    );
+    const closure = new Set(excluded);
+    for (const account of candidates)
+      if (account.identity?.key && keys.has(account.identity.key)) closure.add(account.id);
+    return closure;
   }
 
   private recoveryReset(account: ProviderAccount, model?: string): number | null {

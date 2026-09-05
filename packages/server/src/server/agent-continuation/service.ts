@@ -439,12 +439,7 @@ export class AgentContinuationService {
         return;
       }
       if (!record.policy) throw new Error("Missing continuation policy");
-      const choice = await this.deps.accounts.recoveryChoice({
-        provider: source.provider as "claude" | "codex",
-        accountIds: record.policy.accountIds,
-        model: source.config?.model ?? undefined,
-        exclude: recovery.status === "waiting" ? [] : recovery.attempts,
-      });
+      const choice = await this.chooseDestination(record, source, recovery);
       await this.assertCurrent(record.rootAgentId, operationId);
       if (!choice.accountId) {
         await this.waitForCapacity(record, choice);
@@ -502,6 +497,56 @@ export class AgentContinuationService {
         operationId,
         "Automatic continuation could not be confirmed. Inspect the conversation and tool outcomes before continuing.",
       );
+    }
+  }
+
+  /**
+   * The account with the most remaining quota may not offer the running model. Skip it and keep
+   * looking instead of stopping the task at an incompatible destination.
+   */
+  private async chooseDestination(
+    record: ContinuationRecord,
+    source: StoredAgentRecord,
+    recovery: NonNullable<ContinuationRecord["recovery"]>,
+  ): Promise<Awaited<ReturnType<ProviderAccountService["recoveryChoice"]>>> {
+    const provider = source.provider as "claude" | "codex";
+    const model = source.config?.model ?? undefined;
+    const accountIds = record.policy!.accountIds;
+    const exclude = [...(recovery.status === "waiting" ? [] : recovery.attempts)];
+    for (let attempt = 0; attempt <= accountIds.length; attempt += 1) {
+      const choice = await this.deps.accounts.recoveryChoice({
+        provider,
+        accountIds,
+        model,
+        exclude,
+      });
+      if (
+        !choice.accountId ||
+        choice.accountId === source.config?.accountId ||
+        (await this.offersModel(source, choice.accountId))
+      )
+        return choice;
+      exclude.push(choice.accountId);
+    }
+    return {
+      accountId: null,
+      needsAttention: false,
+      reason: "Waiting for confirmed account capacity",
+    };
+  }
+
+  private async offersModel(source: StoredAgentRecord, accountId: string): Promise<boolean> {
+    const model = source.runtimeInfo?.model ?? source.config?.model;
+    if (!model) return true;
+    try {
+      const catalog = await this.deps.agentManager.getAccountCatalog({
+        provider: source.provider as "claude" | "codex",
+        selection: { kind: "fixed", accountId },
+        cwd: source.cwd,
+      });
+      return Boolean(catalog.entry?.models?.some((entry) => entry.id === model));
+    } catch {
+      return false;
     }
   }
 

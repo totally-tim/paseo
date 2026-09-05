@@ -567,3 +567,76 @@ describe("provider accounts", () => {
     ).rejects.toThrow("No eligible account");
   });
 });
+
+it("does not verify an account whose fresh reading was skipped by another operation", async () => {
+  const { service, add } = await setup();
+  const a = await add("busy-a");
+  const b = await add("busy-b");
+  a.backend.usedPct = 100;
+  const input = { provider: "codex" as const, accountIds: [a.account.id, b.account.id] };
+  // Warm the cache with a good reading, then hold the account with a settings edit.
+  expect((await service.recoveryChoice(input)).accountId).toBe(b.account.id);
+  b.backend.usedPct = 100;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const original = b.backend.inspect.bind(b.backend);
+  vi.spyOn(b.backend, "inspect").mockImplementation(async () => {
+    await gate;
+    return original();
+  });
+  const edit = service.edit(b.account.id, { label: "renamed" });
+  const choice = await service.recoveryChoice(input);
+  release();
+  await edit;
+  expect(choice.accountId).toBeNull();
+});
+
+it("excludes an already-tried subscription that also has a managed context", async () => {
+  const { service, store, backends, add } = await setup();
+  const managed = await add("shared-managed");
+  const host = store.get("default:codex");
+  const backend = new TestAccountBackend();
+  backend.identity = managed.backend.identity;
+  backends.set(host.id, backend);
+  await service.inspect(host.id);
+  await service.edit(host.id, { enabled: true });
+  const input = {
+    provider: "codex" as const,
+    accountIds: [host.id, managed.account.id],
+    exclude: [host.id],
+  };
+  expect((await service.recoveryChoice(input)).accountId).toBeNull();
+});
+
+it("re-checks for a duplicate identity when a removed account is restored", async () => {
+  const { service, store, backends, add } = await setup();
+  const first = await add("original");
+  await service.remove(first.account.id, "retain");
+  // A removed account cannot quarantine a new sign-in, so the same identity is admitted twice.
+  const replacement = await service.add("codex", "replacement");
+  const backend = new TestAccountBackend();
+  backend.identity = first.backend.identity;
+  backends.set(replacement.id, backend);
+  await service.inspect(replacement.id);
+  expect(store.get(replacement.id)).toMatchObject({ authState: "ready" });
+  await service.restore(first.account.id);
+  expect(store.get(first.account.id)).toMatchObject({ authState: "error", enabled: false });
+});
+
+it("follows the host CLI login when the user signs in as somebody else", async () => {
+  const { service, store, backends } = await setup();
+  const host = store.get("default:codex");
+  const backend = new TestAccountBackend();
+  backend.identity = { key: "codex:first", email: "first@example.invalid" };
+  backends.set(host.id, backend);
+  await service.inspect(host.id);
+  expect(store.get(host.id)).toMatchObject({ authState: "ready" });
+  backend.identity = { key: "codex:second", email: "second@example.invalid" };
+  await service.inspect(host.id);
+  expect(store.get(host.id)).toMatchObject({
+    authState: "ready",
+    identity: { key: "codex:second" },
+  });
+});

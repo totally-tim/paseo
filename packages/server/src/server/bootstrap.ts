@@ -925,7 +925,7 @@ export async function createPaseoDaemon(
         : createAccountBackend({
             account,
             context,
-            runtimeSettings: config.agentProviderSettings?.[account.provider],
+            runtimeSettings: providerSnapshotManager.getAccountRuntimeSettings(account.provider),
             logger,
             managedProcesses,
           }),

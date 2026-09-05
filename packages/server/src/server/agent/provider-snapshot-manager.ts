@@ -321,7 +321,8 @@ export class ProviderSnapshotManager {
   }
 
   getAccountRuntimeSettings(provider: AgentProvider): ProviderRuntimeSettings | undefined {
-    return this.requireProvider(provider).runtimeSettings;
+    // Account helpers exist for providers the registry may not carry; they still launch.
+    return this.providerRegistry[provider]?.runtimeSettings;
   }
 
   getAgentManagerProviderState(): AgentManagerProviderState {

@@ -6,8 +6,13 @@ export function claudeLimitNotification(info: {
   status: string;
   resetsAt?: number;
   rateLimitType?: string;
+  overageStatus?: string;
+  isUsingOverage?: boolean;
 }): LimitNotification | null {
   if (info.status !== "rejected") return null;
+  // A rejected subscription window with permitted overage still serves the request.
+  // Only a rejected overage, or no overage at all, ends the account's capacity.
+  if (info.overageStatus === "allowed" || info.overageStatus === "allowed_warning") return null;
   const resetsAt =
     typeof info.resetsAt === "number" && Number.isFinite(new Date(info.resetsAt * 1000).getTime())
       ? new Date(info.resetsAt * 1000).toISOString()
