@@ -54,8 +54,10 @@ test.describe("provider usage settings", () => {
 
     const card = page.getByTestId("provider-usage-card");
     await expect(card).toBeVisible({ timeout: 10_000 });
-    await expect(card.getByText("Claude", { exact: true })).toBeVisible();
-    await expect(card.getByText("Codex", { exact: true })).toBeVisible();
+    // Claude and Codex have per-account usage on the Agents page, so this list shows the
+    // providers that do not: repeating them here would show two different numbers.
+    await expect(card.getByText("Claude", { exact: true })).toHaveCount(0);
+    await expect(card.getByText("Codex", { exact: true })).toHaveCount(0);
     await expect(card.getByText("GLM coding plan", { exact: true }).first()).toBeVisible();
     await expect(card.getByText("Biweekly", { exact: true })).toBeVisible();
     await expect(card.getByText("Daily", { exact: true })).toBeVisible();
@@ -120,16 +122,16 @@ test.describe("provider usage settings", () => {
         fetchedAt: "2026-06-19T00:00:00.000Z",
         providers: [
           {
-            providerId: "claude",
-            displayName: "Claude",
+            providerId: "glm",
+            displayName: "GLM coding plan",
             status: "error",
             planLabel: null,
             windows: [],
-            error: "Claude auth expired",
+            error: "GLM auth expired",
           },
           {
-            providerId: "codex",
-            displayName: "Codex",
+            providerId: "opencode",
+            displayName: "OpenCode",
             status: "available",
             planLabel: "Pro 20x",
             windows: [{ id: "weekly", label: "Weekly", usedPct: 71 }],
@@ -145,8 +147,8 @@ test.describe("provider usage settings", () => {
     const card = page.getByTestId("provider-usage-card");
     await expect(card).toBeVisible({ timeout: 10_000 });
     await expect(card.getByText("Error", { exact: true })).toBeVisible();
-    await expect(card.getByText("Claude auth expired", { exact: true })).toBeVisible();
-    await expect(card.getByText("Codex", { exact: true })).toBeVisible();
+    await expect(card.getByText("GLM auth expired", { exact: true })).toBeVisible();
+    await expect(card.getByText("OpenCode", { exact: true })).toBeVisible();
     await expect(card.getByText("71%")).toBeVisible();
   });
 });

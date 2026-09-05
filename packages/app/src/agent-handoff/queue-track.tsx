@@ -105,6 +105,7 @@ function QueueItem({
               variant="ghost"
               disabled={pending || item.status !== "queued"}
               onPress={send}
+              testID={`queued-message-send-now-${item.id}`}
             >
               Send now
             </Button>
@@ -125,8 +126,11 @@ function QueueItem({
 export function AgentQueueTrack({ serverId, agentId }: { serverId: string; agentId: string }) {
   const queue = useAgentContinuation(serverId, agentId);
   if (!queue.supported) return null;
+  // Render nothing until there is something to show. An empty track still takes a gap from
+  // its parent, and it mounts when the first queue read lands, which shifts the composer.
+  if (!queue.isError && !queue.data?.queuedMessages.length) return null;
   return (
-    <View style={styles.track}>
+    <View style={styles.track} testID="agent-queue-track">
       {queue.isError ? (
         <Text style={styles.error}>
           The host queue could not be loaded. Reconnect to check retained messages.

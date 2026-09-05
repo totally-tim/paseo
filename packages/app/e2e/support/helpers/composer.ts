@@ -61,10 +61,13 @@ export async function sendDraftToQueue(page: Page): Promise<void> {
   await composerInput(page).press("Control+Enter");
 }
 
+/** The host queue renders one track entry per retained instruction, each with its own actions. */
+export function queuedMessageSendNow(page: Page) {
+  return page.getByTestId("agent-queue-track").getByRole("button", { name: "Send now" });
+}
+
 export async function expectQueuedMessageButton(page: Page): Promise<void> {
-  await expect(page.getByRole("button", { name: "Send queued message now" })).toBeVisible({
-    timeout: 10_000,
-  });
+  await expect(queuedMessageSendNow(page).first()).toBeVisible({ timeout: 10_000 });
 }
 
 export async function cancelAgent(page: Page): Promise<void> {

@@ -21,6 +21,7 @@ import {
   sendDraftToQueue,
   startRunningMockAgent,
   submitMessage,
+  queuedMessageSendNow,
 } from "../support/helpers/composer";
 import { openAgentRoute, seedMockAgentWorkspace } from "../support/helpers/mock-agent";
 import { seedWorkspace } from "../support/helpers/seed-client";
@@ -374,9 +375,7 @@ async function queueMessage(page: Page, prompt: string): Promise<void> {
 }
 
 async function expectQueuedSendFailuresRestored(page: Page, prompts: string[]): Promise<void> {
-  await expect(page.getByRole("button", { name: "Send queued message now" })).toHaveCount(
-    prompts.length,
-  );
+  await expect(queuedMessageSendNow(page)).toHaveCount(prompts.length);
   for (const prompt of prompts) {
     await expect(page.getByTestId("user-message").filter({ hasText: prompt })).toHaveCount(0);
   }
@@ -407,7 +406,7 @@ async function expectInterruptedTurnOrderAfterReconnect(
     await expect(page.getByText("Cycle 1", { exact: true })).toBeVisible();
     await queueMessage(page, prompt);
     gate.setAgentStreamSuppressed(true);
-    await page.getByRole("button", { name: "Send queued message now" }).click();
+    await queuedMessageSendNow(page).click();
     const promptRow = page.getByTestId("user-message").filter({ hasText: prompt });
     await expect(promptRow).toBeVisible();
     await gate.waitForServerMessage("send_agent_message_response");
@@ -578,7 +577,7 @@ async function expectLegacyAssistantStartsAfterInterruptedPrompt(
     await queueMessage(page, prompt);
     gate.setAssistantMessageIdsStripped(true);
     gate.setAgentStreamEventSuppressed("turn_canceled", true);
-    await page.getByRole("button", { name: "Send queued message now" }).click();
+    await queuedMessageSendNow(page).click();
     const promptRow = page.getByTestId("user-message").filter({ hasText: prompt });
     const replacementAnswer = page.getByText("(end of synthetic stream)", { exact: true }).last();
     await expect(promptRow).toBeVisible();
@@ -993,7 +992,7 @@ test.describe("Agent message submission", () => {
       await submitMessage(page, "Keep running until the queued turn is ready.");
       await expectAgentReadyToInterrupt(page);
       await queueMessage(page, secondPrompt);
-      await expect(page.getByRole("button", { name: "Send queued message now" })).toBeVisible();
+      await expect(queuedMessageSendNow(page)).toBeVisible();
 
       gate.holdNextServerMessage("cancel_agent_response");
       await page.getByRole("button", { name: "Stop agent", exact: true }).click();
@@ -1241,9 +1240,9 @@ test.describe("Agent message submission", () => {
     try {
       await queueMessage(page, prompts[0]);
       await queueMessage(page, prompts[1]);
-      await page.getByRole("button", { name: "Send queued message now" }).first().click();
+      await queuedMessageSendNow(page).first().click();
       await gate.waitForRequest(1);
-      await page.getByRole("button", { name: "Send queued message now" }).first().click();
+      await queuedMessageSendNow(page).first().click();
       await gate.waitForRequest(2);
       await gate.disconnect();
       await expectQueuedSendFailuresRestored(page, prompts);
