@@ -90,11 +90,23 @@ export class AgentContinuationStore {
   }
 
   /** Delete retained attachment copies that no queued item references any more. */
-  async releaseAttachments(rootAgentId: string, message: AgentQueuedMessageInput): Promise<void> {
+  async releaseAttachments(
+    rootAgentId: string,
+    message: AgentQueuedMessageInput,
+    keep?: AgentQueuedMessageInput,
+  ): Promise<void> {
     const directory = path.join(this.directory, rootAgentId);
+    // Retained paths are content-addressed, so an edit that keeps an attachment points at the
+    // same file. Keep anything the surviving message still needs.
+    const retained = new Set(
+      (keep?.attachments ?? [])
+        .filter((attachment) => attachment.type === "uploaded_file")
+        .map((attachment) => attachment.path),
+    );
     for (const attachment of message.attachments ?? []) {
       if (attachment.type !== "uploaded_file") continue;
       if (path.dirname(attachment.path) !== directory) continue;
+      if (retained.has(attachment.path)) continue;
       await fs.rm(attachment.path, { force: true });
     }
   }

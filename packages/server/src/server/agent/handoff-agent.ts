@@ -252,11 +252,14 @@ async function performHandoff(
     if (currentTarget?.archivedAt)
       throw new Error("The continuation was archived before it could start");
     await ensureAgentLoaded(state.successorAgentId, { agentManager, agentStorage, logger });
+    // Check ownership before claiming delivery. A cancel that lands here would otherwise
+    // leave a durable "dispatching" state for a prompt that was never sent, and every later
+    // path would tell the user to inspect an empty conversation.
+    await assertCurrent();
     // Persist before dispatch. An ambiguous crash never sends the task twice;
     // the existing successor stays available for the user to inspect and prompt.
     state = { ...state, phase: "dispatching" };
     await agentStorage.saveHandoff(state);
-    await assertCurrent();
     await startCreatedAgentInitialPrompt({
       agentManager,
       agentId: state.successorAgentId,

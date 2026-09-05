@@ -84,6 +84,13 @@ export class AgentContinuationService {
               `${event.epoch ?? "live"}:${event.seq ?? randomUUID()}`,
               item.turnId,
             )
+              .then((opened) => {
+                // A fenced or duplicate event opens nothing, so the turn's own failure still
+                // has to stop the queue. Suppressing it would send the next instruction into
+                // the account that just reported exhausted capacity.
+                if (!opened) this.background(event.agentId, () => this.failed(event.agentId));
+                return opened;
+              })
               .catch(() =>
                 this.deps.logger.error(
                   { agentId: event.agentId },
@@ -160,9 +167,13 @@ export class AgentContinuationService {
     let record: ContinuationRecord;
     try {
       record = await this.change(initial.rootAgentId, (current) => {
-        if (operation.kind === "cancel") {
-          const cancelled = current.queue.find((entry) => entry.id === operation.messageId);
-          if (cancelled) released = structuredClone(cancelled);
+        // An edit replaces the retained copies, and a cancel drops them entirely.
+        let replacedId: string | null = null;
+        if (operation.kind === "cancel") replacedId = operation.messageId;
+        else if (operation.kind === "edit") replacedId = operation.message.id;
+        if (replacedId) {
+          const previous = current.queue.find((entry) => entry.id === replacedId);
+          if (previous) released = structuredClone(previous);
         }
         const inserted = operation.kind === "enqueue" && !retry;
         updateQueuedMessages(current, operation, this.timestamp(), enqueueDigest);
@@ -174,7 +185,12 @@ export class AgentContinuationService {
         await this.deps.store.releaseAttachments(initial.rootAgentId, operation.message);
       throw error;
     }
-    if (released) await this.deps.store.releaseAttachments(record.rootAgentId, released);
+    if (released)
+      await this.deps.store.releaseAttachments(
+        record.rootAgentId,
+        released,
+        record.queue.find((entry) => entry.id === (released as AgentQueuedMessageInput).id),
+      );
     if (operation.kind === "send_now") {
       // User-authorized interruption, still serialized with recovery and every other dispatch.
       await this.exclusive(record.rootAgentId, async () => {
@@ -370,9 +386,10 @@ export class AgentContinuationService {
     });
   }
 
-  async reportCapacity(agentId: string, eventId: string, turnId?: string): Promise<void> {
+  /** Returns whether this event opened a recovery episode. */
+  async reportCapacity(agentId: string, eventId: string, turnId?: string): Promise<boolean> {
     const source = await this.deps.agentStorage.get(agentId);
-    if (!source || !isOrdinaryAgent(source) || !source.config?.continuationPolicy) return;
+    if (!source || !isOrdinaryAgent(source) || !source.config?.continuationPolicy) return false;
     const record = await this.ensureRecord(agentId);
     // Stop fences the turn it interrupted. A rejection from a later turn is new work under the
     // same policy, so only a known, different turn may open the next episode.
@@ -384,9 +401,9 @@ export class AgentContinuationService {
       fenced(record.recovery) ||
       record.recovery?.eventId === eventId
     )
-      return;
+      return false;
     const episode = record.recovery;
-    if (episode?.status === "continuing" && episode.sourceAgentId === agentId) return;
+    if (episode?.status === "continuing" && episode.sourceAgentId === agentId) return false;
     const attempts =
       episode && ["continuing", "active"].includes(episode.status) ? episode.attempts : [];
     const operationId = randomUUID();
@@ -398,6 +415,7 @@ export class AgentContinuationService {
       ]);
     });
     this.wake(agentId);
+    return true;
   }
 
   wake(agentId: string): void {
@@ -802,6 +820,8 @@ export class AgentContinuationService {
         current.queue = current.queue.filter((entry) => entry.id !== item.id);
         current.receipts[item.id].outcome = "sent";
       });
+      // The provider has the bytes now; the host copy has no remaining reader.
+      await this.deps.store.releaseAttachments(rootAgentId, item);
     } catch {
       // The manager refuses to start over an in-flight run before it sends anything.
       const busy = !dispatched && manager.hasInFlightRun(record.agentId);
@@ -856,6 +876,8 @@ export class AgentContinuationService {
       attempts,
       status: "continuing",
       updatedAt: this.timestamp(),
+      backoffMs:
+        record.recovery?.sourceAgentId === record.agentId ? record.recovery.backoffMs : undefined,
       previousAgentId: record.recovery?.previousAgentId,
       previousAccountId:
         record.recovery?.previousAccountId ??

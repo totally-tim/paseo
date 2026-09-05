@@ -792,3 +792,110 @@ test("recovery skips a destination that cannot run the model and keeps searching
   expect(snapshot.continuation).toMatchObject({ status: "active", accountId: c.id });
   expect(snapshot.agentId).not.toBe(f.source.id);
 });
+
+test("a rejection with no reported reset waits with a growing backoff instead of re-prompting", async () => {
+  const f = await setup();
+  // Both accounts report a limit the provider gave no reset time for.
+  await f.accounts.reportCapacity(f.a);
+  await f.accounts.reportCapacity(f.b);
+  await f.service.reportCapacity(f.source.id, "limit-1");
+  await f.service.flush();
+  const first = f.store.forAgent(f.source.id)!.recovery!;
+  expect(first.status).toBe("waiting");
+  expect(f.starts).toHaveLength(0);
+  // The wait wakes, finds the same rejection, and must back off rather than retry immediately.
+  f.advance(61_000);
+  f.service.wake(f.source.id);
+  await f.service.flush();
+  const second = f.store.forAgent(f.source.id)!.recovery!;
+  expect(second.status).toBe("waiting");
+  expect(second.backoffMs!).toBeGreaterThan(first.backoffMs!);
+  expect(f.starts).toHaveLength(0);
+});
+
+test("a fenced capacity event still stops the queue for the turn that failed", async () => {
+  const f = await setup();
+  await f.agentManager.cancelContinuation(f.source.id);
+  await f.store.update(f.source.id, (record) => {
+    record.recovery!.cancelledTurnId = "turn-1";
+    record.queuePaused = false;
+  });
+  await f.service.manageQueue(f.source.id, {
+    kind: "enqueue",
+    message: { id: "after", text: "Runs after the failed turn" },
+  });
+  await f.service.flush();
+  await vi.waitFor(() => expect(f.starts).toHaveLength(1));
+  await f.store.update(f.source.id, (record) => {
+    record.queue.push({
+      id: "next",
+      text: "Must not be sent into the exhausted account",
+      status: "queued",
+      revision: 1,
+      createdAt: "2026-09-05T00:00:00Z",
+    });
+    record.receipts.next = { digest: "x", outcome: "queued" };
+  });
+  // The event is fenced by the earlier Stop, so no episode opens; the failure must still land.
+  f.emitters.get(f.a)!({
+    type: "timeline",
+    provider: "codex",
+    item: {
+      type: "notification",
+      code: "provider_capacity",
+      level: "warning",
+      message: "Usage limit reached",
+    },
+  });
+  await f.agentManager.flush();
+  await f.service.flush();
+  await vi.waitFor(() => expect(f.store.forAgent(f.source.id)?.queuePaused).toBe(true));
+  expect(f.store.forAgent(f.source.id)?.queuePaused).toBe(true);
+  expect(f.starts.filter((entry) => entry.prompt.includes("exhausted account"))).toHaveLength(0);
+});
+
+test("editing a queued upload releases the copy it replaced and keeps the one it sends", async () => {
+  const { writeFile, stat, readdir } = await import("node:fs/promises");
+  const f = await setup();
+  f.used.set(f.b, 100);
+  await f.service.reportCapacity(f.source.id, "limit");
+  await f.service.flush();
+  const first = path.join(f.directory, "first.txt");
+  const second = path.join(f.directory, "second.txt");
+  await writeFile(first, "original");
+  await writeFile(second, "replaced");
+  const attachment = (id: string, file: string) => ({
+    type: "uploaded_file" as const,
+    id,
+    path: file,
+    fileName: path.basename(file),
+    mimeType: "text/plain",
+    size: 8,
+  });
+  const queued = await f.service.manageQueue(f.source.id, {
+    kind: "enqueue",
+    message: { id: "file", text: "Read it", attachments: [attachment("one", first)] },
+  });
+  const before = queued.queuedMessages[0].attachments![0];
+  if (before.type !== "uploaded_file") throw new Error("Expected file");
+  await f.service.manageQueue(f.source.id, {
+    kind: "edit",
+    revision: 1,
+    message: { id: "file", text: "Read this one", attachments: [attachment("two", second)] },
+  });
+  await expect(stat(before.path)).rejects.toThrow();
+  expect(await readdir(path.join(f.directory, "agent-continuations", f.source.id))).toHaveLength(1);
+  // Delivering the instruction releases the last copy too.
+  f.used.set(f.b, 10);
+  f.advance(61_000);
+  f.service.wake(f.source.id);
+  await f.service.flush();
+  await vi.waitFor(() =>
+    expect(f.starts.filter((entry) => entry.prompt.includes("Read this one"))).toHaveLength(1),
+  );
+  await vi.waitFor(async () =>
+    expect(await readdir(path.join(f.directory, "agent-continuations", f.source.id))).toHaveLength(
+      0,
+    ),
+  );
+});

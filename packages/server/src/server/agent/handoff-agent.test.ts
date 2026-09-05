@@ -333,3 +333,53 @@ test("the handoff skill tools use the same transition and expose context without
   expect(file).not.toHaveProperty("config");
   expect(file).not.toHaveProperty("persistence");
 });
+
+test("deleting a successor releases its predecessor so the task can continue again", async () => {
+  const { deps, source, agentManager, agentStorage } = await setup();
+  const target = await handoffAgent(deps, { sourceAgentId: source.id, provider: "codex" });
+  expect((await agentStorage.get(source.id))?.labels[HANDOFF_TO_AGENT_ID_LABEL]).toBe(target.id);
+  await expect(ensureAgentLoaded(source.id, deps)).rejects.toThrow("continued in");
+  await agentManager.releaseHandoffLink(target.id);
+  await agentStorage.remove(target.id);
+  expect((await agentStorage.get(source.id))?.labels[HANDOFF_TO_AGENT_ID_LABEL]).toBeUndefined();
+  expect(await agentStorage.getHandoff(source.id)).toBeNull();
+  // The task can start a fresh continuation rather than pointing at an agent that is gone.
+  const replacement = await handoffAgent(deps, { sourceAgentId: source.id, provider: "codex" });
+  expect(replacement.id).not.toBe(target.id);
+});
+
+test("a cancel before dispatch never claims the prompt is in flight", async () => {
+  const { deps, source, agentStorage } = await setup();
+  let sinceCreated = 0;
+  let created = false;
+  const execution = {
+    operationId: "op-1",
+    assertCurrent: async () => {
+      if (!created) return;
+      // Lose ownership on the last check before dispatch, once the successor already exists.
+      sinceCreated += 1;
+      if (sinceCreated >= 2) throw new Error("Continuation no longer owns this task");
+    },
+    onCreated: async () => {
+      created = true;
+    },
+  };
+  await expect(
+    handoffAgent(deps, { sourceAgentId: source.id, provider: "codex" }, execution),
+  ).rejects.toThrow("no longer owns this task");
+  const state = await agentStorage.getHandoff(source.id);
+  expect(state?.phase).toBe("created");
+  // A later retry resumes it instead of reporting an uncertain delivery.
+  const target = await handoffAgent(deps, { sourceAgentId: source.id, provider: "codex" });
+  expect(target.id).toBe(state?.successorAgentId);
+  expect((await agentStorage.getHandoff(source.id))?.phase).toBe("started");
+});
+
+test("archiving still completes when the agent's provider has no registered client", async () => {
+  const { source, agentManager, agentStorage } = await setup();
+  await agentManager.closeAgent(source.id);
+  agentManager.updateProviderRegistry({ providerDefinitions: {}, clients: {} });
+  const record = await agentManager.archiveSnapshot(source.id, new Date().toISOString());
+  expect(record.archivedAt).toBeTruthy();
+  expect((await agentStorage.get(source.id))?.archivedAt).toBeTruthy();
+});

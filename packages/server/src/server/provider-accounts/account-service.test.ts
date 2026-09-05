@@ -668,3 +668,44 @@ it("keeps the running login visible through a status check and a submitted code"
   await service.cancelLogin(account.id, started.id);
   expect(service.activeLogin(account.id)).toBeNull();
 });
+
+it("keeps a rejection without a reported reset until a reset is known", async () => {
+  const { service, add, advance } = await setup();
+  const a = await add("no-reset");
+  await service.reportCapacity(a.account.id);
+  const input = { provider: "codex" as const, accountIds: [a.account.id] };
+  // A fresh reading alone cannot show the limit lifted when the provider named no reset.
+  expect((await service.recoveryChoice(input)).accountId).toBeNull();
+  advance(10 * 60_000);
+  expect((await service.recoveryChoice(input)).accountId).toBeNull();
+  // A rejection that did name a reset clears once that time passes and usage is re-read.
+  const b = await add("with-reset");
+  await service.reportCapacity(b.account.id, undefined, "2026-09-04T00:00:00.000Z");
+  expect(
+    (await service.recoveryChoice({ provider: "codex", accountIds: [b.account.id] })).accountId,
+  ).toBe(b.account.id);
+});
+
+it("picks up a host CLI login that happened after the daemon started", async () => {
+  const { service, store, backends } = await setup();
+  const host = store.get("default:codex");
+  const backend = new TestAccountBackend();
+  backends.set(host.id, backend);
+  await service.inspect(host.id);
+  expect(store.get(host.id).authState).toBe("signed-out");
+  backend.identity = { key: "codex:late", email: "late@example.invalid" };
+  service.refreshUsage();
+  await vi.waitFor(() => expect(store.get(host.id).authState).toBe("ready"));
+});
+
+it("sets aside an unreadable account file instead of stopping the daemon", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-account-store-"));
+  cleanups.push(async () => fs.rm(directory, { recursive: true, force: true }));
+  const first = new ProviderAccountStore(directory);
+  await first.initialize();
+  await fs.writeFile(path.join(directory, "provider-accounts", "accounts.json"), "{ truncated");
+  const second = new ProviderAccountStore(directory);
+  await expect(second.initialize()).resolves.toBeUndefined();
+  const entries = await fs.readdir(path.join(directory, "provider-accounts"));
+  expect(entries.filter((entry) => entry.includes(".corrupt-"))).toHaveLength(1);
+});

@@ -2826,6 +2826,10 @@ export class Session {
   private async handleDeleteAgentRequest(agentId: string, requestId: string): Promise<void> {
     await this.agentManager.cancelContinuation(agentId);
     await this.continuations?.forget(agentId);
+    // Deleting a successor must not leave its predecessor pointing at an agent that is gone.
+    await this.agentManager.releaseHandoffLink(agentId).catch((error) => {
+      this.sessionLogger.warn({ err: error, agentId }, "Could not release the handoff link");
+    });
     this.sessionLogger.info({ agentId }, `Deleting agent ${agentId} from registry`);
 
     const knownWorkspaceId =
@@ -7615,7 +7619,7 @@ export class Session {
       });
     } catch (error) {
       this.sessionLogger.warn(
-        { err: error, sourceAgentId: msg.sourceAgentId },
+        { error: this.toClientHandoffError(error), sourceAgentId: msg.sourceAgentId },
         "agent.handoff.start failed",
       );
       this.emit({

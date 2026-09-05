@@ -1261,6 +1261,17 @@ export class AgentManager {
     if (successor) throw new Error(`This agent continued in ${successor}. Send new work there.`);
   }
 
+  /** Release a predecessor whose successor is being deleted, so its task can run again. */
+  async releaseHandoffLink(successorAgentId: string): Promise<void> {
+    const successor = await this.registry?.get(successorAgentId);
+    const sourceId = successor?.labels[HANDOFF_FROM_AGENT_ID_LABEL];
+    if (!sourceId) return;
+    const source = await this.registry?.get(sourceId);
+    if (source?.labels[HANDOFF_TO_AGENT_ID_LABEL] !== successorAgentId) return;
+    await this.writeLabels(sourceId, { [HANDOFF_TO_AGENT_ID_LABEL]: null });
+    await this.registry?.clearHandoff(sourceId);
+  }
+
   async stopForHandoff(agentId: string, successorAgentId: string): Promise<void> {
     await this.runLifecycleMutation(agentId, async () => {
       const record = await this.requireRegistry().get(agentId);
@@ -1270,6 +1281,9 @@ export class AgentManager {
       if (existingTarget && existingTarget !== successorAgentId) {
         throw new Error(`Agent already continued in ${existingTarget}`);
       }
+      // The label goes on before shutdown on purpose: a source whose provider did not
+      // acknowledge the stop must not accept new prompts while its turn may still be running.
+      // Retrying the handoff clears it once shutdown succeeds.
       await this.writeLabels(agentId, { [HANDOFF_TO_AGENT_ID_LABEL]: successorAgentId });
       await this.closeContinuationRuntime(agentId);
     });
@@ -5511,7 +5525,9 @@ export class AgentManager {
     accountId?: string,
   ): Promise<void> {
     if (!persistence) return;
-    const client = this.requireClient(provider, accountId);
+    // A disabled or unloaded provider has no client. Archiving still has to finish, or the
+    // record says archived while every connected client still shows the agent live.
+    const client = this.findClient(provider, accountId);
     const sync =
       state === "archive" ? client?.archiveNativeSession : client?.unarchiveNativeSession;
     if (!sync) return;

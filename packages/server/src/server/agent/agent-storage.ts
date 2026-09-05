@@ -288,6 +288,21 @@ export class AgentStorage {
     this.deleting.add(agentId);
   }
 
+  /** Forget a prepared or started handoff so its source can start a fresh one. */
+  async clearHandoff(agentId: string): Promise<void> {
+    await this.load();
+    await this.handoffOperations.get(agentId)?.promise.catch(() => undefined);
+    for (const filePath of [this.handoffPath(agentId), this.getHandoffContextPath(agentId)]) {
+      try {
+        await fs.unlink(filePath);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code && code !== "ENOENT")
+          this.logger.warn({ err: error, agentId, filePath }, "Failed to clear handoff state");
+      }
+    }
+  }
+
   async remove(agentId: string): Promise<void> {
     await this.load();
     this.beginDelete(agentId);

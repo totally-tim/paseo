@@ -402,6 +402,10 @@ export class ProviderAccountService {
 
   refreshUsage(): void {
     if (this.closed || this.usageRefresh) return;
+    // The user can sign in to a provider CLI after the daemon started; nothing tells us.
+    for (const account of this.list())
+      if (account.ownership === "external" && account.authState !== "ready")
+        void this.inspect(account.id).catch(() => undefined);
     const accounts = this.list().filter(
       (account) => account.authState === "ready" && !account.removedAt,
     );
@@ -919,7 +923,11 @@ function capacityRejection(
     (capacity.resetsAt && Date.parse(capacity.resetsAt) <= now)
   )
     return null;
+  // A newer reading clears the rejection only when the provider also said when capacity
+  // returns. Without a reset time the reading cannot show the limit has lifted, and trusting
+  // it would send the same account another request every time the wait wakes up.
   if (
+    capacity.resetsAt &&
     usage?.status === "available" &&
     windowCount > 0 &&
     usage.fetchedAt &&

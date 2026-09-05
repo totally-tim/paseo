@@ -34,7 +34,10 @@ export class ProviderAccountStore {
       this.accounts = data.accounts;
       this.policy = data.policy;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      // Truncated bytes, or a file a newer daemon wrote, must not stop this one from starting.
+      // Keep them for inspection; the accounts are re-added rather than silently overwritten.
+      await fs.rename(this.metadataPath(), `${this.metadataPath()}.corrupt-${Date.now()}`);
     }
   }
 
