@@ -1,5 +1,6 @@
 import { AgentContinuationService } from "./agent-continuation/service.js";
 import { AgentContinuationStore } from "./agent-continuation/store.js";
+import { AccountProviderSchema } from "@getpaseo/protocol/provider-accounts";
 import { ProviderAccountStore } from "./provider-accounts/account-store.js";
 import { ProviderAccountService } from "./provider-accounts/account-service.js";
 import { createAccountBackend } from "./provider-accounts/provider-backends.js";
@@ -930,9 +931,7 @@ export async function createPaseoDaemon(
           }),
   );
   await providerAccounts.initialize();
-  for (const provider of ["claude", "codex"] as const) {
-    void providerAccounts.inspect(`default:${provider}`).catch(() => undefined);
-  }
+  providerAccounts.inspectHostAccounts();
   const agentManager = new AgentManager({
     accounts: providerAccounts,
     createAccountClient: (provider, context) =>
@@ -961,15 +960,16 @@ export async function createPaseoDaemon(
     pluginRuntime.subscribeProviderRegistrations(syncPluginProviders);
 
   providerSnapshotManager.setAccountCatalogReader(async (input) => {
-    if (input.provider !== "claude" && input.provider !== "codex") return null;
+    const accountProvider = AccountProviderSchema.safeParse(input.provider);
+    if (!accountProvider.success) return null;
     const selection =
       input.parent?.provider === input.provider && input.parent.config.accountId
         ? { kind: "fixed" as const, accountId: input.parent.config.accountId }
         : input.accountSelection;
-    const choice = providerAccounts.preview(input.provider, selection, input.model);
+    const choice = providerAccounts.preview(accountProvider.data, selection, input.model);
     if (choice.accountId?.startsWith("default:")) return null;
     const result = await agentManager.getAccountCatalog({
-      provider: input.provider,
+      provider: accountProvider.data,
       selection,
       model: input.model,
       cwd: input.cwd ?? undefined,
@@ -1768,6 +1768,7 @@ export async function createPaseoDaemon(
               pluginRuntime,
               orchestrationSkills,
               workspaceLabelService,
+              continuations,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
             await pluginRuntime.start();

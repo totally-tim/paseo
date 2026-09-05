@@ -1,4 +1,5 @@
 import { handleContinuationRequest } from "./agent-continuation/session.js";
+import type { AgentContinuationService } from "./agent-continuation/service.js";
 import { handleAccountCatalog } from "./provider-accounts/account-catalog.js";
 import { handleAccountList, handleAccountOperation } from "./provider-accounts/account-session.js";
 import equal from "fast-deep-equal";
@@ -452,6 +453,7 @@ type AgentMcpTransportFactory = () => Promise<unknown>;
 
 export interface SessionOptions {
   clientId: string;
+  continuations?: AgentContinuationService;
   permissions: readonly DaemonPermission[];
   appVersion?: string | null;
   clientCapabilities?: Record<string, unknown> | null;
@@ -698,6 +700,7 @@ export class Session {
   private readonly pluginRuntime: SessionOptions["pluginRuntime"];
   private readonly orchestrationSkills: SessionOptions["orchestrationSkills"];
   private unsubscribeContinuation?: () => void;
+  private readonly continuations?: AgentContinuationService;
   private unsubscribeAgentEvents: (() => void) | null = null;
   private unsubscribeProjectMutations: (() => void) | null = null;
   private unsubscribePluginChanges: (() => void) | null = null;
@@ -848,6 +851,7 @@ export class Session {
       logger: this.sessionLogger,
     });
     this.agentManager = agentManager;
+    this.continuations = options.continuations;
     this.agentStorage = agentStorage;
     this.projectRegistry = projectRegistry;
     this.workspaceRegistry = workspaceRegistry;
@@ -1701,11 +1705,9 @@ export class Session {
       this.unsubscribeAgentEvents();
     }
 
-    this.unsubscribeContinuation = this.agentManager.continuations?.subscribe(
-      (rootAgentId, agentId) => {
-        this.emit({ type: "agent.continuation.changed", payload: { rootAgentId, agentId } });
-      },
-    );
+    this.unsubscribeContinuation = this.continuations?.subscribe((rootAgentId, agentId) => {
+      this.emit({ type: "agent.continuation.changed", payload: { rootAgentId, agentId } });
+    });
     this.unsubscribeAgentEvents = this.agentManager.subscribe(
       (event) => {
         if (event.type === "timeline_replacement") {
@@ -1834,7 +1836,7 @@ export class Session {
     const storedRecord = await this.agentStorage.get(payload.id);
     payload.title = storedRecord?.title ?? null;
     payload.archivedAt = storedRecord?.archivedAt ?? null;
-    payload.continuation = this.agentManager.continuations?.statusFor(payload.id);
+    payload.continuation = this.continuations?.statusFor(payload.id);
     return payload;
   }
 
@@ -1848,7 +1850,7 @@ export class Session {
   ): AgentSnapshotPayload {
     return {
       ...buildStoredAgentPayload(record, registeredProviderIds),
-      continuation: this.agentManager.continuations?.statusFor(record.id),
+      continuation: this.continuations?.statusFor(record.id),
     };
   }
 
@@ -2355,9 +2357,7 @@ export class Session {
       case "agent.continuation.inspect.request":
       case "agent.continuation.cancel.request":
       case "agent.queue.manage.request":
-        return handleContinuationRequest(this.agentManager.continuations, msg, (message) =>
-          this.emit(message),
-        );
+        return handleContinuationRequest(this.continuations, msg, (message) => this.emit(message));
       case "agent.handoff.start.request":
         return this.handleHandoffAgentRequest(msg);
       default:

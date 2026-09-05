@@ -1341,7 +1341,7 @@ export class AgentManager {
     return this.providerSubagents.fetchTimeline(parentAgentId, subagentId, options);
   }
 
-  createAgent(
+  async createAgent(
     config: AgentSessionConfig,
     agentId: string | undefined,
     options: CreateAgentOptions,
@@ -4058,15 +4058,14 @@ export class AgentManager {
     config: AgentSessionConfig,
     fallbackTitle: string | null,
   ): Promise<string | null> {
+    // Account-pinned creation and imports persist a record before the session registers,
+    // so a record without a title still takes the initial one.
     const existing = await this.registry?.get(agentId);
-    if (existing) {
-      return existing.title ?? null;
-    }
     const explicitTitle =
       typeof config.title === "string" && config.title.trim().length > 0
         ? config.title.trim()
         : null;
-    return explicitTitle ?? fallbackTitle;
+    return existing?.title ?? explicitTitle ?? fallbackTitle;
   }
 
   private async persistSnapshot(
@@ -5344,7 +5343,7 @@ export class AgentManager {
   }
 
   private async resolveDefaultModelId(config: AgentSessionConfig): Promise<string | undefined> {
-    const client = this.requireClient(config.provider, config.accountId);
+    const client = this.findClient(config.provider, config.accountId);
     if (!client) {
       return undefined;
     }
@@ -5437,7 +5436,7 @@ export class AgentManager {
     provider: AgentProvider;
     accountId?: string;
   }): Promise<AgentClient> {
-    const client = this.requireClient(options.provider, options.accountId);
+    const client = this.findClient(options.provider, options.accountId);
     if (!client) {
       const configuredProviders = this.getConfiguredProviderIds();
       throw new Error(
@@ -5478,6 +5477,14 @@ export class AgentManager {
   }
 
   private requireClient(provider: AgentProvider, accountId?: string): AgentClient {
+    const client = this.findClient(provider, accountId);
+    if (!client) {
+      throw new Error(`No client registered for provider '${provider}'`);
+    }
+    return client;
+  }
+
+  private findClient(provider: AgentProvider, accountId?: string): AgentClient | undefined {
     if (accountId && this.accounts) {
       const account = this.accounts.store.get(accountId);
       if (account.provider !== provider) throw new Error("Account and provider do not match");
@@ -5492,11 +5499,7 @@ export class AgentManager {
         return client;
       }
     }
-    const client = this.clients.get(provider);
-    if (!client) {
-      throw new Error(`No client registered for provider '${provider}'`);
-    }
-    return client;
+    return this.clients.get(provider);
   }
 
   private async syncNativeArchiveState(

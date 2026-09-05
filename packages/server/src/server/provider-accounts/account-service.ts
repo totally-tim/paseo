@@ -8,6 +8,7 @@ import type {
   ProviderAccount,
   ProviderAccountIdentity,
 } from "@getpaseo/protocol/provider-accounts";
+import { AccountProviderSchema } from "@getpaseo/protocol/provider-accounts";
 import type { ProviderUsage } from "../messages.js";
 import { unavailableUsage } from "../../services/quota-fetcher/usage.js";
 import type { ProviderAccountContext } from "../agent/provider-account-context.js";
@@ -329,6 +330,12 @@ export class ProviderAccountService {
     } finally {
       this.busy.delete(id);
     }
+  }
+
+  /** Refresh the external host CLI identities in the background after startup. */
+  inspectHostAccounts(): void {
+    for (const provider of AccountProviderSchema.options)
+      void this.inspect(`default:${provider}`).catch(() => undefined);
   }
 
   usageSnapshot(id: string): { accountId: string; usage: ProviderUsage; stale: boolean } {

@@ -211,6 +211,7 @@ test("listImportableProviderSessions filters, sorts, limits, and projects import
       [
         {
           provider: "codex",
+          config: { provider: "codex", cwd: "/repo" },
           persistence: {
             provider: "codex",
             sessionId: "live-session",
