@@ -1,0 +1,107 @@
+name: E2E
+
+# The browser and desktop suites are the slow half of CI: 593 Playwright tests and the
+# Electron renderer/browser-tab suites. They run here nightly and on demand so a pull
+# request is not held for an hour. A regression they catch lands on main first, so read
+# this workflow's result before cutting a release.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop-tests:
+    name: desktop-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies with retry
+        run: node scripts/npm-retry.mjs ci
+
+      - name: Build server stack
+        run: npm run build:server
+
+      - name: Run desktop tests
+        run: npm run test --workspace=@getpaseo/desktop
+
+      - name: Install virtual display
+        run: sudo apt-get update && sudo apt-get install -y xvfb xauth
+
+      - name: Install Playwright browser
+        run: npx playwright install chromium
+
+      - name: Run desktop renderer E2E
+        run: npm run test:e2e:renderer --workspace=@getpaseo/desktop
+
+      - name: Run desktop browser E2E
+        run: npm run test:e2e:browser-tabs --workspace=@getpaseo/desktop
+        env:
+          PASEO_DESKTOP_BROWSER_E2E_ARTIFACT_DIR: ${{ runner.temp }}/desktop-browser-e2e
+
+      - name: Upload desktop browser diagnostics
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: desktop-browser-e2e
+          path: ${{ runner.temp }}/desktop-browser-e2e
+          if-no-files-found: ignore
+          retention-days: 7
+
+  playwright:
+    name: playwright (shard ${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies with retry
+        run: node scripts/npm-retry.mjs ci
+
+      - name: Install Playwright browsers
+        timeout-minutes: 10
+        run: npx playwright install chromium
+
+      - name: Build server stack
+        run: npm run build:server
+
+      - name: Build native app dependency
+        run: npm run build --workspace=@getpaseo/expo-two-way-audio
+
+      - name: Install agent CLIs for provider tests
+        run: node scripts/npm-retry.mjs install -g @anthropic-ai/claude-code @openai/codex@0.105.0 opencode-ai
+
+      - name: Run Playwright E2E tests
+        run: npm run test:e2e --workspace=@getpaseo/app -- --shard=${{ matrix.shard }}/4
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-results-${{ matrix.shard }}
+          path: |
+            packages/app/test-results/
+            packages/app/playwright-report/
+          retention-days: 7

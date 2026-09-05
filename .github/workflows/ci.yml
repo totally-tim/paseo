@@ -1,5 +1,9 @@
 name: CI
 
+# This is the pull-request gate: format, lint, typecheck and unit tests only. The browser
+# and desktop end-to-end suites live in e2e.yml and run nightly, because holding a pull
+# request for an hour costs more than it catches on a project this size.
+
 on:
   push:
     branches: [main]
@@ -28,10 +32,8 @@ jobs:
       format: ${{ steps.filter.outputs.format }}
       quality: ${{ steps.filter.outputs.quality }}
       server: ${{ steps.filter.outputs.server }}
-      desktop: ${{ steps.filter.outputs.desktop }}
       app: ${{ steps.filter.outputs.app }}
       sdk: ${{ steps.filter.outputs.sdk }}
-      browser: ${{ steps.filter.outputs.browser }}
       cli: ${{ steps.filter.outputs.cli }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -142,54 +144,6 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 
-  desktop-tests:
-    name: desktop-tests
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.desktop != 'false') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies with retry
-        run: node scripts/npm-retry.mjs ci
-
-      - name: Build server stack
-        run: npm run build:server
-
-      - name: Run desktop tests
-        run: npm run test --workspace=@getpaseo/desktop
-
-      - name: Install virtual display
-        run: sudo apt-get update && sudo apt-get install -y xvfb xauth
-
-      - name: Install Playwright browser
-        run: npx playwright install chromium
-
-      - name: Run desktop renderer E2E
-        run: npm run test:e2e:renderer --workspace=@getpaseo/desktop
-
-      - name: Run desktop browser E2E
-        run: npm run test:e2e:browser-tabs --workspace=@getpaseo/desktop
-        env:
-          PASEO_DESKTOP_BROWSER_E2E_ARTIFACT_DIR: ${{ runner.temp }}/desktop-browser-e2e
-
-      - name: Upload desktop browser diagnostics
-        uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: desktop-browser-e2e
-          path: ${{ runner.temp }}/desktop-browser-e2e
-          if-no-files-found: ignore
-          retention-days: 7
-
   app-tests:
     name: app-tests
     needs: changes
@@ -246,50 +200,6 @@ jobs:
 
       - name: Typecheck client examples
         run: npm run typecheck:examples --workspace=@getpaseo/client
-
-  playwright:
-    name: playwright
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies with retry
-        run: node scripts/npm-retry.mjs ci
-
-      - name: Install Playwright browsers
-        timeout-minutes: 10
-        run: npx playwright install chromium
-
-      - name: Build server stack
-        run: npm run build:server
-
-      - name: Build native app dependency
-        run: npm run build --workspace=@getpaseo/expo-two-way-audio
-
-      - name: Install agent CLIs for provider tests
-        run: node scripts/npm-retry.mjs install -g @anthropic-ai/claude-code @openai/codex@0.105.0 opencode-ai
-
-      - name: Run Playwright E2E tests
-        run: npm run test:e2e --workspace=@getpaseo/app
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-
-      - name: Upload test artifacts
-        uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: playwright-results
-          path: |
-            packages/app/test-results/
-            packages/app/playwright-report/
-          retention-days: 7
 
   cli-tests:
     name: cli-tests

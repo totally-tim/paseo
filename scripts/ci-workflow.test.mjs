@@ -5,19 +5,20 @@ import test from "node:test";
 
 const repoRoot = new URL("../", import.meta.url);
 const ciWorkflowPath = new URL(".github/workflows/ci.yml", repoRoot);
+const e2eWorkflowPath = new URL(".github/workflows/e2e.yml", repoRoot);
 const desktopReleaseWorkflowPath = new URL(".github/workflows/desktop-release.yml", repoRoot);
 const filtersPath = new URL(".github/ci-paths.yml", repoRoot);
 const serverTsconfigPath = new URL("packages/server/tsconfig.server.json", repoRoot);
 const desktopPackagePath = new URL("packages/desktop/package.json", repoRoot);
 
+// The pull-request gate. The browser and desktop suites are deliberately not here; they
+// run in e2e.yml on a schedule, and the test below keeps them from being dropped instead.
 const gatedCiJobs = new Map([
   ["format", { name: "format", contract: "format" }],
   ["quality", { name: "quality", contract: "quality" }],
   ["server-tests", { name: "server-tests", contract: "server" }],
-  ["desktop-tests", { name: "desktop-tests", contract: "desktop" }],
   ["app-tests", { name: "app-tests", contract: "app" }],
   ["sdk-tests", { name: "sdk-tests", contract: "sdk" }],
-  ["playwright", { name: "playwright", contract: "browser" }],
   ["cli-tests", { name: "cli-tests", contract: "cli" }],
 ]);
 
@@ -117,12 +118,32 @@ test("focused contracts stay inside existing required checks", () => {
 
   assert.match(server, /npm run test --workspace=@getpaseo\/server/);
   assert.ok(!jobs.has("hub-cli-contract"));
+  assert.equal(desktop, "");
+});
 
+test("the browser and desktop suites still run, on a schedule rather than per pull request", () => {
+  const source = readFileSync(e2eWorkflowPath, "utf8");
+  const jobs = jobBlocks(source);
+  const trigger = source.split("jobs:", 1)[0];
+
+  // Scheduled, never on pull_request: that is the whole point of moving them here.
+  assert.match(trigger, /^\s+schedule:$/m);
+  assert.match(trigger, /^\s+- cron: /m);
+  assert.match(trigger, /^\s+workflow_dispatch:$/m);
+  assert.doesNotMatch(trigger, /^\s+pull_request:$/m);
+
+  assert.deepEqual([...jobs.keys()], ["desktop-tests", "playwright"]);
+
+  const desktop = jobs.get("desktop-tests")?.join("\n") ?? "";
   assert.match(desktop, /test:e2e:renderer/);
   assert.match(desktop, /test:e2e:browser-tabs/);
   assert.match(desktop, /npm run test --workspace=@getpaseo\/desktop/);
-  assert.ok(!jobs.has("desktop-browser-bridge"));
-  assert.ok(!jobs.has("playwright-desktop"));
+
+  // Sharded, or the browser suite is a single hour-long job again.
+  const playwright = jobs.get("playwright")?.join("\n") ?? "";
+  assert.match(playwright, /shard: \[1, 2, 3, 4\]/);
+  assert.match(playwright, /--shard=\$\{\{ matrix\.shard \}\}\/4/);
+  assert.match(playwright, /npm run test:e2e --workspace=@getpaseo\/app/);
 });
 
 test("server builds exclude test utilities at every domain depth", () => {
@@ -250,6 +271,7 @@ test("the fork only keeps owned GitHub and EAS automation", () => {
     "ci.yml",
     "desktop-release.yml",
     "desktop-rollout.yml",
+    "e2e.yml",
     "fork-upstream-drift.yml",
     "release-notes-sync.yml",
   ]);
