@@ -2825,6 +2825,7 @@ export class Session {
 
   private async handleDeleteAgentRequest(agentId: string, requestId: string): Promise<void> {
     await this.agentManager.cancelContinuation(agentId);
+    await this.continuations?.forget(agentId);
     this.sessionLogger.info({ agentId }, `Deleting agent ${agentId} from registry`);
 
     const knownWorkspaceId =

@@ -199,6 +199,8 @@ export interface SendPromptToAgentParams {
   prompt: AgentPromptInput;
   messageId?: string;
   activeTurnBehavior?: ActiveTurnBehavior;
+  /** Automatic dispatch must never interrupt a turn another caller started. */
+  replaceRunning?: boolean;
   runOptions?: AgentRunOptions;
   /** Optional mode to set on the agent before the run starts. */
   sessionMode?: string;
@@ -298,7 +300,7 @@ export async function sendPromptToAgent(
     : params.runOptions;
 
   return await startAgentRun(params.agentManager, params.agentId, params.prompt, params.logger, {
-    replaceRunning: true,
+    replaceRunning: params.replaceRunning ?? true,
     activeTurnBehavior: params.activeTurnBehavior,
     clearPendingPermissions: params.clearPendingPermissions,
     runOptions,

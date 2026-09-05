@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import type { AgentContinuationSnapshot, AgentQueueOperation } from "../messages.js";
+import type {
+  AgentContinuationSnapshot,
+  AgentQueuedMessageInput,
+  AgentQueueOperation,
+} from "../messages.js";
 import { AgentContinuationStatusSchema } from "@getpaseo/protocol/agent-continuation";
 import type { ProviderAccountService } from "../provider-accounts/account-service.js";
 import {
@@ -13,6 +17,7 @@ import { buildAgentPrompt } from "../agent/prompt-attachments.js";
 import { AgentContinuationStore, newContinuationRecord, type ContinuationRecord } from "./store.js";
 import { updateQueuedMessages, checkQueuedMessage, messageDigest } from "./queue.js";
 import { continuationSafetyError, isOrdinaryAgent } from "./safety.js";
+import { HANDOFF_FROM_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 
 interface Dependencies extends HandoffDependencies {
   store: AgentContinuationStore;
@@ -126,7 +131,7 @@ export class AgentContinuationService {
 
   async inspect(agentId: string): Promise<AgentContinuationSnapshot> {
     const record = await this.ensureRecord(agentId);
-    return this.snapshot(record);
+    return this.snapshot(record, agentId);
   }
 
   async manageQueue(
@@ -146,17 +151,38 @@ export class AgentContinuationService {
       };
     }
     const active = await this.deps.agentStorage.get(initial.agentId);
-    if (!active || active.archivedAt)
+    if (!active || active.archivedAt) {
+      if (operation.kind === "enqueue" && !retry)
+        await this.deps.store.releaseAttachments(initial.rootAgentId, operation.message);
       throw new Error("Restore the task before changing its queue.");
-    const record = await this.change(initial.rootAgentId, (current) => {
-      updateQueuedMessages(current, operation, this.timestamp(), enqueueDigest);
-      if (operation.kind === "enqueue" || operation.kind === "send_now")
-        current.queuePaused = false;
-    });
+    }
+    let released: AgentQueuedMessageInput | null = null;
+    let record: ContinuationRecord;
+    try {
+      record = await this.change(initial.rootAgentId, (current) => {
+        if (operation.kind === "cancel") {
+          const cancelled = current.queue.find((entry) => entry.id === operation.messageId);
+          if (cancelled) released = structuredClone(cancelled);
+        }
+        const inserted = operation.kind === "enqueue" && !retry;
+        updateQueuedMessages(current, operation, this.timestamp(), enqueueDigest);
+        // A replayed acknowledgement inserts nothing and must not undo Stop.
+        if (inserted || operation.kind === "send_now") current.queuePaused = false;
+      });
+    } catch (error) {
+      if (operation.kind === "enqueue" && !retry)
+        await this.deps.store.releaseAttachments(initial.rootAgentId, operation.message);
+      throw error;
+    }
+    if (released) await this.deps.store.releaseAttachments(record.rootAgentId, released);
     if (operation.kind === "send_now") {
       // User-authorized interruption, still serialized with recovery and every other dispatch.
       await this.exclusive(record.rootAgentId, async () => {
         const current = this.deps.store.forAgent(agentId)!;
+        // Claim the item under the lock: a concurrent Send now may already have sent it.
+        const item = current.queue.find((entry) => entry.id === operation.messageId);
+        if (!item || item.status !== "queued")
+          throw new Error("This message is no longer queued. Refresh the conversation.");
         if (
           current.recovery &&
           ["continuing", "waiting", "attention"].includes(current.recovery.status)
@@ -177,7 +203,17 @@ export class AgentContinuationService {
         await this.drain(current.rootAgentId, operation.messageId);
       });
     } else this.wake(record.agentId);
-    return this.snapshot(this.deps.store.forAgent(agentId)!);
+    return this.snapshot(this.deps.store.forAgent(agentId)!, agentId);
+  }
+
+  /** Drop a deleted task's continuation state. A deleted predecessor keeps the successor's. */
+  async forget(agentId: string): Promise<void> {
+    const record = this.deps.store.forAgent(agentId);
+    if (!record || record.agentId !== agentId) return;
+    const timer = this.timers.get(record.rootAgentId);
+    if (timer) clearTimeout(timer);
+    this.timers.delete(record.rootAgentId);
+    await this.deps.store.remove(record.rootAgentId);
   }
 
   async cancelExisting(agentId: string): Promise<void> {
@@ -251,12 +287,32 @@ export class AgentContinuationService {
     const initial = await this.ensureRecord(agentId);
     if (initial.agentId !== agentId) {
       const existing = await this.deps.agentStorage.getHandoff(agentId);
-      if (existing?.phase === "started") return run({});
-      throw new Error(`This task continued in ${initial.agentId}. Inspect it before retrying.`);
+      if (!existing || existing.successorAgentId !== initial.agentId)
+        throw new Error(`This task continued in ${initial.agentId}. Inspect it before retrying.`);
+      if (existing.phase === "started") return run({});
+      if (existing.phase === "dispatching")
+        throw new Error(
+          `Continuation ${existing.successorAgentId} already exists, but its prompt delivery is uncertain. Open it and check its history before sending more work.`,
+        );
+      // The successor exists but never received its briefing. Resume it under the task lock.
+      return this.exclusive(initial.rootAgentId, async () => {
+        const operationId = randomUUID();
+        await this.change(initial.rootAgentId, (record) => {
+          record.recovery = {
+            ...this.recovery(record, operationId, "manual", []),
+            sourceAgentId: agentId,
+          };
+        });
+        return this.runOwned(initial.rootAgentId, operationId, run);
+      });
     }
     await this.cancelExisting(initial.agentId);
+    const generation = this.deps.store.forAgent(agentId)?.generation;
     return this.exclusive(initial.rootAgentId, async () => {
       const current = this.deps.store.forAgent(agentId)!;
+      // A Stop that arrived while this request waited for the lock wins.
+      if (current.generation !== generation)
+        throw new Error("The continuation was cancelled before it started.");
       if (current.agentId !== agentId) {
         const existing = await this.deps.agentStorage.getHandoff(agentId);
         if (existing?.phase === "started") return run({});
@@ -266,18 +322,51 @@ export class AgentContinuationService {
       await this.change(initial.rootAgentId, (record) => {
         record.recovery = this.recovery(record, operationId, "manual", []);
       });
-      try {
-        const successor = await run(this.execution(initial.rootAgentId, operationId));
-        await this.activate(initial.rootAgentId, operationId);
-        return successor;
-      } catch (error) {
-        await this.attention(
-          initial.rootAgentId,
-          operationId,
-          "The continuation could not be confirmed. Inspect the source and successor before continuing.",
-        );
-        throw error;
-      }
+      return this.runOwned(initial.rootAgentId, operationId, run);
+    });
+  }
+
+  private async runOwned(
+    rootAgentId: string,
+    operationId: string,
+    run: (execution: HandoffExecution) => Promise<StoredAgentRecord>,
+  ): Promise<StoredAgentRecord> {
+    try {
+      const successor = await run(this.execution(rootAgentId, operationId));
+      await this.stopIfDisowned(rootAgentId, operationId);
+      await this.activate(rootAgentId, operationId);
+      return successor;
+    } catch (error) {
+      await this.attention(
+        rootAgentId,
+        operationId,
+        "The continuation could not be confirmed. Inspect the source and successor before continuing.",
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Cancellation can land while a provider is still starting the dispatched turn. The manager's
+   * guard ran before that await, so interrupt the turn now and say so if the interrupt fails.
+   */
+  private async stopIfDisowned(rootAgentId: string, operationId: string): Promise<void> {
+    const record = this.deps.store.forAgent(rootAgentId);
+    if (!record || record.recovery?.operationId === operationId) return;
+    const live = this.deps.agentManager.getAgent(record.agentId);
+    if (!live || !this.deps.agentManager.hasInFlightRun(record.agentId)) return;
+    const cancellation = await this.deps.agentManager
+      .cancelAgentRun(record.agentId)
+      .catch(() => ({ status: "refused" as const }));
+    if (cancellation.status !== "refused") return;
+    await this.change(rootAgentId, (current) => {
+      if (current.recovery?.status !== "cancelled") return;
+      Object.assign(current.recovery, {
+        status: "attention",
+        reason:
+          "Cancellation could not stop the continued turn. Inspect the conversation before continuing.",
+        updatedAt: this.timestamp(),
+      });
     });
   }
 
@@ -399,11 +488,13 @@ export class AgentContinuationService {
           runOptions: { continuationOperationId: operationId },
           unarchive: false,
           clearPendingPermissions: false,
+          replaceRunning: false,
         });
         await waitForAgentRunStartWithTimeout(this.deps.agentManager, source.id);
       } else {
         await this.switchAccount(record, source, choice.accountId);
       }
+      await this.stopIfDisowned(record.rootAgentId, operationId);
       await this.activate(record.rootAgentId, operationId);
     } catch {
       await this.attention(
@@ -548,6 +639,7 @@ export class AgentContinuationService {
           // Retain ownership even if Stop won during create, but never dispatch the successor.
           if (!record.agentIds.includes(successor.id)) record.agentIds.push(successor.id);
           const changed = record.agentId !== successor.id;
+          if (changed) record.retired[record.agentId] = this.timestamp();
           record.agentId = successor.id;
           if (record.recovery)
             Object.assign(record.recovery, {
@@ -638,6 +730,16 @@ export class AgentContinuationService {
         throw new Error("Queue changed before dispatch");
       queued.status = "dispatching";
     });
+    await this.dispatch(record, item);
+  }
+
+  private async dispatch(
+    record: ContinuationRecord,
+    item: ContinuationRecord["queue"][number],
+  ): Promise<void> {
+    const rootAgentId = record.rootAgentId;
+    const manager = this.deps.agentManager;
+    let dispatched = false;
     try {
       await sendPromptToAgent({
         ...this.deps,
@@ -647,23 +749,36 @@ export class AgentContinuationService {
         runOptions: { continuationOperationId: `queue:${record.generation}:${item.id}` },
         unarchive: false,
         clearPendingPermissions: false,
+        replaceRunning: false,
       });
+      dispatched = true;
       await waitForAgentRunStartWithTimeout(manager, record.agentId);
       await this.change(rootAgentId, (current) => {
         current.queue = current.queue.filter((entry) => entry.id !== item.id);
         current.receipts[item.id].outcome = "sent";
       });
     } catch {
+      // The manager refuses to start over an in-flight run before it sends anything.
+      const busy = !dispatched && manager.hasInFlightRun(record.agentId);
       await this.change(rootAgentId, (current) => {
         const queued = current.queue.find((entry) => entry.id === item.id);
-        if (queued) {
-          queued.status = "attention";
-          queued.error =
-            "Delivery could not be confirmed. Inspect the conversation before resending.";
+        if (!queued) return;
+        if (busy) {
+          // Another caller's turn won the race; the instruction simply waits its turn.
+          queued.status = "queued";
+          return;
         }
+        queued.status = "attention";
+        queued.error =
+          "Delivery could not be confirmed. Inspect the conversation before resending.";
         current.queuePaused = true;
       });
+      return;
     }
+    // Stop or Cancel wait may have landed while the provider was still starting the turn.
+    const after = this.deps.store.forAgent(rootAgentId);
+    if (after && (after.queuePaused || after.generation !== record.generation))
+      await manager.cancelAgentRun(record.agentId).catch(() => undefined);
   }
 
   private async ensureRecord(agentId: string): Promise<ContinuationRecord> {
@@ -671,6 +786,10 @@ export class AgentContinuationService {
     if (record) return record;
     const source = await this.deps.agentStorage.get(agentId);
     if (!source || source.internal || source.owner) throw new Error("Task not found");
+    // A successor seen before onCreated links it belongs to its predecessor's task.
+    const predecessor = source.labels[HANDOFF_FROM_AGENT_ID_LABEL];
+    const inherited = predecessor ? this.deps.store.forAgent(predecessor) : undefined;
+    if (inherited) return inherited;
     return this.deps.store.create({
       ...newContinuationRecord(agentId),
       policy: source.config?.continuationPolicy,
@@ -751,12 +870,13 @@ export class AgentContinuationService {
     this.timers.set(record.rootAgentId, timer);
   }
 
-  private snapshot(record: ContinuationRecord): AgentContinuationSnapshot {
+  private snapshot(record: ContinuationRecord, inspected: string): AgentContinuationSnapshot {
     return {
       rootAgentId: record.rootAgentId,
       agentId: record.agentId,
       continuation: record.recovery ? AgentContinuationStatusSchema.parse(record.recovery) : null,
       queuedMessages: record.queue,
+      retiredAt: inspected === record.agentId ? null : (record.retired[inspected] ?? null),
     };
   }
 

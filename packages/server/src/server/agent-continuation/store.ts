@@ -37,6 +37,8 @@ const RecordSchema = z.object({
   ),
   queuePaused: z.boolean(),
   generation: z.number().int().nonnegative().default(0),
+  /** When each former owner stopped owning the task, keyed by agent ID. */
+  retired: z.record(z.string(), z.string()).default({}),
 });
 export type ContinuationRecord = z.infer<typeof RecordSchema>;
 export type RecoveryState = z.infer<typeof RecoverySchema>;
@@ -51,6 +53,7 @@ export function newContinuationRecord(agentId: string): ContinuationRecord {
     receipts: {},
     queuePaused: false,
     generation: 0,
+    retired: {},
   };
 }
 
@@ -70,13 +73,43 @@ export class AgentContinuationStore {
     await fs.chmod(this.directory, 0o700);
     for (const entry of await fs.readdir(this.directory)) {
       if (!entry.endsWith(".json")) continue;
-      const record = RecordSchema.parse(
-        JSON.parse(await fs.readFile(path.join(this.directory, entry), "utf8")),
-      );
-      if (entry !== `${record.rootAgentId}.json`)
-        throw new Error("Continuation record identity does not match its filename");
+      const file = path.join(this.directory, entry);
+      let record: ContinuationRecord;
+      try {
+        record = RecordSchema.parse(JSON.parse(await fs.readFile(file, "utf8")));
+        if (entry !== `${record.rootAgentId}.json`)
+          throw new Error("Continuation record identity does not match its filename");
+      } catch {
+        // One unreadable record must not keep the daemon from starting. Keep the bytes for
+        // inspection; the task simply has no continuation state until someone restores it.
+        await fs.rename(file, `${file}.corrupt-${Date.now()}`);
+        continue;
+      }
       this.publish(record);
     }
+  }
+
+  /** Delete retained attachment copies that no queued item references any more. */
+  async releaseAttachments(rootAgentId: string, message: AgentQueuedMessageInput): Promise<void> {
+    const directory = path.join(this.directory, rootAgentId);
+    for (const attachment of message.attachments ?? []) {
+      if (attachment.type !== "uploaded_file") continue;
+      if (path.dirname(attachment.path) !== directory) continue;
+      await fs.rm(attachment.path, { force: true });
+    }
+  }
+
+  /** Forget a task entirely, including its retained attachments. */
+  async remove(rootAgentId: string): Promise<void> {
+    await this.serialize(rootAgentId, async () => {
+      const existing = this.records.get(rootAgentId);
+      if (!existing) return;
+      this.records.delete(rootAgentId);
+      for (const id of existing.agentIds)
+        if (this.roots.get(id) === rootAgentId) this.roots.delete(id);
+      await fs.rm(path.join(this.directory, `${rootAgentId}.json`), { force: true });
+      await fs.rm(path.join(this.directory, rootAgentId), { recursive: true, force: true });
+    });
   }
 
   async retainAttachments(

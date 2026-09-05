@@ -1286,6 +1286,8 @@ export const AgentContinuationSnapshotSchema = z.object({
   agentId: z.string(),
   continuation: AgentContinuationStatusSchema.nullable(),
   queuedMessages: z.array(AgentQueuedMessageSchema),
+  /** When the inspected agent stopped owning the task; null while it is the current agent. */
+  retiredAt: z.string().nullable().optional(),
 });
 export type AgentContinuationSnapshot = z.infer<typeof AgentContinuationSnapshotSchema>;
 export const AgentContinuationInspectRequestSchema = z.object({

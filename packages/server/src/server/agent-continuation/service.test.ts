@@ -9,6 +9,7 @@ import { AgentManager } from "../agent/agent-manager.js";
 import { AgentStorage } from "../agent/agent-storage.js";
 import { handoffAgent } from "../agent/handoff-agent.js";
 import { sendPromptToAgent } from "../agent/agent-prompt.js";
+import { HANDOFF_FROM_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import { ProviderAccountStore } from "../provider-accounts/account-store.js";
 import { ProviderAccountService } from "../provider-accounts/account-service.js";
 import { AgentContinuationStore } from "./store.js";
@@ -102,12 +103,16 @@ async function setup(input: { close?: () => Promise<void> } = {}) {
       return client;
     },
   });
+  const hooks: { beforeWorkspaceLookup?: () => Promise<void> } = {};
   const deps = {
     agentManager,
     agentStorage,
     accounts,
     logger,
-    getWorkspace: async () => ({ cwd: directory }),
+    getWorkspace: async () => {
+      await hooks.beforeWorkspaceLookup?.();
+      return { cwd: directory };
+    },
     providerSnapshotManager: {
       resolveCreateConfig: async (value: {
         requestedMode?: string;
@@ -167,6 +172,7 @@ async function setup(input: { close?: () => Promise<void> } = {}) {
     starts,
     clients,
     emitters,
+    hooks,
     startService,
     advance: (ms: number) => {
       now += ms;
@@ -548,43 +554,211 @@ test("Stop fences only the interrupted turn; a later turn's confirmed limit reco
   expect(f.starts).toHaveLength(1);
 });
 
-test("Stop during a live turn fences that turn's own late rejection but not the next turn", async () => {
+test("Stop fences the turn it interrupted but not the next turn's own rejection", async () => {
   const f = await setup();
-  await sendPromptToAgent({
-    ...f,
-    agentId: f.source.id,
-    prompt: "sleep",
-    unarchive: false,
-    clearPendingPermissions: false,
-  });
-  await vi.waitFor(() =>
-    expect(f.agentManager.getAgent(f.source.id)?.activeForegroundTurnId).toBeTruthy(),
-  );
-  const turnId = f.agentManager.getAgent(f.source.id)!.activeForegroundTurnId!;
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const suspend = f.agentManager.suspendForContinuation.bind(f.agentManager);
-  vi.spyOn(f.agentManager, "suspendForContinuation").mockImplementation(async (id) => {
-    await gate;
-    return suspend(id);
-  });
-  await f.service.reportCapacity(f.source.id, "limit-1", turnId);
-  await vi.waitFor(() => expect(f.agentManager.suspendForContinuation).toHaveBeenCalled());
-  await f.agentManager.cancelContinuation(f.source.id);
-  expect(f.store.forAgent(f.source.id)?.recovery).toMatchObject({
-    status: "cancelled",
-    cancelledTurnId: turnId,
-  });
-  release();
+  f.used.set(f.b, 100);
+  await f.service.reportCapacity(f.source.id, "limit-1", "turn-1");
   await f.service.flush();
-  await f.service.reportCapacity(f.source.id, "limit-1-late", turnId);
+  await f.agentManager.cancelContinuation(f.source.id);
+  // The live turn identity is captured at cancel time; pin it here to make the fence explicit.
+  await f.store.update(f.source.id, (record) => {
+    record.recovery!.cancelledTurnId = "turn-1";
+  });
+  f.used.set(f.b, 10);
+  await f.service.reportCapacity(f.source.id, "limit-1-late", "turn-1");
   expect(f.store.forAgent(f.source.id)?.recovery?.status).toBe("cancelled");
-  await f.service.reportCapacity(f.source.id, "limit-2", `${turnId}-next`);
+  await f.service.reportCapacity(f.source.id, "limit-2", "turn-2");
   expect(f.store.forAgent(f.source.id)?.recovery).toMatchObject({
     status: "continuing",
     eventId: "limit-2",
   });
   await f.service.flush();
+});
+
+test("a replayed enqueue acknowledgement does not resume a stopped queue", async () => {
+  const f = await setup();
+  const message = { id: "first", text: "Queued before Stop" };
+  await f.service.manageQueue(f.source.id, { kind: "enqueue", message });
+  await f.service.flush();
+  await vi.waitFor(() => expect(f.starts).toHaveLength(1));
+  const later = { id: "second", text: "Queued after the turn" };
+  await f.agentManager.cancelContinuation(f.source.id);
+  await f.service.manageQueue(f.source.id, { kind: "enqueue", message: later });
+  await f.service.flush();
+  await vi.waitFor(() => expect(f.starts).toHaveLength(2));
+  await f.agentManager.cancelContinuation(f.source.id);
+  expect(f.store.forAgent(f.source.id)?.queuePaused).toBe(true);
+  // A lost acknowledgement retried after Stop replays the receipt and inserts nothing.
+  await f.service.manageQueue(f.source.id, { kind: "enqueue", message });
+  await f.service.flush();
+  expect(f.store.forAgent(f.source.id)?.queuePaused).toBe(true);
+  expect(f.starts).toHaveLength(2);
+});
+
+test("concurrent Send now requests deliver the instruction once", async () => {
+  const f = await setup();
+  await f.agentManager.cancelContinuation(f.source.id);
+  const message = { id: "now", text: "Send this immediately" };
+  await f.service.manageQueue(f.source.id, { kind: "enqueue", message });
+  await f.service.flush();
+  await vi.waitFor(() => expect(f.starts).toHaveLength(1));
+  await f.agentManager.cancelContinuation(f.source.id);
+  const queued = { id: "second", text: "Queued while stopped" };
+  await f.store.update(f.source.id, (record) => {
+    record.queue.push({
+      ...queued,
+      status: "queued",
+      revision: 1,
+      createdAt: "2026-09-05T00:00:00Z",
+    });
+    record.receipts[queued.id] = { digest: "x", outcome: "queued" };
+    record.queuePaused = true;
+  });
+  const cancel = vi.spyOn(f.agentManager, "cancelAgentRun");
+  const results = await Promise.allSettled([
+    f.service.manageQueue(f.source.id, { kind: "send_now", messageId: queued.id }),
+    f.service.manageQueue(f.source.id, { kind: "send_now", messageId: queued.id }),
+  ]);
+  expect(results.map((entry) => entry.status).sort()).toEqual(["fulfilled", "rejected"]);
+  expect(f.starts.filter((entry) => entry.prompt.includes(queued.text))).toHaveLength(1);
+  expect(cancel).toHaveBeenCalledTimes(1);
+});
+
+test("automatic delivery never interrupts a turn that started during dispatch", async () => {
+  const f = await setup();
+  await f.agentManager.cancelContinuation(f.source.id);
+  f.hooks.beforeWorkspaceLookup = async () => {
+    f.hooks.beforeWorkspaceLookup = undefined;
+    await sendPromptToAgent({
+      ...f,
+      agentId: f.source.id,
+      prompt: "sleep",
+      unarchive: false,
+      clearPendingPermissions: false,
+    });
+    await vi.waitFor(() =>
+      expect(f.agentManager.getAgent(f.source.id)?.activeForegroundTurnId).toBeTruthy(),
+    );
+  };
+  const message = { id: "later", text: "Queued behind the human prompt" };
+  await f.service.manageQueue(f.source.id, { kind: "enqueue", message });
+  await f.service.flush();
+  const record = f.store.forAgent(f.source.id)!;
+  expect(record.queue[0]).toMatchObject({ id: "later", status: "queued" });
+  expect(record.queuePaused).toBe(false);
+  expect(f.starts.map((entry) => entry.prompt)).toEqual([expect.stringContaining("sleep")]);
+  expect(f.agentManager.getAgent(f.source.id)?.activeForegroundTurnId).toBeTruthy();
+});
+
+test("a Stop that lands while Continue with waits for the lock wins", async () => {
+  const f = await setup();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const choose = f.accounts.recoveryChoice.bind(f.accounts);
+  vi.spyOn(f.accounts, "recoveryChoice").mockImplementationOnce(async (input) => {
+    await gate;
+    return choose(input);
+  });
+  await f.service.reportCapacity(f.source.id, "limit");
+  await vi.waitFor(() => expect(f.accounts.recoveryChoice).toHaveBeenCalled());
+  const manual = handoffAgent(f, {
+    sourceAgentId: f.source.id,
+    provider: "codex",
+    accountSelection: { kind: "fixed", accountId: f.b },
+  });
+  await vi.waitFor(() => expect(f.store.forAgent(f.source.id)?.recovery?.status).toBe("cancelled"));
+  await f.agentManager.cancelContinuation(f.source.id);
+  release();
+  await expect(manual).rejects.toThrow("cancelled before it started");
+  await f.service.flush();
+  expect(await f.agentStorage.list()).toHaveLength(1);
+  expect(f.starts).toHaveLength(0);
+});
+
+test("Retry delivers a created successor that Stop left without its briefing", async () => {
+  const f = await setup();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const create = f.agentManager.createAgent.bind(f.agentManager);
+  vi.spyOn(f.agentManager, "createAgent").mockImplementationOnce(async (...args) => {
+    await gate;
+    return create(...args);
+  });
+  await f.service.reportCapacity(f.source.id, "limit");
+  await vi.waitFor(() => expect(f.agentManager.createAgent).toHaveBeenCalled());
+  await f.service.cancelExisting(f.source.id);
+  release();
+  await f.service.flush();
+  const stopped = await f.service.inspect(f.source.id);
+  expect(stopped.continuation?.status).toBe("cancelled");
+  expect(f.starts).toHaveLength(0);
+  const successor = await handoffAgent(f, {
+    sourceAgentId: f.source.id,
+    provider: "codex",
+    accountSelection: { kind: "fixed", accountId: f.b },
+  });
+  expect(successor.id).toBe(stopped.agentId);
+  expect(f.starts).toHaveLength(1);
+  expect((await f.service.inspect(f.source.id)).continuation?.status).toBe("active");
+  expect(await f.agentStorage.list()).toHaveLength(2);
+});
+
+test("inspecting a successor before it is linked joins its predecessor's task", async () => {
+  const f = await setup();
+  await f.service.inspect(f.source.id);
+  const successor = await f.agentManager.createAgent(
+    { provider: "codex", cwd: f.directory, accountSelection: { kind: "fixed", accountId: f.b } },
+    randomUUID(),
+    { workspaceId: "workspace", labels: { [HANDOFF_FROM_AGENT_ID_LABEL]: f.source.id } },
+  );
+  const snapshot = await f.service.inspect(successor.id);
+  expect(snapshot.rootAgentId).toBe(f.source.id);
+  expect(f.store.list().map((record) => record.rootAgentId)).toEqual([f.source.id]);
+});
+
+test("each predecessor reports when it stopped owning the task", async () => {
+  const f = await setup();
+  await f.service.reportCapacity(f.source.id, "limit");
+  await f.service.flush();
+  const successor = (await f.service.inspect(f.source.id)).agentId;
+  expect(successor).not.toBe(f.source.id);
+  expect((await f.service.inspect(f.source.id)).retiredAt).toBe(new Date(f.now()).toISOString());
+  expect((await f.service.inspect(successor)).retiredAt).toBeNull();
+});
+
+test("cancelling a queued upload releases its retained copy, and deleting the task forgets it", async () => {
+  const { writeFile, stat, readdir } = await import("node:fs/promises");
+  const f = await setup();
+  f.used.set(f.b, 100);
+  await f.service.reportCapacity(f.source.id, "limit");
+  await f.service.flush();
+  const upload = path.join(f.directory, "uploaded.txt");
+  await writeFile(upload, "retained");
+  const message = {
+    id: "file",
+    text: "Read the attachment",
+    attachments: [
+      {
+        type: "uploaded_file" as const,
+        id: "upload",
+        path: upload,
+        fileName: "uploaded.txt",
+        mimeType: "text/plain",
+        size: 8,
+      },
+    ],
+  };
+  const queued = await f.service.manageQueue(f.source.id, { kind: "enqueue", message });
+  const retained = queued.queuedMessages[0].attachments?.[0];
+  if (retained?.type !== "uploaded_file") throw new Error("Expected file");
+  expect((await stat(retained.path)).size).toBe(8);
+  await f.service.manageQueue(f.source.id, { kind: "cancel", messageId: "file" });
+  await expect(stat(retained.path)).rejects.toThrow();
+  await f.service.forget(f.source.id);
+  expect(f.store.forAgent(f.source.id)).toBeUndefined();
+  expect(await readdir(path.join(f.directory, "agent-continuations"))).toEqual([]);
 });

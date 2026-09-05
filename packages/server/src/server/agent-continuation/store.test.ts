@@ -55,3 +55,19 @@ test("a rejected transaction does not publish its partial changes", async () => 
   ).rejects.toThrow("cancelled operation");
   expect(store.forAgent(id)?.agentIds).toEqual([id]);
 });
+
+test("an unreadable record is set aside so the other tasks still load", async () => {
+  const { writeFile, readdir } = await import("node:fs/promises");
+  const directory = await mkdtemp(join(tmpdir(), "paseo-continuation-store-"));
+  directories.push(directory);
+  const store = new AgentContinuationStore(directory);
+  await store.initialize();
+  const id = randomUUID();
+  await store.create(newContinuationRecord(id));
+  await writeFile(join(directory, "agent-continuations", `${randomUUID()}.json`), "null");
+  const restarted = new AgentContinuationStore(directory);
+  await restarted.initialize();
+  expect(restarted.forAgent(id)?.rootAgentId).toBe(id);
+  const entries = await readdir(join(directory, "agent-continuations"));
+  expect(entries.filter((entry) => entry.includes(".corrupt-"))).toHaveLength(1);
+});
