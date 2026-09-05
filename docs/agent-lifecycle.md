@@ -61,7 +61,8 @@ transfer a provider's private session state. The `paseo-handoff` skill uses the 
 The source must acknowledge interruption and shutdown before the successor starts. A failed stop
 leaves continuation retryable and blocks new prompts to the source until shutdown succeeds. This
 prevents overlapping work when a provider's process is unresponsive. Once created, the successor ID
-is fixed across retries. Use **Retry** if a restart left that conversation empty. If a daemon
+is fixed across retries. Use **Retry** if a restart left that conversation empty, or if a stop
+arrived after the successor was created but before its briefing was sent. If a daemon
 crash leaves prompt delivery uncertain, Paseo exposes the existing successor and asks you to inspect
 it before sending more work. It never repeats that prompt automatically. Deleting the source also
 deletes its saved handoff files; the successor keeps context already sent to it.
@@ -70,13 +71,13 @@ Continuation links do not establish parentage. Archiving the source cannot archi
 Existing subagents retain their original parent; the successor's briefing must account for their
 unfinished work. Agents owned by an execution service cannot use this transition.
 
-An opted-in [account policy](provider-accounts.md#selection-and-capacity) lets the daemon initiate the same handoff after a live, confirmed capacity rejection. Warnings and historical events do not trigger it. Manual and automatic operations share task ownership and one successor. Automatic continuation preserves the running configuration, including permission mode and tool restrictions. Pending approvals, active subagents, or an interrupted tool with no confirmed outcome require attention.
+An opted-in [account policy](provider-accounts.md#selection-and-capacity) lets the daemon initiate the same handoff after a live, confirmed capacity rejection. Warnings and historical events do not trigger it. Manual and automatic operations share task ownership and one successor. A stop that lands while **Continue with…** waits for that ownership wins. Cancellation that arrives while a provider is still starting the dispatched turn interrupts that turn; when the interrupt is refused, the task asks for attention rather than reporting a clean stop. Stop fences the turn it interrupted, so a later turn's own confirmed rejection can still start a new recovery. Automatic continuation preserves the running configuration, including permission mode and tool restrictions. Pending approvals, active subagents, or an interrupted tool with no confirmed outcome require attention.
 
 The existing task tab follows the successor without changing its position or taking focus. The account transition links back to the previous conversation. Opening that conversation explicitly keeps it as a history view. Unsent drafts stay on their originating device and remain unsent across the transition.
 
 When accounts have no confirmed capacity, the daemon releases the provider runtime and retains an indefinite wait. Restart renews eligibility checks before resumption. If the original account recovers before a successor exists, the daemon resumes its saved session when supported. **Cancel wait**, **Stop**, and archiving the active task or workspace durably cancel recovery. Archiving a predecessor does not cancel the current task. Cancellation preserves queued instructions for inspection.
 
-**Queued** means that the daemon has retained the instruction and attachments. All clients read and edit the same queue, which follows the task after the interrupted turn. Queued instructions are excluded from the handoff briefing. A delivery that was in progress at restart requires inspection and is never retried automatically. Failed submissions remain in the device's draft. See [continuation persistence](data-model.md#continuation-state) for the ownership boundary.
+**Queued** means that the daemon has retained the instruction and attachments. All clients read and edit the same queue, which follows the task after the interrupted turn. Queued instructions are excluded from the handoff briefing. Automatic delivery never replaces a turn another caller started; the instruction waits for the next idle moment instead. A delivery that was in progress at restart requires inspection and is never retried automatically. Failed submissions remain in the device's draft, and the unresolved attempt follows the task to its successor so a retry reuses its message ID. Cancelling a queued instruction releases its retained attachment copies, and deleting the task forgets its queue. See [continuation persistence](data-model.md#continuation-state) for the ownership boundary.
 
 ### Subagents
 
