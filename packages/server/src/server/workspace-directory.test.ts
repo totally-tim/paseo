@@ -614,6 +614,8 @@ describe("WorkspaceDirectory empty projects", () => {
         projectDisplayName: "Renamed",
         projectCustomName: "Renamed",
         projectCustomIconRevision: null,
+        projectGroup: null,
+        projectKey: undefined,
         projectRootPath: "/workspace/empty",
         projectKind: "non_git",
       },

@@ -2,6 +2,12 @@
 
 All workspaces share one version and release together.
 
+The permanent fork has a narrower automation contract. Follow [fork.md](fork.md) for a fork
+desktop release; that process tags `main` without publishing npm packages. The package-release
+steps below need separate authorization. A release tag builds macOS desktop artifacts and syncs
+release notes. The fork does not automate mobile, web, website, relay, Docker, Nix, Linux
+desktop, or Windows desktop delivery.
+
 ## Two steps
 
 A release has exactly two steps. The agent does the first, the user authorizes the second.
@@ -112,7 +118,10 @@ npm run release:patch
 npm run release:minor
 ```
 
-This bumps the version across all workspaces, runs checks, publishes to npm, and pushes the branch + tag. The tag push triggers `Desktop Release`, `Android APK Release`, `Docker`, and `Release Notes Sync` on GitHub Actions. The workflows create the GitHub Release as a draft while builds and release-note sync run. EAS picks up the same tag via the EAS GitHub app and starts the iOS + Android store builds in parallel (see "Mobile builds (EAS)" below) — there is no mobile-release workflow under `.github/workflows`.
+This bumps the version across all workspaces, runs checks, publishes to npm, and pushes the
+branch and tag. The tag push triggers `Desktop Release` and `Release Notes Sync`. The desktop
+workflow keeps the GitHub Release as a draft until both macOS architectures and the updater
+manifest are ready.
 
 After the stable release succeeds, move npm's `beta` pointer to the new stable
 version for every published package. This changes dist-tags only; do not
@@ -127,10 +136,6 @@ done
 
 Verify both npm tags now resolve to `PASEO_VERSION` before considering the
 stable release complete.
-
-The Docker workflow builds images from the checked-out source tree on pull requests and on `main` as non-publishing checks. Stable `vX.Y.Z` tag pushes publish `ghcr.io/getpaseo/paseo:X.Y.Z` and `ghcr.io/getpaseo/paseo:latest`; beta `vX.Y.Z-beta.N` tag pushes publish only `ghcr.io/getpaseo/paseo:X.Y.Z-beta.N` and never move `latest`.
-
-The production relay is the Elixir service in [getpaseo/paseo-relay](https://github.com/getpaseo/paseo-relay), with its own deployment process. Paseo releases and pushes to this repository do not deploy it. The Cloudflare relay code and workflow in this repository are legacy and are not used in production.
 
 **Stable means stable.** If the user says "stable" or "ship stable", do not ask whether they want a beta first. They picked stable; treat it as a direct stable release. Only run the beta flow when the user explicitly says "beta".
 
@@ -152,7 +157,7 @@ npm run release:push         # Push HEAD + tag (triggers CI workflows)
 ```bash
 npm run release:beta:patch       # Start the next patch beta line
 npm run release:beta:minor       # Start the next minor beta line
-# ... test desktop and APK prerelease assets from GitHub Releases ...
+# ... test the macOS prerelease assets from GitHub Releases ...
 npm run release:beta:next        # Optional: cut X.Y.Z-beta.2, beta.3, ...
 npm run release:promote          # Promote X.Y.Z-beta.N to stable X.Y.Z
 ```
@@ -168,7 +173,6 @@ npm run release:promote          # Promote X.Y.Z-beta.N to stable X.Y.Z
 Use the beta path when you need to:
 
 - smoke a build yourself before promoting it to everyone
-- test a build manually in a Linux or Windows VM
 - send a build to a user who is hitting a specific problem
 - iterate on `beta.1`, `beta.2`, `beta.3`, and so on before deciding to ship broadly
 
@@ -176,14 +180,19 @@ Use the beta path when you need to:
 
 Stable desktop releases go out via a linear time-based rollout for automatic update checks: 0% admitted when the updater manifests appear, 100% admitted 36 hours later, linear ramp in between. Manual checks bypass the rollout so a user can install immediately when they click **Check**. Beta releases bypass the rollout entirely — beta users always receive updates immediately.
 
-The rollout is driven by a `rolloutHours` field stamped into the GitHub Release manifests (`latest-mac.yml`, `latest-linux.yml`, `latest.yml`) by the `finalize-rollout` job in `desktop-release.yml`.
+The rollout is driven by a `rolloutHours` field stamped into the GitHub Release manifest
+(`latest-mac.yml`) by the `finalize-rollout` job in `desktop-release.yml`.
 
 Desktop release builds now publish in two phases:
 
-- The GitHub Release stays a draft while platform build jobs upload the installers/packages (`.dmg`, `.zip`, `.exe`, `.AppImage`, etc.).
-- The final job merges and stamps every channel manifest, uploads them with the final `releaseDate` and `rolloutHours`, then publishes the GitHub Release.
+- The GitHub Release stays a draft while the Apple silicon and Intel jobs upload their
+  artifacts.
+- The final job merges and stamps the macOS channel manifest, uploads it with the final
+  `releaseDate` and `rolloutHours`, then publishes the GitHub Release.
 
-Drafts do not appear in GitHub's releases feed. Updater clients continue to see the previous complete release until all three manifests are available. If a desktop build or manifest upload fails, the new release stays a draft.
+Drafts do not appear in GitHub's releases feed. Updater clients continue to see the previous
+complete release until the macOS manifest is available. If a desktop build or manifest upload
+fails, the new release stays a draft.
 
 ### Default behavior
 
@@ -253,6 +262,15 @@ If you ship N+1 while N is still ramping, N+1 starts a fresh rollout from its ow
 
 If N+1 is a hotfix for a bug in N, dispatch `desktop-rollout.yml -f tag=v0.1.<N+1> -f rollout_hours=0` after N+1 publishes so the users who already got N reach the fix fast.
 
+### macOS system floor
+
+The desktop app requires macOS 13 or newer. Keep both release guards when the floor changes:
+
+- `packages/desktop/electron-builder.yml` writes the macOS version to `LSMinimumSystemVersion` for new installs.
+- `scripts/merge-mac-manifest.mjs` writes the matching Darwin kernel version to `minimumSystemVersion` in the update manifest. Existing clients check this before downloading an update.
+
+macOS 13 maps to Darwin 22. The two values use different version domains; do not copy the macOS version into the update manifest.
+
 ### Limitations
 
 - **No pause / kill switch.** To stop new admissions, ship a superseding release. Clients revalidate on quit and will not install the superseded download, but a client that already completed installation cannot be recalled; ship a hotfix `+1` patch.
@@ -260,72 +278,11 @@ If N+1 is a hotfix for a bug in N, dispatch `desktop-rollout.yml -f tag=v0.1.<N+
 - **Bootstrap caveat.** Clients running a build older than the rollout feature ignore `rolloutHours` and admit immediately. Rollout protection only applies to clients running the rollout-aware version or later.
 - **Up to ~30 min automatic admission latency.** Renderer polls every 30 minutes, so a stable user may take up to that long to be evaluated against the rollout window. Clicking **Check** is manual and bypasses rollout admission.
 
-## Mobile builds (EAS)
-
-iOS and Android store builds are not in `.github/workflows`. They are triggered by the EAS GitHub app the moment the `v*` tag is pushed:
-
-- **Android (Play Store)** — EAS builds with profile `production` and auto-submits to the Play Store via `eas submit` (EAS-managed credentials, no Fastlane).
-- **iOS (TestFlight + App Store)** — EAS builds with profile `production`, uploads to TestFlight, and a Fastlane lane submits the build for App Store review.
-- **Android APK (GitHub Release asset)** — separate, via `.github/workflows/android-apk-release.yml`. This is the only Android-related workflow that lives in this repo.
-
-EAS uses the local app version source. `packages/app/app.config.js` derives the native version from the package version. Android `versionCode` is `major * 1_000_000 + minor * 1_000 + patch`. iOS reserves 1,000 build slots per app version: beta `N` uses slot `N`, and stable uses slot `999`. For example, `0.2.6-beta.2` appears in App Store Connect as version `0.2.6` build `2006002`; stable uses build `2006999`. Rebuilding the same tag produces the same native build number; if a store has already accepted a binary and you need a different binary, cut the next beta or patch instead of relying on EAS remote auto-increment.
-
-Beta tags run `Release iOS Beta`. The workflow uploads the build to TestFlight, distributes it to the persistent `Paseo Beta` external group, and submits it for Beta App Review. Testers and the group are managed once in App Store Connect; releases require no dashboard action.
-
-There is no mobile-release workflow under `.github/workflows`. The EAS GitHub app reads the workflows under `packages/app/.eas/workflows` and handles tag triggering directly.
-
-### Watching mobile builds from the terminal
-
-Use the EAS CLI from `packages/app/`:
-
-```bash
-cd packages/app
-
-# Recent builds (newest first). Pipe to jq for status only.
-npx eas build:list --limit 8 --non-interactive --json | jq '.[] | {platform, status, appVersion, gitCommitHash}'
-
-# Recent EAS workflow runs. This is the source of truth for submit/review jobs.
-npx eas workflow:runs --json | jq '.[] | {status, workflowName, trigger, gitCommitHash, startedAt, finishedAt}'
-
-# Filter by platform.
-npx eas build:list --platform ios --limit 5 --non-interactive --json
-npx eas build:list --platform android --limit 5 --non-interactive --json
-
-# Inspect a specific build.
-npx eas build:view <build-id>
-
-# Inspect the full release workflow, including submit_ios, submit_android,
-# and submit_ios_for_review.
-npx eas workflow:view <workflow-run-id> --json
-
-# Read failed submit/review job logs.
-npx eas workflow:logs <workflow-job-id> --all-steps --non-interactive
-
-# Stream logs for a build.
-npx eas build:view <build-id> --json | jq '.logFiles[]'
-```
-
-A build's `gitCommitHash` must match the release tag commit. `status` walks through `NEW` → `IN_QUEUE` → `IN_PROGRESS` → `FINISHED` (or `ERRORED`/`CANCELED`). The EAS workflow run's `gitCommitHash` and `trigger` must also match the release tag.
-
-Once a build is `FINISHED`, EAS still has release-critical work to do: Android must submit to the Play Store, and iOS must upload to TestFlight **and** submit the build for App Store review. The release is not done until all platforms are on their way through the stores.
-
-For the `Release Mobile` EAS workflow, these jobs must pass:
-
-- `build_ios` — iOS binary built
-- `submit_ios` — iOS binary uploaded to App Store Connect/TestFlight
-- `submit_ios_for_review` — iOS build submitted for App Store review via Fastlane
-- `build_android` — Android store binary built
-- `submit_android` — Android binary submitted to the Play Store
-
-Do not treat `build_ios: SUCCESS` or `submit_ios: SUCCESS` as a completed iOS release. `submit_ios_for_review: FAILURE` means the iOS release is blocked even if the build is visible in TestFlight.
-
-To confirm the submission landed, inspect the EAS workflow with `npx eas workflow:view <workflow-run-id> --json`. App Store Connect (review state for the matching version/build) and the Play Console track are the final ground truth.
-
 ## Release completion and heartbeat
 
 A release is **in progress** after npm publication and tag push. Report it as
-**shipped** only after every applicable build, publication, asset, manifest, and
-store submission passes the completion checklist.
+**shipped** only after every required build, publication, asset, and manifest
+passes the completion checklist.
 
 Immediately after every beta, stable, or promotion tag push, create a heartbeat
 that resumes the release in the current conversation. Create it automatically
@@ -333,18 +290,11 @@ with `create_heartbeat`. The heartbeat owns the release until it either reaches
 the completion checklist or finds a failure that needs new user authority.
 
 Each heartbeat checks the release tag commit, all GitHub Actions runs for the
-release branch and tag, npm dist-tags, the GitHub Release body and assets,
-desktop updater manifests, the published Docker image, and the applicable EAS
-workflow. Inspect the GitHub Release itself and confirm that the macOS, Linux,
-Windows, and Android APK assets are present along with the channel manifests
-(`latest-mac.yml`, `latest-linux.yml`, and `latest.yml` for stable;
-`beta-mac.yml`, `beta-linux.yml`, and `beta.yml` for beta).
-
-For stable releases, also confirm every required mobile build, upload, store
-submission, and review-submission job for the release commit. For betas, confirm
-the beta EAS workflow completed its TestFlight distribution and Beta App Review
-path. Delete the heartbeat only after every applicable checklist item passes,
-then report the release as shipped.
+release branch and tag, npm dist-tags, the GitHub Release body and macOS assets,
+and the desktop updater manifest. Confirm that both macOS architectures are
+present with `latest-mac.yml` for stable or `beta-mac.yml` for beta. Delete
+the heartbeat only after every checklist item passes, then report the release
+as shipped.
 
 Pattern:
 
@@ -356,7 +306,7 @@ Pattern:
   "timezone": "UTC",
   "maxRuns": 120,
   "expiresIn": "24h",
-  "prompt": "Resume the vX.Y.Z release babysit for commit <sha>. Check npm tags; every GitHub Actions run for the release branch and tag; the published GitHub Release body, expected desktop/APK assets, and channel manifests; the Docker image; and the matching EAS workflow. Completion requires every applicable checklist item. For stable, require build_ios, submit_ios, submit_ios_for_review, build_android, and submit_android to succeed. For beta, require the beta TestFlight distribution and Beta App Review path. If work is pending, wait for the next heartbeat. If a failure can be retried safely for the same version, follow the failed-release procedure; otherwise report the blocker. When every applicable completion-checklist item passes, delete THIS heartbeat, report shipped, and stop.",
+  "prompt": "Resume the vX.Y.Z release babysit for commit <sha>. Check npm tags, every GitHub Actions run for the release branch and tag, the GitHub Release body, both macOS architecture assets, and the channel manifest. Completion requires every checklist item. If work is pending, wait for the next heartbeat. If a failure can be retried safely for the same version, follow the failed-release procedure; otherwise report the blocker. When every checklist item passes, delete THIS heartbeat, report shipped, and stop.",
 }
 ```
 
@@ -375,81 +325,40 @@ The GitHub Release body is populated automatically by the `Release Notes Sync` w
 - The default download target only moves when you publish the final stable release tag like `v0.1.41`.
 - The public `/changelog` page renders `CHANGELOG.md` as-is, so the in-flight `-beta.N` entry shows there once it lands on `main` — that's intended, it's where beta users check what's coming. Only the **default download target** stays pinned to the latest stable; the download links read GitHub's releases API, not the changelog, so a `-beta.N` heading on top never affects them.
 - The download page's "What's new" link deep-links the **minor group** anchor (`/changelog#release-0.3`), not the exact entry: promotion collapses the beta entries into one stable entry, so the minor group remains the durable target. A version with no entry in the bundled changelog — a tag whose changelog commit hasn't redeployed the site yet — links the plain `/changelog` instead of a dead anchor.
-- The website itself is deployed by `Deploy Website` (Cloudflare Workers), which redeploys on the `release: published` event emitted when a stable draft is published and on pushes to `main` that touch `CHANGELOG.md` or `packages/website/**`. Its job condition excludes beta prereleases.
+- This fork does not deploy the website automatically. A website deployment is a separate,
+  explicitly authorized operation.
 
 ## Fixing a failed release build
 
-**NEVER bump the version to fix a build problem.** New versions are reserved for meaningful product changes (features, fixes, improvements). Build/CI failures are fixed on the current version.
+**NEVER bump the version to fix a build problem.** New versions are reserved for meaningful
+product changes. Fix build and CI failures on the current version.
 
-**Do not rely on `workflow_dispatch` for tagged code fixes.** The `workflow_dispatch` trigger runs the workflow file from the default branch but checks out the code at the tag ref (`ref: ${{ inputs.tag }}`). That means fixes committed to `main` won't change the tagged source tree being built. `workflow_dispatch` only helps when the fix lives in the workflow file itself.
+Do not rely on `workflow_dispatch` for tagged code fixes. The dispatch uses the workflow from
+the default branch but checks out the tag named by `inputs.tag`. A code fix committed to
+`main` is absent from that checkout.
 
-For Docker-only retries, **do not push or force-push a `v*` release tag**.
-`v*` tag pushes rebuild desktop assets, the Android APK, Docker, release notes,
-and EAS mobile release builds. Use the Docker workflow dispatch instead:
-
-```bash
-gh workflow run docker.yml \
-  --ref main \
-  -f paseo_version=X.Y.Z-beta.N \
-  -f publish=true
-```
-
-This replaces `ghcr.io/getpaseo/paseo:X.Y.Z-beta.N` in place without touching
-desktop, APK, or EAS release builders. The Docker exception is safe because the
-dispatch runs from `--ref main` and uses the explicit `paseo_version`; it does
-not check out or move the `v*` release tag.
-
-To retry a failed non-Docker release workflow, push a retry tag on the commit
-you want to build. Reusing the same tag name is expected: move it with
-`git tag -f ...` and push it with `--force` so the workflow rebuilds the commit
-you actually want.
-
-A failed desktop build leaves the GitHub Release as a draft. `finalize-rollout`
-uploads manifests from successful platforms before it fails. A later
-single-platform retry reuses those manifests, stamps the complete set with one
-release date, and publishes the draft. Use `desktop-vX.Y.Z` when more than one
-platform failed. A `workflow_dispatch` rebuild with publishing enabled follows
-the same path against the existing draft.
-
-Prefer a tag push over `workflow_dispatch` when rebuilding desktop or APK
-release assets. Prefer Docker workflow dispatch when rebuilding only the Docker
-image.
-
-The retry tag patterns below still work and remain the supported way to rebuild specific release targets:
+To rebuild the macOS release from a corrected commit, move the macOS retry tag and force-push
+it:
 
 ```bash
-# Desktop (all platforms)
-git tag -f desktop-v0.1.28 HEAD && git push origin desktop-v0.1.28 --force
-
-# Desktop (single platform)
-git tag -f desktop-macos-v0.1.28 HEAD && git push origin desktop-macos-v0.1.28 --force
-git tag -f desktop-linux-v0.1.28 HEAD && git push origin desktop-linux-v0.1.28 --force
-git tag -f desktop-windows-v0.1.28 HEAD && git push origin desktop-windows-v0.1.28 --force
-
-# Android APK
-git tag -f android-v0.1.28 HEAD && git push origin android-v0.1.28 --force
-
-# Beta
-git tag -f v0.1.29-beta.2 HEAD && git push origin v0.1.29-beta.2 --force
+git tag -f desktop-macos-v0.1.28 HEAD
+git push origin desktop-macos-v0.1.28 --force
 ```
 
-This ensures the checkout ref matches the actual code on `main` with the fix included.
-
-- `vX.Y.Z` or `vX.Y.Z-beta.N` rebuilds the full tagged release
-- `desktop-vX.Y.Z` rebuilds desktop for all desktop platforms only
-- `desktop-macos-vX.Y.Z`, `desktop-linux-vX.Y.Z`, and `desktop-windows-vX.Y.Z` rebuild only that desktop platform
-- `android-vX.Y.Z` rebuilds the Android APK release only
+The retry tag resolves to the original `v0.1.28` GitHub Release. The workflow rebuilds Apple
+silicon and Intel artifacts, replaces the macOS updater manifest, and publishes the draft only
+after both builds pass. Use `workflow_dispatch` when the fix changes only the workflow file.
 
 If you decide to publish a release without working desktop builds, inspect its
 assets first, then publish it manually:
 
 ```bash
-RELEASE_LOOKUP=$(node scripts/github-release.mjs --repo getpaseo/paseo --tag vX.Y.Z)
+RELEASE_LOOKUP=$(node scripts/github-release.mjs --repo totally-tim/paseo --tag vX.Y.Z)
 gh release view "$RELEASE_LOOKUP" --json isDraft,isPrerelease,assets
 gh release edit "$RELEASE_LOOKUP" --tag vX.Y.Z --draft=false
 
 # Keep a beta marked as a prerelease:
-RELEASE_LOOKUP=$(node scripts/github-release.mjs --repo getpaseo/paseo --tag vX.Y.Z-beta.N)
+RELEASE_LOOKUP=$(node scripts/github-release.mjs --repo totally-tim/paseo --tag vX.Y.Z-beta.N)
 gh release edit "$RELEASE_LOOKUP" --tag vX.Y.Z-beta.N --draft=false --prerelease
 ```
 
@@ -608,13 +517,9 @@ Each beta entry records what its testers receive. Promotion produces the single 
 - [ ] `npm run release:beta:patch`, `npm run release:beta:minor`, or `npm run release:beta:next` completes successfully
 - [ ] Every GitHub Actions run for the complete release commit and tag is green
 - [ ] npm shows the version under the `beta` dist-tag, not `latest`
-- [ ] The GitHub prerelease was published only after the three beta manifests were uploaded, and it has the changelog body and every expected macOS, Linux, Windows, and Android APK asset
-- [ ] GitHub `Desktop Release` workflow for the `v*-beta.N` tag is green
-- [ ] The GitHub prerelease contains `beta-mac.yml`, `beta-linux.yml`, and `beta.yml`
-- [ ] GitHub `Android APK Release` workflow for the same tag is green
-- [ ] GitHub `Docker` workflow is green and the versioned beta image is published without moving `latest`
+- [ ] The GitHub prerelease has the changelog body, both macOS architecture assets, and `beta-mac.yml`
+- [ ] GitHub `Desktop Release` for the `v*-beta.N` tag is green
 - [ ] GitHub `Release Notes Sync` mirrored the beta entry into the prerelease body
-- [ ] EAS `Release iOS Beta` completed its build, TestFlight distribution, external beta group, and Beta App Review path
 - [ ] The release heartbeat was created after the tag push and deleted only after every item above passed
 
 ### Stable release (or promotion)
@@ -631,16 +536,8 @@ Each beta entry records what its testers receive. Promotion produces the single 
 - [ ] `npm run release:patch`, `npm run release:minor`, or `npm run release:promote` completes successfully
 - [ ] Every GitHub Actions run for the complete release commit and tag is green
 - [ ] Move npm's `beta` dist-tag to the new stable version for every published package and verify both `latest` and `beta` resolve to it
-- [ ] The GitHub Release was published only after the three stable manifests were uploaded, and it has the changelog body and every expected macOS, Linux, Windows, and Android APK asset
-- [ ] GitHub `Desktop Release` workflow for the `v*` tag is green
-- [ ] The GitHub Release contains `latest-mac.yml`, `latest-linux.yml`, and `latest.yml`
-- [ ] GitHub `Android APK Release` workflow for the same tag is green
-- [ ] GitHub `Docker` workflow is green and both the versioned and `latest` images are published
+- [ ] The GitHub Release has the changelog body, both macOS architecture assets, and `latest-mac.yml`
+- [ ] GitHub `Desktop Release` for the `v*` tag is green
+- [ ] `latest-mac.yml` contains the current `minimumSystemVersion` guard
 - [ ] GitHub `Release Notes Sync` is green and the release body matches the stable changelog entry
-- [ ] EAS `Release Mobile` workflow for the same tag is green
-- [ ] EAS iOS `build_ios` completes for the same tag
-- [ ] EAS iOS `submit_ios` succeeds, uploading the build to App Store Connect/TestFlight
-- [ ] EAS iOS `submit_ios_for_review` succeeds, putting the build into App Store review
-- [ ] EAS Android `build_android` completes for the same tag
-- [ ] EAS Android `submit_android` succeeds, putting the build on its Play Store track
 - [ ] The release heartbeat was created after the tag push and deleted only after every item above passed

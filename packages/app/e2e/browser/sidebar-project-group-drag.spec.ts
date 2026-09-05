@@ -168,6 +168,7 @@ test.describe("Project groups by drag and drop", () => {
         await page.getByTestId("sidebar-display-preferences-menu").click();
         await page.getByTestId("sidebar-display-new-group").click();
         await page.getByTestId(`project-group-create-member-${a.projectKey}`).click();
+        await page.getByTestId("project-group-create-grouped-toggle").click();
         await page.getByTestId(`project-group-create-member-${c.projectKey}`).click();
         await expect(page.getByTestId("project-group-create-confirm")).toBeDisabled();
         await createGroupInModal(page, "Client Z");

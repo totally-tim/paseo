@@ -11,6 +11,10 @@ export function firstLine(text: string, max = 160): string {
   const line = text
     .split("\n")
     .map((part) => part.trim())
+    .filter(
+      (part) => !/^(?:([-*_])(?:\s*\1){2,}|[=~-]{2,}|`{3,}[^`]*|~{3,}[^~]*|#+\s*)$/.test(part),
+    )
+    .map((part) => part.replace(/^#{1,6}\s+/, "").replace(/^>\s*/, ""))
     .find((part) => part.length > 0);
   if (!line) return "";
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;

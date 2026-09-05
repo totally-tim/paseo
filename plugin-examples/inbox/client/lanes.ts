@@ -18,12 +18,14 @@ export type CardReason = "question" | "permission" | "error" | "working" | "fini
 
 export interface InboxCard {
   agent: Agent;
+  /** The member whose request, activity, error, or result gives the card its state. */
+  subject: Agent;
+  members: readonly Agent[];
   workspace: Workspace | null;
   lane: Lane;
   reason: CardReason;
   /** The request to answer. May belong to a same-workspace subagent. */
   request: PermissionRequest | null;
-  requestAgentId: string;
   subagentCount: number;
   /** When the agent entered its current state. */
   since: string | null;
@@ -64,10 +66,14 @@ function groupByRoot(agents: readonly Agent[]): Map<string, Agent[]> {
 
 function firstRequest(
   agents: readonly Agent[],
-): { request: PermissionRequest; agentId: string } | null {
-  for (const agent of agents) {
+): { request: PermissionRequest; agent: Agent } | null {
+  const ordered = [...agents].sort(
+    (a, b) =>
+      time(a.attentionTimestamp ?? activityAt(a)) - time(b.attentionTimestamp ?? activityAt(b)),
+  );
+  for (const agent of ordered) {
     const request = agent.pendingPermissions[0];
-    if (request) return { request, agentId: agent.id };
+    if (request) return { request, agent };
   }
   return null;
 }
@@ -79,6 +85,7 @@ function toCard(
 ): InboxCard | null {
   const base = {
     agent: root,
+    members,
     workspace,
     subagentCount: members.length - 1,
   };
@@ -89,8 +96,8 @@ function toCard(
       lane: "needsYou",
       reason: pending.request.kind === "question" ? "question" : "permission",
       request: pending.request,
-      requestAgentId: pending.agentId,
-      since: root.attentionTimestamp ?? activityAt(root),
+      subject: pending.agent,
+      since: pending.agent.attentionTimestamp ?? activityAt(pending.agent),
     };
   }
   const errored = members.find(
@@ -103,11 +110,11 @@ function toCard(
       lane: "needsYou",
       reason: "error",
       request: null,
-      requestAgentId: errored.id,
+      subject: errored,
       since: errored.attentionTimestamp ?? activityAt(errored),
     };
   }
-  const running = members.some(
+  const running = members.find(
     (agent) => agent.status === "running" || agent.status === "initializing",
   );
   if (running) {
@@ -116,18 +123,21 @@ function toCard(
       lane: "working",
       reason: "working",
       request: null,
-      requestAgentId: root.id,
-      since: root.activeTurn?.startedAt ?? activityAt(root),
+      subject: running,
+      since: running.activeTurn?.startedAt ?? activityAt(running),
     };
   }
-  if (root.requiresAttention && root.attentionReason === "finished") {
+  const finished = members.find(
+    (agent) => agent.requiresAttention && agent.attentionReason === "finished",
+  );
+  if (finished) {
     return {
       ...base,
       lane: "done",
       reason: "finished",
       request: null,
-      requestAgentId: root.id,
-      since: root.attentionTimestamp ?? activityAt(root),
+      subject: finished,
+      since: finished.attentionTimestamp ?? activityAt(finished),
     };
   }
   return null;

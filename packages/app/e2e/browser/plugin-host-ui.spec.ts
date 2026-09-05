@@ -82,6 +82,7 @@ async function useCompactLayout(page: Page): Promise<void> {
 }
 
 async function reopenHostUiPluginFromCompactSidebar(page: Page): Promise<void> {
+  await page.getByTestId("plugin-surface-close").click();
   await openMobileAgentSidebar(page);
   await expectMobileAgentSidebarVisible(page);
   await page.getByRole("button", { name: "Host UI", exact: true }).click();

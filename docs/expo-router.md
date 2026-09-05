@@ -26,6 +26,10 @@ registers grandchildren. Treat that warning as a route-tree bug. On native, that
 shape can leave a nested index route mounted without its local dynamic params and
 render a blank screen.
 
+Keep the navigator's ancestors mounted across responsive breakpoints. Toggle gesture and
+explorer behavior through props instead of conditionally wrapping the routed children.
+Reparenting the navigator resets its route to startup even when its pathname has not changed.
+
 ## Startup
 
 The root `/` route chooses a host boundary. It does not jump directly into a host

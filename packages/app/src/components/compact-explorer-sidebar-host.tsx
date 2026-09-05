@@ -99,7 +99,7 @@ function useActiveCompactExplorerSidebarModel(
 interface CompactExplorerSidebarHostProps {
   children: ReactNode;
   enabled: boolean;
-  presentation: "overlay" | "dock";
+  presentation: "overlay" | "dock" | "pane";
 }
 
 export function CompactExplorerSidebarHost({
@@ -153,7 +153,7 @@ export function CompactExplorerSidebarHost({
   }, []);
 
   const explorer =
-    enabled && model ? (
+    enabled && presentation !== "pane" && model ? (
       <DiffDocumentWorkspaceCacheProvider key={model.persistenceKey}>
         {presentation === "dock" ? (
           <NativeExplorerSidebarDock
@@ -177,25 +177,18 @@ export function CompactExplorerSidebarHost({
       </DiffDocumentWorkspaceCacheProvider>
     ) : null;
 
-  if (presentation === "dock") {
-    return (
+  // The routed child keeps the same ancestors when desktop, dock, and overlay
+  // presentations change. Reparenting it remounts the root navigator.
+  return (
+    <CompactExplorerOpenGestureSurface
+      enabled={enabled && presentation === "overlay" && Boolean(model?.workspaceRoot)}
+      onOpenExplorer={handleOpenExplorer}
+    >
       <View style={styles.row} onLayout={handleContainerLayout}>
         <View style={styles.fill}>{children}</View>
         {explorer}
       </View>
-    );
-  }
-
-  return (
-    <>
-      <CompactExplorerOpenGestureSurface
-        enabled={enabled && Boolean(model?.workspaceRoot)}
-        onOpenExplorer={handleOpenExplorer}
-      >
-        {children}
-      </CompactExplorerOpenGestureSurface>
-      {explorer}
-    </>
+    </CompactExplorerOpenGestureSurface>
   );
 }
 

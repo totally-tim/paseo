@@ -25,6 +25,7 @@ export type {
   PluginCommandCapabilities,
   PluginCommandCenterItemContribution,
   PluginClientContext,
+  PluginClientStorage,
   PluginClientContribution,
   PluginClientSlashCommandContribution,
   PluginClientOpenPanelOptions,

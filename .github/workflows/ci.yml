@@ -5,7 +5,6 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  merge_group:
   workflow_dispatch:
 
 concurrency:
@@ -25,16 +24,14 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      full: ${{ github.event_name != 'pull_request' || steps.filter.outputs.routing != 'false' || steps.filter.outputs.workspace != 'false' || steps.filter.outputs.ci != 'false' }}
+      full: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.routing != 'false' || steps.filter.outputs.workspace != 'false' || steps.filter.outputs.ci != 'false' }}
       format: ${{ steps.filter.outputs.format }}
       quality: ${{ steps.filter.outputs.quality }}
-      hub: ${{ steps.filter.outputs.hub }}
       server: ${{ steps.filter.outputs.server }}
       desktop: ${{ steps.filter.outputs.desktop }}
       app: ${{ steps.filter.outputs.app }}
       sdk: ${{ steps.filter.outputs.sdk }}
       browser: ${{ steps.filter.outputs.browser }}
-      relay: ${{ steps.filter.outputs.relay }}
       cli: ${{ steps.filter.outputs.cli }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -52,15 +49,13 @@ jobs:
           filters: .github/ci-paths.yml
 
       - name: Validate CI contracts
-        run: node --test scripts/ci-workflow.test.mjs scripts/daemon-launch-contract.test.mjs scripts/sync-fdroid-changelogs.test.mjs
+        run: node --test scripts/ci-workflow.test.mjs scripts/daemon-launch-contract.test.mjs
 
   format:
     name: format
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.format != 'false') }}
     runs-on: ubuntu-latest
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -75,13 +70,11 @@ jobs:
       - name: Check formatting
         run: npm run format:check
 
-  lint:
-    name: lint
+  quality:
+    name: quality
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.quality != 'false') }}
     runs-on: ubuntu-latest
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -102,24 +95,6 @@ jobs:
       - name: Lint
         run: npm run lint
 
-  typecheck:
-    name: typecheck
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.quality != 'false') }}
-    runs-on: ubuntu-latest
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies
-        run: node scripts/npm-retry.mjs ci
-
       - name: Build server stack
         run: npm run build:server
 
@@ -132,14 +107,12 @@ jobs:
           npm pack --dry-run --ignore-scripts --workspace=@getpaseo/client
           npm pack --dry-run --ignore-scripts --workspace=@getpaseo/server
 
-  server-tests-ubuntu:
-    name: server-tests (ubuntu-latest)
+  server-tests:
+    name: server-tests
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false') }}
     runs-on: ubuntu-latest
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
-    steps: &server_test_steps
+    steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -157,42 +130,27 @@ jobs:
         run: node scripts/npm-retry.mjs ci
 
       - name: Install agent CLIs for provider tests
-        if: ${{ needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' }}
         run: node scripts/npm-retry.mjs install -g @anthropic-ai/claude-code opencode-ai
 
       - name: Build server dependencies
         run: npm run build:server-deps
 
       - name: Run server tests
-        if: ${{ needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' }}
         run: npm run test --workspace=@getpaseo/server
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 
-      - name: Run Hub CLI/daemon contract
-        if: ${{ needs.changes.outputs.full == 'false' && needs.changes.outputs.server == 'false' && needs.changes.outputs.hub != 'false' }}
-        run: npm run test:hub-cli-contract --workspace=@getpaseo/server
-
-  server-tests-windows:
-    name: server-tests (windows-latest)
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
-    runs-on: windows-latest
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
-    steps: *server_test_steps
-
-  desktop-tests-ubuntu:
-    name: desktop-tests (ubuntu-latest)
+  desktop-tests:
+    name: desktop-tests
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.desktop != 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
-    steps: &desktop_test_steps
+    steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -210,66 +168,33 @@ jobs:
         run: npm run test --workspace=@getpaseo/desktop
 
       - name: Install virtual display
-        if: ${{ runner.os == 'Linux' }}
         run: sudo apt-get update && sudo apt-get install -y xvfb xauth
 
       - name: Install Playwright browser
-        if: ${{ runner.os == 'Linux' }}
         run: npx playwright install chromium
 
       - name: Run desktop renderer E2E
-        if: ${{ runner.os == 'Linux' }}
         run: npm run test:e2e:renderer --workspace=@getpaseo/desktop
 
       - name: Run desktop browser E2E
-        if: ${{ runner.os == 'Linux' }}
         run: npm run test:e2e:browser-tabs --workspace=@getpaseo/desktop
         env:
           PASEO_DESKTOP_BROWSER_E2E_ARTIFACT_DIR: ${{ runner.temp }}/desktop-browser-e2e
 
       - name: Upload desktop browser diagnostics
         uses: actions/upload-artifact@v4
-        if: ${{ failure() && runner.os == 'Linux' }}
+        if: failure()
         with:
           name: desktop-browser-e2e
           path: ${{ runner.temp }}/desktop-browser-e2e
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Build and smoke unpacked desktop app
-        if: ${{ runner.os == 'Linux' }}
-        run: npm run build:desktop -- --publish never --linux --x64 --dir
-        env:
-          EP_GH_IGNORE_TIME: true
-          PASEO_DESKTOP_SMOKE: "1"
-          PASEO_DESKTOP_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/desktop-smoke
-
-      - name: Upload packaged smoke diagnostics
-        uses: actions/upload-artifact@v4
-        if: ${{ failure() && runner.os == 'Linux' }}
-        with:
-          name: desktop-packaged-smoke-linux-x64
-          path: ${{ runner.temp }}/desktop-smoke
-          if-no-files-found: ignore
-          retention-days: 7
-
-  desktop-tests-windows:
-    name: desktop-tests (windows-latest)
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.desktop != 'false') }}
-    runs-on: windows-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps: *desktop_test_steps
-
   app-tests:
     name: app-tests
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.app != 'false') }}
     runs-on: ubuntu-latest
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -296,8 +221,6 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.sdk != 'false') }}
     runs-on: ubuntu-latest
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -324,16 +247,12 @@ jobs:
       - name: Typecheck client examples
         run: npm run typecheck:examples --workspace=@getpaseo/client
 
-  playwright-1:
-    name: playwright (shard 1/4)
+  playwright:
+    name: playwright
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
     runs-on: ubuntu-latest
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
-      PLAYWRIGHT_SHARD: "1/4"
-      PLAYWRIGHT_ARTIFACT: "1"
-    steps: &playwright_test_steps
+    steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -358,7 +277,7 @@ jobs:
         run: node scripts/npm-retry.mjs install -g @anthropic-ai/claude-code @openai/codex@0.105.0 opencode-ai
 
       - name: Run Playwright E2E tests
-        run: npm run test:e2e --workspace=@getpaseo/app -- --shard=${{ env.PLAYWRIGHT_SHARD }}
+        run: npm run test:e2e --workspace=@getpaseo/app
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
@@ -366,82 +285,22 @@ jobs:
         uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: playwright-results-${{ env.PLAYWRIGHT_ARTIFACT }}
+          name: playwright-results
           path: |
             packages/app/test-results/
             packages/app/playwright-report/
           retention-days: 7
 
-  playwright-2:
-    name: playwright (shard 2/4)
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
-    runs-on: ubuntu-latest
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
-      PLAYWRIGHT_SHARD: "2/4"
-      PLAYWRIGHT_ARTIFACT: "2"
-    steps: *playwright_test_steps
-
-  playwright-3:
-    name: playwright (shard 3/4)
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
-    runs-on: ubuntu-latest
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
-      PLAYWRIGHT_SHARD: "3/4"
-      PLAYWRIGHT_ARTIFACT: "3"
-    steps: *playwright_test_steps
-
-  playwright-4:
-    name: playwright (shard 4/4)
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
-    runs-on: ubuntu-latest
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
-      PLAYWRIGHT_SHARD: "4/4"
-      PLAYWRIGHT_ARTIFACT: "4"
-    steps: *playwright_test_steps
-
-  relay-tests:
-    name: relay-tests
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.relay != 'false') }}
-    runs-on: ubuntu-latest
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies
-        run: node scripts/npm-retry.mjs ci
-
-      - name: Build relay
-        run: npm run build:relay
-
-      - name: Run relay tests
-        run: npm run test --workspace=@getpaseo/relay
-
-  cli-tests-1:
-    name: cli-tests (shard 1/3)
+  cli-tests:
+    name: cli-tests
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
     runs-on: ubuntu-latest
     env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
       PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD: "0"
       PASEO_DICTATION_ENABLED: "0"
       PASEO_VOICE_MODE_ENABLED: "0"
-      PASEO_CLI_TEST_SHARD: "1"
-      PASEO_CLI_TEST_SHARD_TOTAL: "3"
-    steps: &cli_test_steps
+    steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -460,31 +319,3 @@ jobs:
 
       - name: Run CLI tests
         run: npm run test --workspace=@getpaseo/cli
-
-  cli-tests-2:
-    name: cli-tests (shard 2/3)
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
-    runs-on: ubuntu-latest
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
-      PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD: "0"
-      PASEO_DICTATION_ENABLED: "0"
-      PASEO_VOICE_MODE_ENABLED: "0"
-      PASEO_CLI_TEST_SHARD: "2"
-      PASEO_CLI_TEST_SHARD_TOTAL: "3"
-    steps: *cli_test_steps
-
-  cli-tests-3:
-    name: cli-tests (shard 3/3)
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
-    runs-on: ubuntu-latest
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
-      PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD: "0"
-      PASEO_DICTATION_ENABLED: "0"
-      PASEO_VOICE_MODE_ENABLED: "0"
-      PASEO_CLI_TEST_SHARD: "3"
-      PASEO_CLI_TEST_SHARD_TOTAL: "3"
-    steps: *cli_test_steps

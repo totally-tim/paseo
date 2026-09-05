@@ -1200,6 +1200,8 @@ export const es: TranslationResources = {
         moveUp: "Subir",
         moveDown: "Bajar",
         createConfirm: "Crear grupo",
+        addToGroupConfirm: "Añadir al grupo",
+        groupedMembers: "En otros grupos",
         creating: "Creando...",
         name: "Nombre del grupo",
         rename: "Cambiar nombre del grupo",

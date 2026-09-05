@@ -11,7 +11,8 @@ import { Platform, Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import invariant from "tiny-invariant";
 import { useIsCompactFormFactor } from "@/constants/layout";
-import { usePaneContext } from "@/panels/pane-context";
+import { useIsMobilePanelActive } from "@/mobile-panels/provider";
+import { usePaneContext, usePaneFocus } from "@/panels/pane-context";
 import { definePanel, type PanelDescriptor } from "@/panels/panel-registry";
 import { useHostRuntimeClient, useHosts } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
@@ -40,6 +41,7 @@ function resolvePlatform(): PluginHostProps["layout"]["platform"] {
 
 function PluginPanelBody({ theme }: { theme: PluginTheme }) {
   const { serverId, workspaceId, target } = usePaneContext();
+  const { isInteractive } = usePaneFocus();
   invariant(target.kind === "plugin", "PluginPanel requires plugin target");
   const plugin = useInstalledPlugin(serverId, target.pluginId);
   const contribution = resolvePluginWorkspacePanel(plugin, target);
@@ -59,6 +61,8 @@ function PluginPanelBody({ theme }: { theme: PluginTheme }) {
     [client, target.pluginId],
   );
   const compact = useIsCompactFormFactor();
+  const isCenterActive = useIsMobilePanelActive("agent");
+  const isActive = isInteractive && (!compact || isCenterActive);
   const hosts = useHosts();
   const hostLabel = hosts.find((host) => host.serverId === serverId)?.label ?? serverId;
   const host = useMemo(() => ({ id: serverId, label: hostLabel }), [hostLabel, serverId]);
@@ -78,6 +82,7 @@ function PluginPanelBody({ theme }: { theme: PluginTheme }) {
   if (contribution.context === "workspace") {
     const props: PluginWorkspacePanelProps = {
       context: "workspace",
+      isActive,
       theme,
       host,
       layout,
@@ -90,6 +95,7 @@ function PluginPanelBody({ theme }: { theme: PluginTheme }) {
   } else if (agentExists && target.context === "agent") {
     const props: PluginAgentPanelProps = {
       context: "agent",
+      isActive,
       theme,
       host,
       layout,

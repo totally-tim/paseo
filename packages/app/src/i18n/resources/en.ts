@@ -1226,6 +1226,8 @@ export const en = {
         moveUp: "Move up",
         moveDown: "Move down",
         createConfirm: "Create group",
+        addToGroupConfirm: "Add to group",
+        groupedMembers: "In other groups",
         creating: "Creating...",
         name: "Group name",
         rename: "Rename group",

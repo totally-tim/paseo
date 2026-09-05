@@ -552,20 +552,18 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
           {sidebarChrome}
         </WindowChromeRegion>
       ) : null}
-      {usesCompactExplorerHost ? (
-        <CompactExplorerSidebarHost
-          enabled={chromeEnabled}
-          presentation={explorerSidebarPresentation === "dock" ? "dock" : "overlay"}
+      <CompactExplorerSidebarHost
+        enabled={chromeEnabled && usesCompactExplorerHost}
+        presentation={explorerSidebarPresentation}
+      >
+        <WindowChromeRegion
+          corners={
+            usesCompactExplorerHost && chromeEnabled ? "both" : appChromeLayout.contentCorners
+          }
         >
-          <WindowChromeRegion corners={chromeEnabled ? "both" : appChromeLayout.contentCorners}>
-            <View style={flexStyle}>{children}</View>
-          </WindowChromeRegion>
-        </CompactExplorerSidebarHost>
-      ) : (
-        <WindowChromeRegion corners={appChromeLayout.contentCorners}>
           <View style={flexStyle}>{children}</View>
         </WindowChromeRegion>
-      )}
+      </CompactExplorerSidebarHost>
     </View>
   );
 
@@ -608,13 +606,14 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
     </View>
   );
 
-  const content = isCompactLayout ? (
-    <MobileGestureWrapper chromeEnabled={chromeEnabled}>{surface}</MobileGestureWrapper>
-  ) : (
-    surface
+  // Keep the navigator's ancestors mounted across form-factor changes.
+  return (
+    <CommandCenterProvider>
+      <MobileGestureWrapper chromeEnabled={chromeEnabled && isCompactLayout}>
+        {surface}
+      </MobileGestureWrapper>
+    </CommandCenterProvider>
   );
-
-  return <CommandCenterProvider>{content}</CommandCenterProvider>;
 }
 
 function SidebarChrome({

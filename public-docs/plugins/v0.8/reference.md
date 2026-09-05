@@ -2,7 +2,7 @@
 title: Plugin reference
 description: Local plugin files, client and server runtimes, platform limits, contributions, RPCs, lifecycle, hosts, and CLI commands.
 nav: Reference
-order: 47
+order: 48
 category: Plugins
 ---
 
@@ -142,7 +142,42 @@ Center callbacks can only open surfaces and panels registered by the same plugin
 
 ### Server runtime
 
-Paseo provides `@getpaseo/plugin`, `@getpaseo/plugin/server`, and `zod` to server code. Backend contributions run in a daemon subprocess with Node access to the host machine. Keep filesystem, process, credential, and other machine-local work under `server/`. A plugin without `index.server.ts` starts no subprocess.
+Paseo provides `@getpaseo/plugin`, `@getpaseo/plugin/server`,
+`@getpaseo/plugin/provider`, `@getpaseo/plugin/acp`, and `zod` to server code. Backend
+contributions run in a daemon subprocess with Node access to the host machine. Keep filesystem,
+process, credential, and other machine-local work under `server/`. A plugin without
+`index.server.ts` starts no subprocess.
+
+### Providers
+
+Follow [Build a provider plugin](/docs/plugins/v0.8/providers) for direct and ACP implementations,
+session lifecycle, composer settings, timeline renderers, testing, and distribution.
+
+Call `server.registerProvider()` with a `ProviderRegistration` from
+`@getpaseo/plugin/provider`. Its connection accepts inputs with `send()` and emits complete state
+snapshots through `onEvent()`. `send()` reports acceptance only; prompt disposition, turns,
+configuration, persistence, permissions, and failures are events.
+
+Use the single `session.prompt` input for messages, structured commands, steering, and command side
+effects. Repeat `clientMessageId` on the live user timeline item and publish exactly one matching
+`session.prompt_result`. Publish provider-created children as sessions with `parentSessionId`.
+
+Provider settings are toggle/select descriptors that Paseo renders in the composer. Keep
+provider-private JSON under `providerOptions`. Host tools arrive as MCP servers in the complete
+session config.
+
+Paseo refreshes an agent by closing its current provider session and opening it with current
+configuration and persistence. Providers re-read external state during `session.open`.
+
+Use `runAcpProvider()` from `@getpaseo/plugin/acp` to adapt a command-backed ACP. Add transformer
+hooks only for a vendor's discovery, configuration, notification, or tool-call differences.
+
+`ProviderRegistration.icon` is a file path relative to the plugin directory, such as `icon.svg`.
+It must resolve inside that directory to a regular SVG file no larger than 64 KiB. The SVG must be
+self-contained: scripts, styles, `foreignObject`, event-handler attributes, JavaScript URLs, and
+external `href` or `xlink:href` references are rejected. Fragment references such as `#mark` are
+allowed. Paseo reads and sanitizes the file when the plugin starts; the string is never an inline
+SVG or URL.
 
 ## Entry point and cleanup
 
@@ -228,14 +263,24 @@ client.addSidebarItem({
 });
 ```
 
+`client.storage` provides device-local `getItem(key)`, `setItem(key, value)`, and
+`removeItem(key)` methods for strings. Keys are isolated by host and plugin. Calls for one
+key are ordered across plugin reloads, so a replacement instance reads pending writes from
+the previous instance. Use this for preferences and drafts; it is not a credential store.
+Data stays on this app installation and does not sync between devices. Older apps omit
+`storage`; gate features that require it and explain that the app needs an update.
+
 `PluginSurfaceProps` contains:
 
-| Field        | Meaning                                                                                                                      |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| `theme`      | Typed `PluginTheme` color tokens for the active Paseo theme.                                                                 |
-| `host`       | Selected host `id` and display `label`.                                                                                      |
-| `layout`     | `compact` and the `ios`, `android`, or `web` platform.                                                                       |
-| `navigation` | Optional client navigation. `openAgent({ agentId })` and `openWorkspace({ workspaceId })` open targets on the selected host. |
+| Field        | Meaning                                                                                                                                             |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `theme`      | Typed `PluginTheme` color tokens for the active Paseo theme.                                                                                        |
+| `host`       | Selected host `id` and display `label`.                                                                                                             |
+| `layout`     | `compact` and the `ios`, `android`, or `web` platform.                                                                                              |
+| `isActive`   | Whether this retained surface owns interaction. False while covered by a compact sidebar. Older apps omit it; do not register shortcuts without it. |
+| `navigation` | Optional client navigation. `openAgent({ agentId })` and `openWorkspace({ workspaceId })` open targets on the selected host.                        |
+
+Workspace and agent panel props also include `isActive`. Stop polling and release keyboard listeners when it is false.
 
 Paseo owns the route, header, close action, host picker, error boundary, and query client. The plugin owns the surface body.
 

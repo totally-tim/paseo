@@ -4,26 +4,13 @@ on:
   push:
     tags:
       - "v*"
-      - "desktop-v*"
       - "desktop-macos-v*"
-      - "desktop-linux-v*"
-      - "desktop-windows-v*"
   workflow_dispatch:
     inputs:
       tag:
         description: "Existing tag to build (e.g. v0.1.0)"
         required: true
         type: string
-      platform:
-        description: "Optional desktop platform to build."
-        required: false
-        default: "all"
-        type: choice
-        options:
-          - all
-          - macos
-          - linux
-          - windows
       checkout_ref:
         description: "Optional branch/ref to checkout while using tag for release metadata."
         required: false
@@ -56,7 +43,7 @@ env:
 
 jobs:
   create-release:
-    if: ${{ (github.event_name == 'push' && !startsWith(github.ref_name, 'desktop-macos-v') && !startsWith(github.ref_name, 'desktop-linux-v') && !startsWith(github.ref_name, 'desktop-windows-v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.platform == 'all' && github.event.inputs.publish != 'false') }}
+    if: ${{ !startsWith(github.ref_name, 'desktop-macos-v') && (github.event_name != 'workflow_dispatch' || github.event.inputs.publish != 'false') }}
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -95,7 +82,7 @@ jobs:
 
   publish-macos:
     needs: [create-release]
-    if: ${{ always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') && ((github.event_name == 'workflow_dispatch' && (github.event.inputs.platform == 'all' || github.event.inputs.platform == 'macos')) || (github.event_name == 'push' && (startsWith(github.ref_name, 'v') || startsWith(github.ref_name, 'desktop-v') || startsWith(github.ref_name, 'desktop-macos-v')))) }}
+    if: ${{ always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') }}
     strategy:
       fail-fast: false
       matrix:
@@ -133,21 +120,12 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set desktop package version from tag
+      # Fork-only. Upstream stamps just the desktop package because its release commit
+      # already bumped every workspace. This fork never commits a bump, so stamp them
+      # all here or the desktop app restarts its own daemon on every launch. docs/fork.md.
+      - name: Stamp workspace versions from tag (fork)
         shell: bash
-        run: |
-          node <<'NODE'
-          const fs = require('node:fs');
-          const path = require('node:path');
-
-          const version = process.env.DESKTOP_VERSION;
-          if (!version) throw new Error('DESKTOP_VERSION env var is missing');
-
-          const packageJsonPath = path.join(process.env.DESKTOP_PACKAGE_PATH, 'package.json');
-          const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
-          packageJson.version = version;
-          fs.writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
-          NODE
+        run: node scripts/fork/stamp-version.mjs "$DESKTOP_VERSION"
 
       - name: Build desktop release
         shell: bash
@@ -212,223 +190,8 @@ jobs:
           path: ${{ env.DESKTOP_PACKAGE_PATH }}/release/${{ env.RELEASE_CHANNEL }}-mac.yml
           retention-days: 1
 
-  publish-linux:
-    needs: [create-release]
-    if: ${{ always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') && ((github.event_name == 'workflow_dispatch' && (github.event.inputs.platform == 'all' || github.event.inputs.platform == 'linux')) || (github.event_name == 'push' && (startsWith(github.ref_name, 'v') || startsWith(github.ref_name, 'desktop-v') || startsWith(github.ref_name, 'desktop-linux-v')))) }}
-    permissions:
-      contents: write
-      packages: read
-    runs-on: ubuntu-22.04
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ env.CHECKOUT_REF }}
-
-      - name: Resolve release metadata
-        shell: bash
-        run: node scripts/emit-release-env.mjs --source-tag "$SOURCE_TAG" >> "$GITHUB_ENV"
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-          cache-dependency-path: package-lock.json
-          registry-url: "https://npm.pkg.github.com"
-          scope: "@boudra"
-
-      - name: Install JS dependencies
-        run: node scripts/npm-retry.mjs ci
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set desktop package version from tag
-        shell: bash
-        run: |
-          node <<'NODE'
-          const fs = require('node:fs');
-          const path = require('node:path');
-
-          const version = process.env.DESKTOP_VERSION;
-          if (!version) throw new Error('DESKTOP_VERSION env var is missing');
-
-          const packageJsonPath = path.join(process.env.DESKTOP_PACKAGE_PATH, 'package.json');
-          const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
-          packageJson.version = version;
-          fs.writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
-          NODE
-
-      - name: Install Linux smoke display
-        run: sudo apt-get update && sudo apt-get install -y xvfb xauth
-
-      - name: Build desktop release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EP_GH_IGNORE_TIME: true
-          PASEO_DESKTOP_SMOKE: "1"
-          PASEO_DESKTOP_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/desktop-smoke
-        run: |
-          set -euo pipefail
-          build_args=(-- --publish never --linux --x64)
-          build_args+=("-c.publish.releaseType=$RELEASE_TYPE")
-          build_args+=("-c.publish.channel=$RELEASE_CHANNEL")
-          npm run build:desktop "${build_args[@]}"
-
-      - name: Upload packaged smoke diagnostics
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: desktop-smoke-linux-x64
-          path: ${{ runner.temp }}/desktop-smoke
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Upload desktop artifacts to release
-        if: env.SHOULD_PUBLISH == 'true' && env.IS_SMOKE_TAG != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          release_dir="${DESKTOP_PACKAGE_PATH}/release"
-          files=()
-          while IFS= read -r -d '' f; do
-            files+=("$f")
-          done < <(find "$release_dir" -maxdepth 1 -type f ! -name '*.yml' -print0 | sort -z)
-          if (( ${#files[@]} == 0 )); then
-            echo "::error::No release artifacts found in $release_dir"
-            exit 1
-          fi
-          release_lookup="$(node scripts/github-release.mjs --repo "${{ github.repository }}" --tag "$RELEASE_TAG")"
-          gh release upload "$release_lookup" "${files[@]}" --clobber --repo "${{ github.repository }}"
-
-      - name: Upload desktop artifacts to workflow
-        if: env.SHOULD_PUBLISH != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: desktop-linux
-          path: ${{ env.DESKTOP_PACKAGE_PATH }}/release/*
-          retention-days: 7
-
-      - name: Upload manifest artifact
-        if: env.SHOULD_PUBLISH == 'true' && env.IS_SMOKE_TAG != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-manifest
-          path: ${{ env.DESKTOP_PACKAGE_PATH }}/release/${{ env.RELEASE_CHANNEL }}-linux.yml
-          retention-days: 1
-
-  publish-windows:
-    needs: [create-release]
-    if: ${{ always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') && ((github.event_name == 'workflow_dispatch' && (github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows')) || (github.event_name == 'push' && (startsWith(github.ref_name, 'v') || startsWith(github.ref_name, 'desktop-v') || startsWith(github.ref_name, 'desktop-windows-v')))) }}
-    permissions:
-      contents: write
-      packages: read
-    runs-on: windows-latest
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ env.CHECKOUT_REF }}
-
-      - name: Resolve release metadata
-        shell: bash
-        run: node scripts/emit-release-env.mjs --source-tag "$SOURCE_TAG" >> "$GITHUB_ENV"
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-          cache-dependency-path: package-lock.json
-          registry-url: "https://npm.pkg.github.com"
-          scope: "@boudra"
-
-      - name: Install JS dependencies
-        run: node scripts/npm-retry.mjs ci
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set desktop package version from tag
-        shell: bash
-        run: |
-          node <<'NODE'
-          const fs = require('node:fs');
-          const path = require('node:path');
-
-          const version = process.env.DESKTOP_VERSION;
-          if (!version) throw new Error('DESKTOP_VERSION env var is missing');
-
-          const packageJsonPath = path.join(process.env.DESKTOP_PACKAGE_PATH, 'package.json');
-          const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
-          packageJson.version = version;
-          fs.writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
-          NODE
-
-      - name: Build desktop release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EP_GH_IGNORE_TIME: true
-          PASEO_DESKTOP_SMOKE: "1"
-          PASEO_DESKTOP_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/desktop-smoke
-        run: |
-          set -euo pipefail
-          build_args=(-- --publish never --win --x64 --arm64)
-          build_args+=("-c.publish.releaseType=$RELEASE_TYPE")
-          build_args+=("-c.publish.channel=$RELEASE_CHANNEL")
-          npm run build:desktop "${build_args[@]}"
-
-      - name: Upload packaged smoke diagnostics
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: desktop-smoke-windows-x64
-          path: ${{ runner.temp }}/desktop-smoke
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Upload desktop artifacts to release
-        if: env.SHOULD_PUBLISH == 'true' && env.IS_SMOKE_TAG != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          release_dir="${DESKTOP_PACKAGE_PATH}/release"
-          files=()
-          while IFS= read -r -d '' f; do
-            files+=("$f")
-          done < <(find "$release_dir" -maxdepth 1 -type f ! -name '*.yml' -print0 | sort -z)
-          if (( ${#files[@]} == 0 )); then
-            echo "::error::No release artifacts found in $release_dir"
-            exit 1
-          fi
-          release_lookup="$(node scripts/github-release.mjs --repo "${{ github.repository }}" --tag "$RELEASE_TAG")"
-          gh release upload "$release_lookup" "${files[@]}" --clobber --repo "${{ github.repository }}"
-
-      - name: Upload desktop artifacts to workflow
-        if: env.SHOULD_PUBLISH != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: desktop-windows
-          path: ${{ env.DESKTOP_PACKAGE_PATH }}/release/*
-          retention-days: 7
-
-      - name: Upload manifest artifact
-        if: env.SHOULD_PUBLISH == 'true' && env.IS_SMOKE_TAG != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-manifest
-          path: ${{ env.DESKTOP_PACKAGE_PATH }}/release/${{ env.RELEASE_CHANNEL }}.yml
-          retention-days: 1
-
   finalize-rollout:
-    needs: [publish-macos, publish-linux, publish-windows]
+    needs: [publish-macos]
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || github.event.inputs.publish != 'false') }}
     permissions:
       contents: write
@@ -471,20 +234,6 @@ jobs:
           pattern: mac-manifest-*
           path: release-manifests
 
-      - name: Download Linux manifest artifact
-        if: env.IS_SMOKE_TAG != 'true' && needs.publish-linux.result == 'success'
-        uses: actions/download-artifact@v4
-        with:
-          name: linux-manifest
-          path: release-manifests/linux-manifest
-
-      - name: Download Windows manifest artifact
-        if: env.IS_SMOKE_TAG != 'true' && needs.publish-windows.result == 'success'
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-manifest
-          path: release-manifests/windows-manifest
-
       - name: Assemble manifests and publish release
         if: env.IS_SMOKE_TAG != 'true'
         env:
@@ -492,102 +241,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${{ needs.publish-macos.result }}" != "success" ]]; then
+            echo "::error::macOS builds did not complete; the release remains a draft"
+            exit 1
+          fi
           cd release-manifests
           manifests_dir="$PWD/final"
           mkdir -p "$manifests_dir"
 
-          expected_manifests=(
-            "${RELEASE_CHANNEL}-mac.yml"
-            "${RELEASE_CHANNEL}-linux.yml"
-            "${RELEASE_CHANNEL}.yml"
-          )
+          manifest_name="${RELEASE_CHANNEL}-mac.yml"
+          manifest_path="$manifests_dir/$manifest_name"
           release_lookup="$(node ../scripts/github-release.mjs --repo "${{ github.repository }}" --tag "$RELEASE_TAG" --cleanup-duplicates)"
-          existing_assets="$(gh release view "$release_lookup" --repo "${{ github.repository }}" --json assets --jq '.assets[].name')"
-          for manifest_name in "${expected_manifests[@]}"; do
-            if grep -Fxq "$manifest_name" <<< "$existing_assets"; then
-              case "$manifest_name" in
-                "${RELEASE_CHANNEL}-mac.yml") platform_result="${{ needs.publish-macos.result }}" ;;
-                "${RELEASE_CHANNEL}-linux.yml") platform_result="${{ needs.publish-linux.result }}" ;;
-                "${RELEASE_CHANNEL}.yml") platform_result="${{ needs.publish-windows.result }}" ;;
-              esac
-              if [[ "$platform_result" =~ ^(success|skipped)$ ]]; then
-                gh release download "$release_lookup" \
-                  --repo "${{ github.repository }}" \
-                  --pattern "$manifest_name" \
-                  --dir "$manifests_dir"
-              else
-                gh release delete-asset "$release_lookup" "$manifest_name" \
-                  --repo "${{ github.repository }}" \
-                  --yes
-              fi
-            fi
-          done
+          node ../scripts/merge-mac-manifest.mjs \
+            "mac-manifest-arm64/${manifest_name}" \
+            "mac-manifest-x64/${manifest_name}" \
+            "$manifest_path"
 
-          if [[ "${{ needs.publish-macos.result }}" == "success" ]]; then
-            manifest_name="${RELEASE_CHANNEL}-mac.yml"
-            node ../scripts/merge-mac-manifest.mjs \
-              "mac-manifest-arm64/${manifest_name}" \
-              "mac-manifest-x64/${manifest_name}" \
-              "$manifests_dir/${manifest_name}"
-          fi
-
-          if [[ "${{ needs.publish-linux.result }}" == "success" ]]; then
-            cp "linux-manifest/${RELEASE_CHANNEL}-linux.yml" "$manifests_dir/"
-          fi
-
-          if [[ "${{ needs.publish-windows.result }}" == "success" ]]; then
-            cp "windows-manifest/${RELEASE_CHANNEL}.yml" "$manifests_dir/"
-          fi
-
-          shopt -s nullglob
-          files=( "$manifests_dir"/*.yml )
-          if (( ${#files[@]} == 0 )); then
-            echo "::error::No manifest artifacts were available to publish"
-            exit 1
-          fi
           timestamp="$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")"
-          node ../scripts/stamp-rollout.mjs --release-date "$timestamp" --rollout-hours "$ROLLOUT_HOURS" "${files[@]}"
-          # shellcheck disable=SC2016
-          ROLLOUT_HOURS_EXPECTED="$ROLLOUT_HOURS" RELEASE_DATE_EXPECTED="$timestamp" node -e '
-            const yaml = require("js-yaml");
-            const fs = require("fs");
-            const expectedHours = Number(process.env.ROLLOUT_HOURS_EXPECTED);
-            const expectedDate = process.env.RELEASE_DATE_EXPECTED;
-            if (!Number.isFinite(expectedHours) || expectedHours < 0) {
-              throw new Error(`expected non-negative rolloutHours, got ${process.env.ROLLOUT_HOURS_EXPECTED}`);
-            }
-            for (const f of process.argv.slice(1)) {
-              const m = yaml.load(fs.readFileSync(f, "utf8")) ?? {};
-              if (m.rolloutHours !== expectedHours) {
-                throw new Error(`${f}: rolloutHours=${m.rolloutHours}, expected ${expectedHours}`);
-              }
-              if (m.releaseDate !== expectedDate) {
-                throw new Error(`${f}: releaseDate=${m.releaseDate}, expected ${expectedDate}`);
-              }
-              if (typeof m.version !== "string" || m.version.length === 0) {
-                throw new Error(`${f}: missing or invalid version`);
-              }
-            }
-          ' "${files[@]}"
-          gh release upload "$release_lookup" "${files[@]}" --clobber --repo "${{ github.repository }}"
-
-          failed_builds=()
-          [[ "${{ needs.publish-macos.result }}" =~ ^(success|skipped)$ ]] || failed_builds+=(macOS)
-          [[ "${{ needs.publish-linux.result }}" =~ ^(success|skipped)$ ]] || failed_builds+=(Linux)
-          [[ "${{ needs.publish-windows.result }}" =~ ^(success|skipped)$ ]] || failed_builds+=(Windows)
-          if (( ${#failed_builds[@]} > 0 )); then
-            echo "::error::Desktop builds did not complete for ${failed_builds[*]}; the release remains a draft"
-            exit 1
-          fi
-
-          missing_manifests=()
-          for manifest_name in "${expected_manifests[@]}"; do
-            [[ -f "$manifests_dir/$manifest_name" ]] || missing_manifests+=("$manifest_name")
-          done
-          if (( ${#missing_manifests[@]} > 0 )); then
-            echo "::error::Missing updater manifests: ${missing_manifests[*]}; the release remains a draft"
-            exit 1
-          fi
+          node ../scripts/stamp-rollout.mjs --release-date "$timestamp" --rollout-hours "$ROLLOUT_HOURS" "$manifest_path"
+          node ../scripts/validate-desktop-manifests.mjs \
+            --release-date "$timestamp" \
+            --rollout-hours "$ROLLOUT_HOURS" \
+            "$manifest_path"
+          gh release upload "$release_lookup" "$manifest_path" --clobber --repo "${{ github.repository }}"
 
           publish_args=(release edit "$release_lookup" --tag "$RELEASE_TAG" --draft=false --repo "${{ github.repository }}")
           if [[ "$IS_PRERELEASE" == "true" ]]; then
