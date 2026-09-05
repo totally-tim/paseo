@@ -1,6 +1,5 @@
-# Pull-request checks are routed by the behavior they prove. Package consumers
-# do not inherit their dependencies' test suites; main and manual runs execute
-# every contract regardless of these paths.
+# Checks are routed by the behavior they prove. Package consumers do not inherit
+# their dependencies' test suites. Manual runs execute every contract.
 routing:
   - ".github/ci-paths.yml"
 
@@ -28,10 +27,6 @@ format:
 quality:
   - "**/*.{cjs,js,json,jsx,mjs,ts,tsx}"
   - "packages/expo-two-way-audio/**"
-
-hub:
-  - "packages/cli/src/commands/hub/**"
-  - "packages/server/src/server/hub/**"
 
 server:
   - "packages/server/**"
@@ -63,9 +58,6 @@ browser:
   - "packages/app/index.ts"
   - "packages/app/*config.{cjs,js,ts}"
   - "packages/app/package.json"
-
-relay:
-  - "packages/relay/**"
 
 cli:
   - "packages/cli/**"
