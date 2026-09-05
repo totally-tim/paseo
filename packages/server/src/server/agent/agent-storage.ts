@@ -289,9 +289,12 @@ export class AgentStorage {
   }
 
   /** Forget a prepared or started handoff so its source can start a fresh one. */
-  async clearHandoff(agentId: string): Promise<void> {
+  async clearHandoff(agentId: string, expectedSuccessorId?: string): Promise<void> {
     await this.load();
-    await this.handoffOperations.get(agentId)?.promise.catch(() => undefined);
+    if (expectedSuccessorId) {
+      const state = await this.getHandoff(agentId);
+      if (state && state.successorAgentId !== expectedSuccessorId) return;
+    }
     for (const filePath of [this.handoffPath(agentId), this.getHandoffContextPath(agentId)]) {
       try {
         await fs.unlink(filePath);

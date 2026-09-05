@@ -258,8 +258,17 @@ async function performHandoff(
     await assertCurrent();
     // Persist before dispatch. An ambiguous crash never sends the task twice;
     // the existing successor stays available for the user to inspect and prompt.
+    const created = state;
     state = { ...state, phase: "dispatching" };
     await agentStorage.saveHandoff(state);
+    // Cancellation can also land while that write is in flight. A confirmed loss of ownership
+    // here means nothing was sent, so the journal goes back rather than claiming uncertainty.
+    try {
+      await assertCurrent();
+    } catch (error) {
+      await agentStorage.saveHandoff(created);
+      throw error;
+    }
     await startCreatedAgentInitialPrompt({
       agentManager,
       agentId: state.successorAgentId,

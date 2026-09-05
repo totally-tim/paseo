@@ -383,3 +383,16 @@ test("archiving still completes when the agent's provider has no registered clie
   expect(record.archivedAt).toBeTruthy();
   expect((await agentStorage.get(source.id))?.archivedAt).toBeTruthy();
 });
+
+test("a stale delete does not release a link the source already gave to another successor", async () => {
+  const { deps, source, agentManager, agentStorage } = await setup();
+  const first = await handoffAgent(deps, { sourceAgentId: source.id, provider: "codex" });
+  await agentManager.releaseHandoffLink(first.id);
+  await agentStorage.remove(first.id);
+  const second = await handoffAgent(deps, { sourceAgentId: source.id, provider: "codex" });
+  expect(second.id).not.toBe(first.id);
+  // A delete of the first successor that lands now must not clear the second one's link.
+  await agentManager.releaseHandoffLink(first.id);
+  expect((await agentStorage.get(source.id))?.labels[HANDOFF_TO_AGENT_ID_LABEL]).toBe(second.id);
+  expect((await agentStorage.getHandoff(source.id))?.successorAgentId).toBe(second.id);
+});

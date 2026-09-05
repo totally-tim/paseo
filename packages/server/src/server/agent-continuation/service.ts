@@ -17,7 +17,18 @@ import { buildAgentPrompt } from "../agent/prompt-attachments.js";
 import { AgentContinuationStore, newContinuationRecord, type ContinuationRecord } from "./store.js";
 import { updateQueuedMessages, checkQueuedMessage, messageDigest } from "./queue.js";
 import { continuationSafetyError, isOrdinaryAgent } from "./safety.js";
+import type { AgentStreamEvent } from "../agent/agent-sdk-types.js";
 import { HANDOFF_FROM_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+
+type CapacityStreamEvent = Extract<AgentStreamEvent, { type: "timeline" }>;
+
+function isCapacityNotification(event: AgentStreamEvent): event is CapacityStreamEvent {
+  return (
+    event.type === "timeline" &&
+    event.item.type === "notification" &&
+    event.item.code === "provider_capacity"
+  );
+}
 
 interface Dependencies extends HandoffDependencies {
   store: AgentContinuationStore;
@@ -71,33 +82,12 @@ export class AgentContinuationService {
         if (this.closed) return;
         if (event.type === "agent_stream") {
           const item = event.event;
-          if (
-            item.type === "timeline" &&
-            item.item.type === "notification" &&
-            item.item.code === "provider_capacity"
-          ) {
-            // Set synchronously: a following terminal event must not drain the queue first.
-            if (this.pendingCapacity.has(event.agentId)) return;
-            this.pendingCapacity.add(event.agentId);
-            void this.reportCapacity(
+          if (isCapacityNotification(item)) {
+            this.observeCapacity(
               event.agentId,
-              `${event.epoch ?? "live"}:${event.seq ?? randomUUID()}`,
-              item.turnId,
-            )
-              .then((opened) => {
-                // A fenced or duplicate event opens nothing, so the turn's own failure still
-                // has to stop the queue. Suppressing it would send the next instruction into
-                // the account that just reported exhausted capacity.
-                if (!opened) this.background(event.agentId, () => this.failed(event.agentId));
-                return opened;
-              })
-              .catch(() =>
-                this.deps.logger.error(
-                  { agentId: event.agentId },
-                  "Could not retain account recovery decision",
-                ),
-              )
-              .finally(() => this.pendingCapacity.delete(event.agentId));
+              item,
+              `${event.epoch ?? "live"}:${event.seq ?? ""}`,
+            );
           } else if (item.type === "turn_completed") {
             this.background(event.agentId, () => this.completed(event.agentId));
           } else if (item.type === "turn_failed" && !this.pendingCapacity.has(event.agentId)) {
@@ -110,6 +100,33 @@ export class AgentContinuationService {
       { replayState: false },
     );
     for (const record of this.deps.store.list()) this.wake(record.agentId);
+  }
+
+  private observeCapacity(agentId: string, item: CapacityStreamEvent, eventId: string): void {
+    // A delayed notification from a turn that already ended must not suppress the current
+    // turn's events or pause the queue somebody else just filled for it.
+    const live = this.deps.agentManager.getAgent(agentId);
+    const turn = live?.activeForegroundTurnId ?? live?.activeTurnId ?? undefined;
+    if (item.turnId !== undefined && turn !== undefined && item.turnId !== turn) return;
+    // Set synchronously: a following terminal event must not drain the queue first.
+    if (this.pendingCapacity.has(agentId)) return;
+    this.pendingCapacity.add(agentId);
+    void this.reportCapacity(
+      agentId,
+      eventId.endsWith(":") ? `${eventId}${randomUUID()}` : eventId,
+      item.turnId,
+    )
+      .then((opened) => {
+        // A fenced or duplicate event opens nothing, so the turn's own failure still has to
+        // stop the queue. Suppressing it would send the next instruction into the account
+        // that just reported exhausted capacity.
+        if (!opened) this.background(agentId, () => this.failed(agentId));
+        return opened;
+      })
+      .catch(() =>
+        this.deps.logger.error({ agentId }, "Could not retain account recovery decision"),
+      )
+      .finally(() => this.pendingCapacity.delete(agentId));
   }
 
   subscribe(listener: (rootAgentId: string, agentId: string) => void): () => void {
@@ -185,12 +202,7 @@ export class AgentContinuationService {
         await this.deps.store.releaseAttachments(initial.rootAgentId, operation.message);
       throw error;
     }
-    if (released)
-      await this.deps.store.releaseAttachments(
-        record.rootAgentId,
-        released,
-        record.queue.find((entry) => entry.id === (released as AgentQueuedMessageInput).id),
-      );
+    if (released) await this.deps.store.releaseAttachments(record.rootAgentId, released);
     if (operation.kind === "send_now") {
       // User-authorized interruption, still serialized with recovery and every other dispatch.
       await this.exclusive(record.rootAgentId, async () => {
@@ -407,13 +419,16 @@ export class AgentContinuationService {
     const attempts =
       episode && ["continuing", "active"].includes(episode.status) ? episode.attempts : [];
     const operationId = randomUUID();
-    await this.change(record.rootAgentId, (current) => {
+    // Stop can win between the checks above and this transaction, so the caller learns what
+    // the transaction actually installed rather than what it intended.
+    const opened = await this.change(record.rootAgentId, (current) => {
       if (current.agentId !== agentId || fenced(current.recovery)) return;
       current.policy = source.config!.continuationPolicy;
       current.recovery = this.recovery(current, operationId, eventId, [
         ...new Set([...attempts, ...(source.config?.accountId ? [source.config.accountId] : [])]),
       ]);
     });
+    if (opened.recovery?.operationId !== operationId) return false;
     this.wake(agentId);
     return true;
   }
@@ -739,6 +754,8 @@ export class AgentContinuationService {
         if (current.recovery?.status === "active") {
           current.recovery.attempts = [];
           current.recovery.resumeDispatch = undefined;
+          // The task ran to completion, so the next rejection is a fresh episode.
+          current.recovery.backoffMs = undefined;
         }
       });
     await this.drain(record.rootAgentId);

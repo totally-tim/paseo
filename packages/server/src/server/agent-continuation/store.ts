@@ -82,7 +82,8 @@ export class AgentContinuationStore {
       } catch {
         // One unreadable record must not keep the daemon from starting. Keep the bytes for
         // inspection; the task simply has no continuation state until someone restores it.
-        await fs.rename(file, `${file}.corrupt-${Date.now()}`);
+        // A failed rename is not a reason to refuse startup either.
+        await fs.rename(file, `${file}.corrupt-${Date.now()}`).catch(() => undefined);
         continue;
       }
       this.publish(record);
@@ -90,25 +91,25 @@ export class AgentContinuationStore {
   }
 
   /** Delete retained attachment copies that no queued item references any more. */
-  async releaseAttachments(
-    rootAgentId: string,
-    message: AgentQueuedMessageInput,
-    keep?: AgentQueuedMessageInput,
-  ): Promise<void> {
-    const directory = path.join(this.directory, rootAgentId);
-    // Retained paths are content-addressed, so an edit that keeps an attachment points at the
-    // same file. Keep anything the surviving message still needs.
-    const retained = new Set(
-      (keep?.attachments ?? [])
-        .filter((attachment) => attachment.type === "uploaded_file")
-        .map((attachment) => attachment.path),
-    );
-    for (const attachment of message.attachments ?? []) {
-      if (attachment.type !== "uploaded_file") continue;
-      if (path.dirname(attachment.path) !== directory) continue;
-      if (retained.has(attachment.path)) continue;
-      await fs.rm(attachment.path, { force: true });
-    }
+  /**
+   * Delete the copies this message held that nothing queued still points at. Runs on the same
+   * per-task queue as every record write, so it always reads the committed queue: retained
+   * paths are content-addressed, and two messages with the same bytes share one file.
+   */
+  releaseAttachments(rootAgentId: string, message: AgentQueuedMessageInput): Promise<void> {
+    return this.serialize(rootAgentId, async () => {
+      const directory = path.join(this.directory, rootAgentId);
+      const referenced = new Set<string>();
+      for (const item of this.records.get(rootAgentId)?.queue ?? [])
+        for (const attachment of item.attachments ?? [])
+          if (attachment.type === "uploaded_file") referenced.add(attachment.path);
+      for (const attachment of message.attachments ?? []) {
+        if (attachment.type !== "uploaded_file") continue;
+        if (path.dirname(attachment.path) !== directory) continue;
+        if (referenced.has(attachment.path)) continue;
+        await fs.rm(attachment.path, { force: true });
+      }
+    });
   }
 
   /** Forget a task entirely, including its retained attachments. */

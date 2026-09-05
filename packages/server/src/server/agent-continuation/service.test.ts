@@ -836,10 +836,19 @@ test("a fenced capacity event still stops the queue for the turn that failed", a
     });
     record.receipts.next = { digest: "x", outcome: "queued" };
   });
-  // The event is fenced by the earlier Stop, so no episode opens; the failure must still land.
+  // The live turn is the one an earlier Stop fenced, so no episode opens; its failure must
+  // still stop the queue rather than being swallowed by the suppressed terminal event.
+  // Settle the dispatched turn first, so the notification's turn identity is deterministic.
+  await vi.waitFor(() =>
+    expect(f.agentManager.getAgent(f.source.id)?.activeForegroundTurnId ?? null).toBeNull(),
+  );
+  await f.store.update(f.source.id, (record) => {
+    record.recovery!.cancelledTurnId = "turn-1";
+  });
   f.emitters.get(f.a)!({
     type: "timeline",
     provider: "codex",
+    turnId: "turn-1",
     item: {
       type: "notification",
       code: "provider_capacity",
@@ -900,4 +909,53 @@ test("editing a queued upload releases the copy it replaced and keeps the one it
   );
   await f.service.forget((await f.service.inspect(f.source.id)).agentId);
   expect(await readdir(path.join(f.directory, "agent-continuations"))).toEqual([]);
+});
+
+test("a delayed rejection from a stopped turn does not pause the next turn's queue", async () => {
+  const f = await setup();
+  await f.agentManager.cancelContinuation(f.source.id);
+  await f.store.update(f.source.id, (record) => {
+    record.recovery!.cancelledTurnId = "turn-1";
+    record.queuePaused = false;
+  });
+  await f.service.manageQueue(f.source.id, {
+    kind: "enqueue",
+    message: { id: "next-turn", text: "Authorized after the stop" },
+  });
+  await f.service.flush();
+  // The live agent is on a later turn; turn-1's notification arrives late.
+  const live = f.agentManager.getAgent(f.source.id);
+  expect(live?.activeForegroundTurnId ?? null).not.toBe("turn-1");
+  f.emitters.get(f.a)!({
+    type: "timeline",
+    provider: "codex",
+    turnId: "turn-1",
+    item: {
+      type: "notification",
+      code: "provider_capacity",
+      level: "warning",
+      message: "Usage limit reached",
+      turnId: "turn-1",
+    },
+  });
+  await f.agentManager.flush();
+  await f.service.flush();
+  expect(f.store.forAgent(f.source.id)?.queuePaused).toBe(false);
+});
+
+test("a completed continuation starts the next episode without the old backoff", async () => {
+  const f = await setup();
+  await f.service.reportCapacity(f.source.id, "limit-1");
+  await f.service.flush();
+  await vi.waitFor(() => expect(f.store.forAgent(f.source.id)?.recovery?.status).toBe("active"));
+  // An earlier wait had already grown the backoff to its cap.
+  await f.store.update(f.source.id, (record) => {
+    record.recovery!.backoffMs = 300_000;
+  });
+  f.emitters.get(f.b)!({ type: "turn_completed", provider: "codex" });
+  await f.agentManager.flush();
+  await f.service.flush();
+  await vi.waitFor(() =>
+    expect(f.store.forAgent(f.source.id)?.recovery?.backoffMs).toBeUndefined(),
+  );
 });

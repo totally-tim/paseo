@@ -1263,13 +1263,22 @@ export class AgentManager {
 
   /** Release a predecessor whose successor is being deleted, so its task can run again. */
   async releaseHandoffLink(successorAgentId: string): Promise<void> {
-    const successor = await this.registry?.get(successorAgentId);
+    const registry = this.registry;
+    const successor = await registry?.get(successorAgentId);
     const sourceId = successor?.labels[HANDOFF_FROM_AGENT_ID_LABEL];
-    if (!sourceId) return;
-    const source = await this.registry?.get(sourceId);
-    if (source?.labels[HANDOFF_TO_AGENT_ID_LABEL] !== successorAgentId) return;
-    await this.writeLabels(sourceId, { [HANDOFF_TO_AGENT_ID_LABEL]: null });
-    await this.registry?.clearHandoff(sourceId);
+    if (!registry || !sourceId) return;
+    // Take the same lock handoff creation uses, and re-check inside it: by the time this runs
+    // the source may already have started a different successor that must keep its link.
+    await registry
+      .runHandoff(sourceId, { release: successorAgentId }, async () => {
+        const source = await registry.get(sourceId);
+        if (source?.labels[HANDOFF_TO_AGENT_ID_LABEL] === successorAgentId) {
+          await this.writeLabels(sourceId, { [HANDOFF_TO_AGENT_ID_LABEL]: null });
+          await registry.clearHandoff(sourceId, successorAgentId);
+        }
+        return source as StoredAgentRecord;
+      })
+      .catch(() => undefined);
   }
 
   async stopForHandoff(agentId: string, successorAgentId: string): Promise<void> {

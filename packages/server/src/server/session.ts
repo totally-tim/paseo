@@ -2825,11 +2825,6 @@ export class Session {
 
   private async handleDeleteAgentRequest(agentId: string, requestId: string): Promise<void> {
     await this.agentManager.cancelContinuation(agentId);
-    await this.continuations?.forget(agentId);
-    // Deleting a successor must not leave its predecessor pointing at an agent that is gone.
-    await this.agentManager.releaseHandoffLink(agentId).catch((error) => {
-      this.sessionLogger.warn({ err: error, agentId }, "Could not release the handoff link");
-    });
     this.sessionLogger.info({ agentId }, `Deleting agent ${agentId} from registry`);
 
     const knownWorkspaceId =
@@ -2852,6 +2847,13 @@ export class Session {
     // Drain queued persistence from the just-closed agent before removing its
     // durable snapshot, otherwise an in-flight background write can recreate it.
     await this.agentManager.flush();
+
+    // Only now is the successor really stopped. Releasing its predecessor any earlier would
+    // let the predecessor take a prompt while this agent's turn was still running.
+    await this.continuations?.forget(agentId);
+    await this.agentManager.releaseHandoffLink(agentId).catch((error) => {
+      this.sessionLogger.warn({ err: error, agentId }, "Could not release the handoff link");
+    });
 
     try {
       await this.agentStorage.remove(agentId);

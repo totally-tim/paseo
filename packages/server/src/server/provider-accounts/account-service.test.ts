@@ -701,6 +701,28 @@ it("picks up a host CLI login that happened after the daemon started", async () 
   await vi.waitFor(() => expect(store.get(host.id).authState).toBe("ready"));
 });
 
+it("keeps unreadable account metadata and refuses to replace it", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-account-store-"));
+  cleanups.push(async () => {
+    await fs
+      .chmod(path.join(directory, "provider-accounts", "accounts.json"), 0o600)
+      .catch(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+  const first = new ProviderAccountStore(directory);
+  await first.initialize();
+  await first.create("codex", "Keep me");
+  const file = path.join(directory, "provider-accounts", "accounts.json");
+  const original = await fs.readFile(file, "utf8");
+  await fs.chmod(file, 0o000);
+  const second = new ProviderAccountStore(directory);
+  await expect(second.initialize()).resolves.toBeUndefined();
+  // A file we could not read is not a corrupt file: it stays put, and writes refuse.
+  await fs.chmod(file, 0o600);
+  expect(await fs.readFile(file, "utf8")).toBe(original);
+  await expect(second.setPolicy({ unknownQuota: "allow" })).rejects.toThrow("could not be read");
+});
+
 it("sets aside an unreadable account file instead of stopping the daemon", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-account-store-"));
   cleanups.push(async () => fs.rm(directory, { recursive: true, force: true }));

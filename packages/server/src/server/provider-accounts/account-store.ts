@@ -20,6 +20,8 @@ export class ProviderAccountStore {
   private accounts: ProviderAccount[] = [];
   private policy: AccountPolicy | null = null;
   private writeQueue: Promise<unknown> = Promise.resolve();
+  /** Set when the metadata on disk must not be replaced; every mutation refuses. */
+  private readOnlyReason: string | null = null;
   readonly directory: string;
 
   constructor(paseoHome: string) {
@@ -29,15 +31,30 @@ export class ProviderAccountStore {
   async initialize(): Promise<void> {
     await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
     await fs.chmod(this.directory, 0o700);
+    let raw: string;
     try {
-      const data = StoreSchema.parse(JSON.parse(await fs.readFile(this.metadataPath(), "utf8")));
-      this.accounts = data.accounts;
-      this.policy = data.policy;
+      raw = await fs.readFile(this.metadataPath(), "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      // The bytes may be perfectly good and simply unreadable right now. Boot without accounts
+      // rather than replacing a file that still holds the user's logins.
+      this.readOnlyReason =
+        "The account metadata could not be read. Fix its permissions and restart the host.";
+      return;
+    }
+    try {
+      const data = StoreSchema.parse(JSON.parse(raw));
+      this.accounts = data.accounts;
+      this.policy = data.policy;
+    } catch {
       // Truncated bytes, or a file a newer daemon wrote, must not stop this one from starting.
       // Keep them for inspection; the accounts are re-added rather than silently overwritten.
-      await fs.rename(this.metadataPath(), `${this.metadataPath()}.corrupt-${Date.now()}`);
+      try {
+        await fs.rename(this.metadataPath(), `${this.metadataPath()}.corrupt-${Date.now()}`);
+      } catch {
+        this.readOnlyReason =
+          "The account metadata is unreadable and could not be set aside. Move it and restart the host.";
+      }
     }
   }
 
@@ -129,6 +146,7 @@ export class ProviderAccountStore {
   }
 
   private async write(data: z.infer<typeof StoreSchema>): Promise<void> {
+    if (this.readOnlyReason) throw new Error(this.readOnlyReason);
     const temporary = path.join(this.directory, `.${randomUUID()}.tmp`);
     try {
       await fs.writeFile(temporary, JSON.stringify(data, null, 2), { mode: 0o600, flag: "wx" });
