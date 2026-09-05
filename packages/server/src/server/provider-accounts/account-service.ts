@@ -59,6 +59,8 @@ export class AccountHelperShutdownError extends Error {
 }
 
 const USAGE_TTL_MS = 5 * 60_000;
+/** How long a capacity rejection stands when the provider reported no reset time. */
+const UNDATED_CAPACITY_COOLDOWN_MS = 15 * 60_000;
 const LOGIN_TIMEOUT_MS = 10 * 60_000;
 
 export class ProviderAccountService {
@@ -928,15 +930,18 @@ function capacityRejection(
     (capacity.resetsAt && Date.parse(capacity.resetsAt) <= now)
   )
     return null;
-  // A newer reading clears the rejection only when the provider also said when capacity
-  // returns. Without a reset time the reading cannot show the limit has lifted, and trusting
-  // it would send the same account another request every time the wait wakes up.
+  // A newer reading alone cannot show the limit has lifted when the provider named no reset:
+  // recovery reads usage immediately before deciding, so the reading is always newer and the
+  // same account would be re-prompted on every wake. Hold the rejection for a bounded cooldown
+  // instead, which stops the loop without stranding an account nothing else would clear.
+  const clearsAt = capacity.resetsAt
+    ? Date.parse(capacity.resetsAt)
+    : Date.parse(capacity.observedAt) + UNDATED_CAPACITY_COOLDOWN_MS;
   if (
-    capacity.resetsAt &&
     usage?.status === "available" &&
     windowCount > 0 &&
     usage.fetchedAt &&
-    Date.parse(usage.fetchedAt) > Date.parse(capacity.observedAt)
+    Date.parse(usage.fetchedAt) > clearsAt
   )
     return null;
   return capacity.resetsAt

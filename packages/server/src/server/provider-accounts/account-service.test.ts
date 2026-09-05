@@ -678,6 +678,9 @@ it("keeps a rejection without a reported reset until a reset is known", async ()
   expect((await service.recoveryChoice(input)).accountId).toBeNull();
   advance(10 * 60_000);
   expect((await service.recoveryChoice(input)).accountId).toBeNull();
+  // It must not strand the account either: after a bounded cooldown a fresh reading counts.
+  advance(6 * 60_000);
+  expect((await service.recoveryChoice(input)).accountId).toBe(a.account.id);
   // A rejection that did name a reset clears once that time passes and usage is re-read.
   const b = await add("with-reset");
   await service.reportCapacity(b.account.id, undefined, "2026-09-04T00:00:00.000Z");
