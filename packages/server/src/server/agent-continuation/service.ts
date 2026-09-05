@@ -808,6 +808,8 @@ export class AgentContinuationService {
         ...this.deps,
         agentId: record.agentId,
         messageId: item.id,
+        // The prompt carries the retained path and the provider reads it during the turn,
+        // so a delivered attachment is released with its task, never at dispatch.
         prompt: buildAgentPrompt(item.text, item.images, item.attachments),
         runOptions: { continuationOperationId: `queue:${record.generation}:${item.id}` },
         unarchive: false,
@@ -820,8 +822,6 @@ export class AgentContinuationService {
         current.queue = current.queue.filter((entry) => entry.id !== item.id);
         current.receipts[item.id].outcome = "sent";
       });
-      // The provider has the bytes now; the host copy has no remaining reader.
-      await this.deps.store.releaseAttachments(rootAgentId, item);
     } catch {
       // The manager refuses to start over an in-flight run before it sends anything.
       const busy = !dispatched && manager.hasInFlightRun(record.agentId);

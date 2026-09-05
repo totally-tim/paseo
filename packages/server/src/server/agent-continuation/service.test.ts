@@ -884,8 +884,10 @@ test("editing a queued upload releases the copy it replaced and keeps the one it
     message: { id: "file", text: "Read this one", attachments: [attachment("two", second)] },
   });
   await expect(stat(before.path)).rejects.toThrow();
-  expect(await readdir(path.join(f.directory, "agent-continuations", f.source.id))).toHaveLength(1);
-  // Delivering the instruction releases the last copy too.
+  const remaining = await readdir(path.join(f.directory, "agent-continuations", f.source.id));
+  expect(remaining).toHaveLength(1);
+  // The delivered copy survives dispatch: the prompt carries that path and the provider reads
+  // the file while the turn runs. It is released when the task itself is forgotten.
   f.used.set(f.b, 10);
   f.advance(61_000);
   f.service.wake(f.source.id);
@@ -893,9 +895,9 @@ test("editing a queued upload releases the copy it replaced and keeps the one it
   await vi.waitFor(() =>
     expect(f.starts.filter((entry) => entry.prompt.includes("Read this one"))).toHaveLength(1),
   );
-  await vi.waitFor(async () =>
-    expect(await readdir(path.join(f.directory, "agent-continuations", f.source.id))).toHaveLength(
-      0,
-    ),
+  expect(await readdir(path.join(f.directory, "agent-continuations", f.source.id))).toEqual(
+    remaining,
   );
+  await f.service.forget((await f.service.inspect(f.source.id)).agentId);
+  expect(await readdir(path.join(f.directory, "agent-continuations"))).toEqual([]);
 });
