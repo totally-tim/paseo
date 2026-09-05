@@ -17,6 +17,8 @@ const RecoverySchema = AgentContinuationStatusSchema.extend({
   attempts: z.array(z.string()),
   resumeDispatch: z.enum(["dispatching", "started"]).optional(),
   backoffMs: z.number().optional(),
+  /** The turn that Stop or Cancel wait fenced; a later turn may start a new episode. */
+  cancelledTurnId: z.string().nullable().optional(),
 });
 
 const RecordSchema = z.object({

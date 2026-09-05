@@ -8,6 +8,7 @@ import { createTestAgentClient, createTestAgentClients } from "../test-utils/fak
 import { AgentManager } from "../agent/agent-manager.js";
 import { AgentStorage } from "../agent/agent-storage.js";
 import { handoffAgent } from "../agent/handoff-agent.js";
+import { sendPromptToAgent } from "../agent/agent-prompt.js";
 import { ProviderAccountStore } from "../provider-accounts/account-store.js";
 import { ProviderAccountService } from "../provider-accounts/account-service.js";
 import { AgentContinuationStore } from "./store.js";
@@ -522,4 +523,68 @@ test("an unresolved tool outcome pauses recovery after shutdown", async () => {
   await f.service.flush();
   expect((await f.service.inspect(f.source.id)).continuation?.status).toBe("attention");
   expect(f.starts).toHaveLength(0);
+});
+
+test("Stop fences only the interrupted turn; a later turn's confirmed limit recovers again", async () => {
+  const f = await setup();
+  f.used.set(f.b, 100);
+  await f.service.reportCapacity(f.source.id, "limit-1", "turn-1");
+  await f.service.flush();
+  expect((await f.service.inspect(f.source.id)).continuation?.status).toBe("waiting");
+  await f.agentManager.cancelContinuation(f.source.id);
+  expect((await f.service.inspect(f.source.id)).continuation?.status).toBe("cancelled");
+  f.used.set(f.b, 10);
+  // A rejection with no turn identity cannot prove it came from new work.
+  await f.service.reportCapacity(f.source.id, "limit-1-late");
+  await f.service.flush();
+  expect((await f.service.inspect(f.source.id)).continuation?.status).toBe("cancelled");
+  expect(f.starts).toHaveLength(0);
+  // The user prompted again and that turn hit the limit: the policy still applies.
+  await f.service.reportCapacity(f.source.id, "limit-2", "turn-2");
+  await f.service.flush();
+  const snapshot = await f.service.inspect(f.source.id);
+  expect(snapshot.continuation).toMatchObject({ status: "active", accountId: f.b });
+  expect(snapshot.agentId).not.toBe(f.source.id);
+  expect(f.starts).toHaveLength(1);
+});
+
+test("Stop during a live turn fences that turn's own late rejection but not the next turn", async () => {
+  const f = await setup();
+  await sendPromptToAgent({
+    ...f,
+    agentId: f.source.id,
+    prompt: "sleep",
+    unarchive: false,
+    clearPendingPermissions: false,
+  });
+  await vi.waitFor(() =>
+    expect(f.agentManager.getAgent(f.source.id)?.activeForegroundTurnId).toBeTruthy(),
+  );
+  const turnId = f.agentManager.getAgent(f.source.id)!.activeForegroundTurnId!;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const suspend = f.agentManager.suspendForContinuation.bind(f.agentManager);
+  vi.spyOn(f.agentManager, "suspendForContinuation").mockImplementation(async (id) => {
+    await gate;
+    return suspend(id);
+  });
+  await f.service.reportCapacity(f.source.id, "limit-1", turnId);
+  await vi.waitFor(() => expect(f.agentManager.suspendForContinuation).toHaveBeenCalled());
+  await f.agentManager.cancelContinuation(f.source.id);
+  expect(f.store.forAgent(f.source.id)?.recovery).toMatchObject({
+    status: "cancelled",
+    cancelledTurnId: turnId,
+  });
+  release();
+  await f.service.flush();
+  await f.service.reportCapacity(f.source.id, "limit-1-late", turnId);
+  expect(f.store.forAgent(f.source.id)?.recovery?.status).toBe("cancelled");
+  await f.service.reportCapacity(f.source.id, "limit-2", `${turnId}-next`);
+  expect(f.store.forAgent(f.source.id)?.recovery).toMatchObject({
+    status: "continuing",
+    eventId: "limit-2",
+  });
+  await f.service.flush();
 });

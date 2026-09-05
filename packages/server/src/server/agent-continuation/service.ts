@@ -77,6 +77,7 @@ export class AgentContinuationService {
             void this.reportCapacity(
               event.agentId,
               `${event.epoch ?? "live"}:${event.seq ?? randomUUID()}`,
+              item.turnId,
             )
               .catch(() =>
                 this.deps.logger.error(
@@ -188,6 +189,8 @@ export class AgentContinuationService {
     }
     // A historical conversation no longer owns the running task.
     if (!record || record.agentId !== agentId) return;
+    const live = this.deps.agentManager.getAgent(agentId);
+    const cancelledTurnId = live?.activeForegroundTurnId ?? live?.activeTurnId ?? null;
     await this.change(record.rootAgentId, (current) => {
       current.queuePaused = true;
       current.generation += 1;
@@ -200,6 +203,7 @@ export class AgentContinuationService {
           reason: "Automatic continuation was cancelled.",
           updatedAt: this.timestamp(),
           nextCheckAt: undefined,
+          cancelledTurnId,
         });
     });
     const timer = this.timers.get(record.rootAgentId);
@@ -277,13 +281,18 @@ export class AgentContinuationService {
     });
   }
 
-  async reportCapacity(agentId: string, eventId: string): Promise<void> {
+  async reportCapacity(agentId: string, eventId: string, turnId?: string): Promise<void> {
     const source = await this.deps.agentStorage.get(agentId);
     if (!source || !isOrdinaryAgent(source) || !source.config?.continuationPolicy) return;
     const record = await this.ensureRecord(agentId);
+    // Stop fences the turn it interrupted. A rejection from a later turn is new work under the
+    // same policy, so only a known, different turn may open the next episode.
+    const fenced = (recovery: ContinuationRecord["recovery"]) =>
+      recovery?.status === "cancelled" &&
+      (turnId === undefined || recovery.cancelledTurnId === turnId);
     if (
       record.agentId !== agentId ||
-      record.recovery?.status === "cancelled" ||
+      fenced(record.recovery) ||
       record.recovery?.eventId === eventId
     )
       return;
@@ -293,7 +302,7 @@ export class AgentContinuationService {
       episode && ["continuing", "active"].includes(episode.status) ? episode.attempts : [];
     const operationId = randomUUID();
     await this.change(record.rootAgentId, (current) => {
-      if (current.agentId !== agentId || current.recovery?.status === "cancelled") return;
+      if (current.agentId !== agentId || fenced(current.recovery)) return;
       current.policy = source.config!.continuationPolicy;
       current.recovery = this.recovery(current, operationId, eventId, [
         ...new Set([...attempts, ...(source.config?.accountId ? [source.config.accountId] : [])]),
