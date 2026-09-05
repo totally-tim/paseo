@@ -898,14 +898,19 @@ export class ProviderAccountService {
 
 // The provider supplies model bucket labels, not a mapping to model IDs. Unknown
 // buckets remain visible but cannot reject a different model's admission.
+/** Provider bucket labels and model IDs differ in spacing and punctuation, not in words. */
+function modelKey(value: string): string {
+  return value.toLowerCase().replaceAll(/[^a-z0-9]/g, "");
+}
+
 function applicableWindows(usage: ProviderUsage | null, model?: string): ProviderUsage["windows"] {
   if (usage?.status !== "available") return [];
-  const selected = model?.toLowerCase();
+  const selected = model ? modelKey(model) : undefined;
   return usage.windows.filter((window) => {
     if (window.id === "seven_day_opus") return Boolean(selected?.includes("opus"));
     if (window.id === "seven_day_sonnet") return Boolean(selected?.includes("sonnet"));
     if (window.id.startsWith("model:"))
-      return Boolean(selected?.includes(window.id.split(":").slice(2).join(":").toLowerCase()));
+      return Boolean(selected?.includes(modelKey(window.id.split(":").slice(2).join(":"))));
     return true;
   });
 }

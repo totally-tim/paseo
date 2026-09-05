@@ -709,3 +709,32 @@ it("sets aside an unreadable account file instead of stopping the daemon", async
   const entries = await fs.readdir(path.join(directory, "provider-accounts"));
   expect(entries.filter((entry) => entry.includes(".corrupt-"))).toHaveLength(1);
 });
+
+it("matches a model-scoped window whose label is spaced differently from the model id", async () => {
+  const { service, add } = await setup();
+  const account = await add("model-scoped");
+  vi.spyOn(account.backend, "usage").mockResolvedValue({
+    providerId: "claude",
+    displayName: "model-scoped",
+    status: "available",
+    planLabel: "max",
+    windows: [
+      { id: "five_hour", label: "Session", usedPct: 5, resetsAt: "2099-01-01T00:00:00Z" },
+      {
+        id: "model:0:Claude Opus 4.5",
+        label: "Weekly · Claude Opus 4.5",
+        usedPct: 100,
+        resetsAt: "2099-01-01T00:00:00Z",
+      },
+    ],
+  });
+  const input = { provider: "codex" as const, accountIds: [account.account.id] };
+  // The exhausted bucket belongs to this model, so it must block admission.
+  expect(
+    (await service.recoveryChoice({ ...input, model: "claude-opus-4-5-20251101" })).accountId,
+  ).toBeNull();
+  // A different model is unaffected by that bucket.
+  expect((await service.recoveryChoice({ ...input, model: "claude-haiku-4-5" })).accountId).toBe(
+    account.account.id,
+  );
+});
