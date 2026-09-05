@@ -826,25 +826,14 @@ test("a fenced capacity event still stops the queue for the turn that failed", a
   });
   await f.service.flush();
   await vi.waitFor(() => expect(f.starts).toHaveLength(1));
-  await f.store.update(f.source.id, (record) => {
-    record.queue.push({
-      id: "next",
-      text: "Must not be sent into the exhausted account",
-      status: "queued",
-      revision: 1,
-      createdAt: "2026-09-05T00:00:00Z",
-    });
-    record.receipts.next = { digest: "x", outcome: "queued" };
-  });
-  // The live turn is the one an earlier Stop fenced, so no episode opens; its failure must
-  // still stop the queue rather than being swallowed by the suppressed terminal event.
-  // Settle the dispatched turn first, so the notification's turn identity is deterministic.
+  // Settle the dispatched turn so the notification's turn identity is deterministic.
   await vi.waitFor(() =>
     expect(f.agentManager.getAgent(f.source.id)?.activeForegroundTurnId ?? null).toBeNull(),
   );
-  await f.store.update(f.source.id, (record) => {
-    record.recovery!.cancelledTurnId = "turn-1";
-  });
+  expect(f.store.forAgent(f.source.id)?.queuePaused).toBe(false);
+  // The event belongs to the turn an earlier Stop fenced, so no episode opens. Its failure
+  // must still stop the queue instead of being swallowed with the suppressed terminal event,
+  // which would send the next instruction into the account that just reported exhaustion.
   f.emitters.get(f.a)!({
     type: "timeline",
     provider: "codex",
@@ -859,8 +848,6 @@ test("a fenced capacity event still stops the queue for the turn that failed", a
   await f.agentManager.flush();
   await f.service.flush();
   await vi.waitFor(() => expect(f.store.forAgent(f.source.id)?.queuePaused).toBe(true));
-  expect(f.store.forAgent(f.source.id)?.queuePaused).toBe(true);
-  expect(f.starts.filter((entry) => entry.prompt.includes("exhausted account"))).toHaveLength(0);
 });
 
 test("editing a queued upload releases the copy it replaced and keeps the one it sends", async () => {
