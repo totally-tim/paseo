@@ -1,41 +1,34 @@
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { relative as relativePath } from "node:path";
 import test from "node:test";
 
 const repoRoot = new URL("../", import.meta.url);
 const ciWorkflowPath = new URL(".github/workflows/ci.yml", repoRoot);
-const dockerWorkflowPath = new URL(".github/workflows/docker.yml", repoRoot);
-const nixWorkflowPath = new URL(".github/workflows/nix.yml", repoRoot);
+const desktopReleaseWorkflowPath = new URL(".github/workflows/desktop-release.yml", repoRoot);
 const filtersPath = new URL(".github/ci-paths.yml", repoRoot);
 const serverTsconfigPath = new URL("packages/server/tsconfig.server.json", repoRoot);
 const desktopPackagePath = new URL("packages/desktop/package.json", repoRoot);
 
 const gatedCiJobs = new Map([
   ["format", { name: "format", contract: "format" }],
-  ["lint", { name: "lint", contract: "quality" }],
-  ["typecheck", { name: "typecheck", contract: "quality" }],
-  ["server-tests-ubuntu", { name: "server-tests (ubuntu-latest)", contracts: ["server", "hub"] }],
-  ["server-tests-windows", { name: "server-tests (windows-latest)", contracts: ["server", "hub"] }],
-  ["desktop-tests-ubuntu", { name: "desktop-tests (ubuntu-latest)", contract: "desktop" }],
-  ["desktop-tests-windows", { name: "desktop-tests (windows-latest)", contract: "desktop" }],
+  ["quality", { name: "quality", contract: "quality" }],
+  ["server-tests", { name: "server-tests", contract: "server" }],
+  ["desktop-tests", { name: "desktop-tests", contract: "desktop" }],
   ["app-tests", { name: "app-tests", contract: "app" }],
   ["sdk-tests", { name: "sdk-tests", contract: "sdk" }],
-  ["playwright-1", { name: "playwright (shard 1/4)", contract: "browser" }],
-  ["playwright-2", { name: "playwright (shard 2/4)", contract: "browser" }],
-  ["playwright-3", { name: "playwright (shard 3/4)", contract: "browser" }],
-  ["playwright-4", { name: "playwright (shard 4/4)", contract: "browser" }],
-  ["relay-tests", { name: "relay-tests", contract: "relay" }],
-  ["cli-tests-1", { name: "cli-tests (shard 1/3)", contract: "cli" }],
-  ["cli-tests-2", { name: "cli-tests (shard 2/3)", contract: "cli" }],
-  ["cli-tests-3", { name: "cli-tests (shard 3/3)", contract: "cli" }],
+  ["playwright", { name: "playwright", contract: "browser" }],
+  ["cli-tests", { name: "cli-tests", contract: "cli" }],
 ]);
 
 function jobBlocks(source) {
   const jobs = new Map();
   let currentJob;
+  const lines = source.split("\n");
+  const jobsIndex = lines.indexOf("jobs:");
+  assert.notEqual(jobsIndex, -1, "workflow has no jobs section");
 
-  for (const line of source.split("\n")) {
+  for (const line of lines.slice(jobsIndex + 1)) {
     const jobMatch = /^  ([a-z0-9-]+):\s*$/.exec(line);
     if (jobMatch) {
       currentJob = jobMatch[1];
@@ -83,9 +76,15 @@ test("gated checks are statically named jobs with real job-level gating", () => 
   const jobs = jobBlocks(workflowSource);
   const trigger = workflowSource.split("jobs:", 1)[0];
 
-  assert.match(trigger, /^\s+merge_group:\s*$/m);
+  assert.doesNotMatch(trigger, /^\s+merge_group:\s*$/m);
   assert.doesNotMatch(workflowSource, /strategy:\s*\n\s+matrix:/);
   assert.doesNotMatch(workflowSource, /RUN_TESTS|Skip unaffected|No .* changes detected/);
+  assert.match(jobs.get("changes")?.join("\n") ?? "", /github\.event_name == 'workflow_dispatch'/);
+  assert.doesNotMatch(
+    jobs.get("changes")?.join("\n") ?? "",
+    /github\.event_name != 'pull_request'/,
+  );
+  assert.deepEqual([...jobs.keys()], ["changes", ...gatedCiJobs.keys()]);
 
   for (const [jobId, expected] of gatedCiJobs) {
     const job = jobs.get(jobId)?.join("\n");
@@ -99,26 +98,23 @@ test("gated checks are statically named jobs with real job-level gating", () => 
 });
 
 test("change gating allows superseded workflow runs to cancel", () => {
-  for (const workflowPath of [ciWorkflowPath, dockerWorkflowPath, nixWorkflowPath]) {
-    const source = readFileSync(workflowPath, "utf8");
-    assert.doesNotMatch(
-      source,
-      /\$\{\{\s*always\(\)/,
-      "always() keeps jobs alive after concurrency cancellation; use !cancelled() for fail-open gating",
-    );
-  }
+  const source = readFileSync(ciWorkflowPath, "utf8");
+  assert.doesNotMatch(
+    source,
+    /\$\{\{\s*always\(\)/,
+    "always() keeps jobs alive after concurrency cancellation; use !cancelled() for fail-open gating",
+  );
 });
 
 test("focused contracts stay inside existing required checks", () => {
   const jobs = jobBlocks(readFileSync(ciWorkflowPath, "utf8"));
   const changes = jobs.get("changes")?.join("\n") ?? "";
-  const server = jobs.get("server-tests-ubuntu")?.join("\n") ?? "";
-  const desktop = jobs.get("desktop-tests-ubuntu")?.join("\n") ?? "";
+  const server = jobs.get("server-tests")?.join("\n") ?? "";
+  const desktop = jobs.get("desktop-tests")?.join("\n") ?? "";
 
   assert.match(changes, /scripts\/daemon-launch-contract\.test\.mjs/);
   assert.doesNotMatch(changes, /Install dependencies|npm run build/);
 
-  assert.match(server, /test:hub-cli-contract/);
   assert.match(server, /npm run test --workspace=@getpaseo\/server/);
   assert.ok(!jobs.has("hub-cli-contract"));
 
@@ -135,7 +131,7 @@ test("server builds exclude test utilities at every domain depth", () => {
   assert.ok(!tsconfig.exclude.includes("src/server/test-utils/**"));
 });
 
-test("PR routing declares stable behavior ownership", () => {
+test("CI routing declares stable behavior ownership", () => {
   const filters = loadFilters(filtersPath);
   assert.deepEqual(filters, {
     routing: [".github/ci-paths.yml"],
@@ -158,7 +154,6 @@ test("PR routing declares stable behavior ownership", () => {
       "packages/expo-two-way-audio/**",
     ],
     quality: ["**/*.{cjs,js,json,jsx,mjs,ts,tsx}", "packages/expo-two-way-audio/**"],
-    hub: ["packages/cli/src/commands/hub/**", "packages/server/src/server/hub/**"],
     server: ["packages/server/**", "packages/app/e2e/support/fixtures/recording.*"],
     desktop: [
       "packages/desktop/**",
@@ -180,7 +175,6 @@ test("PR routing declares stable behavior ownership", () => {
       "packages/app/*config.{cjs,js,ts}",
       "packages/app/package.json",
     ],
-    relay: ["packages/relay/**"],
     cli: ["packages/cli/**"],
   });
 });
@@ -250,11 +244,41 @@ test("browser and desktop tests have exclusive, directory-owned suites", () => {
   ]);
 });
 
-test("non-required Docker and Nix workflows avoid runners with workflow path filters", () => {
-  for (const workflowPath of [dockerWorkflowPath, nixWorkflowPath]) {
-    const source = readFileSync(workflowPath, "utf8");
-    const trigger = source.split("jobs:", 1)[0];
-    assert.match(trigger, /^\s+paths:\s*$/m);
-    assert.doesNotMatch(source, /dorny\/paths-filter/);
-  }
+test("the fork only keeps owned GitHub and EAS automation", () => {
+  const workflowFiles = readdirSync(new URL(".github/workflows/", repoRoot)).sort();
+  assert.deepEqual(workflowFiles, [
+    "ci.yml",
+    "desktop-release.yml",
+    "desktop-rollout.yml",
+    "fork-upstream-drift.yml",
+    "release-notes-sync.yml",
+  ]);
+
+  const easWorkflows = new URL("packages/app/.eas/workflows/", repoRoot);
+  const easWorkflowFiles = existsSync(easWorkflows)
+    ? readdirSync(easWorkflows).filter((path) => /\.ya?ml$/.test(path))
+    : [];
+  assert.deepEqual(easWorkflowFiles, []);
+});
+
+test("desktop releases build macOS only", () => {
+  const source = readFileSync(desktopReleaseWorkflowPath, "utf8");
+  const trigger = source.split("jobs:", 1)[0];
+
+  assert.deepEqual(
+    [...jobBlocks(source).keys()],
+    ["create-release", "publish-macos", "finalize-rollout"],
+  );
+  assert.match(trigger, /- "v\*"/);
+  assert.match(trigger, /- "desktop-macos-v\*"/);
+  assert.match(source, /!startsWith\(github\.ref_name, 'desktop-macos-v'\)/);
+  assert.doesNotMatch(
+    source,
+    /desktop-v\*|desktop-linux|desktop-windows|publish-linux|publish-windows/,
+  );
+  assert.doesNotMatch(source, /github\.event\.inputs\.platform/);
+  assert.match(source, /runner: macos-14\s+electron_arch: arm64/);
+  assert.match(source, /runner: macos-15-intel\s+electron_arch: x64/);
+  assert.match(source, /manifest_name="\$\{RELEASE_CHANNEL\}-mac\.yml"/);
+  assert.match(source, /needs: \[publish-macos\]/);
 });

@@ -1,9 +1,9 @@
 # The team fork
 
 `totally-tim/paseo` is a permanent fork of `getpaseo/paseo`. It carries features upstream will
-not take, pulls upstream in about once a week, and ships its own desktop builds from its own
-release feed. Read this before you branch, merge upstream, build a desktop app, or wonder why
-the installed app says 1.x while the repo says 0.7.x.
+not take, pulls upstream in about once a week, and ships its own macOS desktop builds from its
+own release feed. Read this before you branch, merge upstream, build a desktop app, or wonder
+why the installed app says 1.x while the repo says 0.7.x.
 
 ## What the fork carries
 
@@ -68,6 +68,19 @@ upstream as an artifact, so a merge that quietly rewrites a fork feature shows u
 the delta's shape. GitHub only runs scheduled workflows from the default branch, which is why
 `main` has to stay the default.
 
+## Automation scope
+
+The fork automates only the product paths the team uses. GitHub Actions contains core CI,
+macOS desktop release and rollout, release-note sync, and the upstream drift check. The EAS
+tag workflows and the Android, web, website, relay, Docker, Nix, Linux desktop, and Windows
+desktop workflows are intentionally absent. Source support for those targets remains for
+upstream syncs and local use.
+
+Core CI routes pull requests and `main` pushes by changed path. A manual CI dispatch runs every
+retained contract. The macOS release builds both Apple silicon and Intel artifacts. The static
+contract in `scripts/ci-workflow.test.mjs` fails if an upstream sync restores removed automation
+or broadens desktop release targets.
+
 Version lines never conflict on a sync, because the fork does not commit a version bump. The
 next section explains why.
 
@@ -110,9 +123,9 @@ must say `owner: totally-tim`.
 
 ## Releasing
 
-Tag `main` and push the tag. `.github/workflows/desktop-release.yml` builds, notarizes, and
-publishes to the repository it runs in, which is where the feed points, so installed fork apps
-update themselves from that release.
+Tag `main` and push the tag. `.github/workflows/desktop-release.yml` builds and notarizes macOS
+for Apple silicon and Intel, then publishes both artifacts to the repository it runs in. The
+feed points at that repository, so installed fork apps update themselves from the release.
 
 ```bash
 git switch main && git pull

@@ -114,7 +114,10 @@ The harness launches the unpacked packaged app with isolated user data and daemo
 - the renderer starts a fresh desktop-managed daemon through the normal startup bootstrap;
 - the bundled CLI can query that daemon and run a terminal command.
 
-Pull-request CI runs the Linux x64 smoke under Xvfb when the cumulative PR diff changes `packages/desktop/**`. The desktop release matrix runs the harness against each host-native packaged app before publishing. All smoke jobs upload renderer, desktop, and daemon diagnostics on failure.
+The fork does not package an unused Linux target in pull-request CI. Desktop pull requests run
+the unit, renderer, and browser-tab suites under Xvfb. The macOS release matrix runs the
+packaged smoke against Apple silicon and Intel artifacts before publishing. Smoke jobs upload
+renderer, desktop, and daemon diagnostics on failure.
 
 To exercise the smoke locally on Linux:
 
