@@ -1,3 +1,4 @@
+import { AgentAccountLabel } from "@/provider-accounts/agent-label";
 import { useCallback, useState, type ReactNode } from "react";
 import { useShallow } from "zustand/shallow";
 import { Text, View } from "react-native";
@@ -18,10 +19,12 @@ function RetryContinuation({
   serverId,
   agentId,
   provider,
+  accountId,
 }: {
   serverId: string;
   agentId: string;
   provider: string;
+  accountId?: string;
 }) {
   const { t } = useTranslation();
   const client = useHostRuntimeClient(serverId);
@@ -33,14 +36,18 @@ function RetryContinuation({
     setPending(true);
     setError(null);
     try {
-      const target = await client.handoffAgent({ sourceAgentId: agentId, provider });
+      const target = await client.handoffAgent({
+        sourceAgentId: agentId,
+        provider,
+        ...(accountId ? { accountSelection: { kind: "fixed", accountId } } : {}),
+      });
       navigateToAgent({ serverId, agentId: target.id });
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
     } finally {
       setPending(false);
     }
-  }, [client, pending, agentId, provider, serverId]);
+  }, [client, pending, agentId, provider, serverId, accountId]);
   return (
     <>
       <Button
@@ -72,7 +79,7 @@ export function AgentContinuationControls({
   const supported = useHostFeature(serverId, "agentHandoff");
   const connected = useHostRuntimeIsConnected(serverId);
   const [open, setOpen] = useState(false);
-  const [from, to, archived] = useSessionStore(
+  const [from, to, archived, accountId] = useSessionStore(
     useShallow((state) => {
       const agent =
         state.sessions[serverId]?.agents.get(agentId) ??
@@ -81,16 +88,17 @@ export function AgentContinuationControls({
         agent?.labels[HANDOFF_FROM_AGENT_ID_LABEL],
         agent?.labels[HANDOFF_TO_AGENT_ID_LABEL],
         Boolean(agent?.archivedAt),
+        agent?.accountId,
       ] as const;
     }),
   );
-  const [targetProvider, targetHasPrompt] = useSessionStore(
+  const [targetProvider, targetHasPrompt, targetAccountId] = useSessionStore(
     useShallow((state) => {
       const target = to
         ? (state.sessions[serverId]?.agents.get(to) ??
           state.sessions[serverId]?.agentDetails.get(to))
         : undefined;
-      return [target?.provider, Boolean(target?.lastUserMessageAt)] as const;
+      return [target?.provider, Boolean(target?.lastUserMessageAt), target?.accountId] as const;
     }),
   );
   const openSource = useCallback(() => {
@@ -105,6 +113,7 @@ export function AgentContinuationControls({
   return (
     <>
       <View style={styles.row}>
+        {accountId ? <AgentAccountLabel serverId={serverId} accountId={accountId} /> : null}
         {from ? (
           <Button variant="ghost" size="sm" onPress={openSource} testID="agent-handoff-predecessor">
             {t("agentHandoff.source")}
@@ -124,7 +133,12 @@ export function AgentContinuationControls({
           </>
         ) : null}
         {to && targetProvider && !targetHasPrompt && !archived ? (
-          <RetryContinuation serverId={serverId} agentId={agentId} provider={targetProvider} />
+          <RetryContinuation
+            serverId={serverId}
+            agentId={agentId}
+            provider={targetProvider}
+            accountId={targetAccountId}
+          />
         ) : null}
         {(!to || !targetProvider) && !archived ? (
           <Button

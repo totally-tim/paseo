@@ -1,3 +1,5 @@
+import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
+import { AccountSelectionField } from "@/provider-accounts/selection-field";
 import {
   memo,
   useCallback,
@@ -133,6 +135,8 @@ interface ControlledAgentControlsProps {
 }
 
 export interface DraftAgentControlsProps {
+  accountSelection?: AccountSelection;
+  onSelectAccount?: (value: AccountSelection) => void;
   providerDefinitions: AgentProviderDefinition[];
   selectedProvider: AgentProvider | null;
   modeOptions: AgentMode[];
@@ -1808,6 +1812,8 @@ export const AgentControls = memo(function AgentControls({
 });
 
 export function DraftAgentControls({
+  accountSelection,
+  onSelectAccount,
   providerDefinitions,
   selectedProvider,
   modeOptions,
@@ -1895,6 +1901,16 @@ export function DraftAgentControls({
   return (
     <>
       {profileEditor.element}
+      {modelSelectorServerId && onSelectAccount ? (
+        <AccountSelectionField
+          serverId={modelSelectorServerId}
+          provider={selectedProvider ?? ""}
+          value={accountSelection}
+          onChange={onSelectAccount}
+          disabled={disabled}
+          compact
+        />
+      ) : null}
       <ControlledAgentControls
         provider={selectedProvider ?? ""}
         modelSelectorProviders={modelSelectorProviders}

@@ -5140,7 +5140,9 @@ describe("provider MCP tools", () => {
     const { agentManager, agentStorage } = createTestDeps();
     const provStub = createProviderSnapshotManagerStub();
     provStub.listRegisteredProviderIds.mockReturnValue(["codex"]);
-    provStub.listModels.mockRejectedValue(new Error("Provider 'codex' is disabled"));
+    provStub.getProvider.mockResolvedValue(
+      buildSnapshotEntry({ provider: "codex", enabled: false }),
+    );
     const server = await createAgentMcpServer({
       agentManager,
       agentStorage,

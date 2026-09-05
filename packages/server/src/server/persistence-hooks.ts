@@ -66,6 +66,9 @@ export function buildConfigOverrides(record: StoredAgentRecord): Partial<AgentSe
   return stripInternalPaseoMcpServer({
     provider: record.provider,
     cwd: record.cwd,
+    accountId: record.config?.accountId,
+    accountSelection: record.config?.accountSelection,
+    accountSelectionReason: record.config?.accountSelectionReason,
     modeId: record.config?.modeId ?? undefined,
     model: record.config?.model ?? undefined,
     thinkingOptionId: record.config?.thinkingOptionId ?? undefined,
@@ -88,6 +91,9 @@ export function buildSessionConfig(
   return stripInternalPaseoMcpServer({
     provider: record.provider,
     cwd: record.cwd,
+    accountId: overrides.accountId,
+    accountSelection: overrides.accountSelection,
+    accountSelectionReason: overrides.accountSelectionReason,
     modeId: overrides.modeId,
     model: overrides.model,
     thinkingOptionId: overrides.thinkingOptionId,

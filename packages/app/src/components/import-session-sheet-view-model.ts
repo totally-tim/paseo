@@ -73,7 +73,7 @@ export function aggregateSessionEntries(
   for (const query of queries) {
     if (!query.data) continue;
     for (const entry of query.data.entries) {
-      const key = `${entry.providerId}:${entry.providerHandleId}`;
+      const key = `${entry.providerId}:${entry.accountId ?? "default"}:${entry.providerHandleId}`;
       if (seen.has(key)) continue;
       seen.add(key);
       collected.push(entry);

@@ -1,3 +1,4 @@
+import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import type { AgentProviderDefinition } from "@getpaseo/protocol/provider-manifest";
 import type {
   AgentModelDefinition,
@@ -21,6 +22,7 @@ export interface FormInitialValues {
 }
 
 export interface FormState {
+  accountSelection?: AccountSelection;
   serverId: string | null;
   provider: AgentProvider | null;
   modeId: string;
@@ -69,6 +71,7 @@ export const RESOLVABLE_PROVIDER_STATUSES = new Set<ProviderSnapshotEntry["statu
 export const SELECTABLE_PROVIDER_STATUSES = new Set<ProviderSnapshotEntry["status"]>(["ready"]);
 
 export type AgentFormAction =
+  | { type: "SET_ACCOUNT_SELECTION"; value: AccountSelection }
   | { type: "REQUEST_RESOLUTION" }
   | {
       type: "COMPLETE_RESOLUTION";
@@ -89,6 +92,7 @@ export type AgentFormAction =
     }
   | {
       type: "APPLY_PROFILE_FROM_USER";
+      accountSelection?: AccountSelection;
       provider: AgentProvider;
       modelId: string;
       modeId: string;
@@ -601,6 +605,7 @@ function applyProfile(state: AgentFormReducerState, action: ApplyProfileAction) 
     form: {
       ...state.form,
       provider: action.provider,
+      accountSelection: action.accountSelection,
       model: nextModelId,
       modeId: nextModeId,
       thinkingOptionId: nextThinkingOptionId,
@@ -613,6 +618,16 @@ function applyProfile(state: AgentFormReducerState, action: ApplyProfileAction) 
       thinkingOptionId: true,
     },
   };
+}
+
+function accountOnHost(state: FormState, host: string | null): AccountSelection | undefined {
+  return state.serverId === host ? state.accountSelection : undefined;
+}
+function accountOnProvider(
+  state: FormState,
+  provider: AgentProvider,
+): AccountSelection | undefined {
+  return state.provider === provider ? state.accountSelection : undefined;
 }
 
 export function resolveAgentForm(
@@ -630,13 +645,26 @@ export function resolveAgentForm(
     case "COMPLETE_RESOLUTION":
       return completeResolution(state, action);
 
+    case "SET_ACCOUNT_SELECTION":
+      return { ...state, form: { ...state.form, accountSelection: action.value } };
     case "SET_SERVER_ID":
-      return { ...state, form: { ...state.form, serverId: action.value } };
+      return {
+        ...state,
+        form: {
+          ...state.form,
+          serverId: action.value,
+          accountSelection: accountOnHost(state.form, action.value),
+        },
+      };
 
     case "SET_SERVER_ID_FROM_USER":
       return {
         ...state,
-        form: { ...state.form, serverId: action.value },
+        form: {
+          ...state.form,
+          serverId: action.value,
+          accountSelection: accountOnHost(state.form, action.value),
+        },
         userModified: { ...state.userModified, serverId: true },
       };
 
@@ -663,6 +691,7 @@ export function resolveAgentForm(
         form: {
           ...state.form,
           provider: action.provider,
+          accountSelection: accountOnProvider(state.form, action.provider),
           model: nextModelId,
           modeId: nextModeId,
           thinkingOptionId: nextThinkingOptionId,

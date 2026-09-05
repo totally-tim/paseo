@@ -2,6 +2,7 @@ import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
 
 export const ja: TranslationResources = {
+  providerAccounts: en.providerAccounts,
   agentHandoff: {
     custom: "カスタム設定",
     action: "別のエージェントで続行…",

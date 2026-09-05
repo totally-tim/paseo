@@ -90,6 +90,7 @@ test("a saved profile submits its complete configuration without requiring custo
   const form = openHandoffForm(send);
   form.replaceCatalog(entries, true);
   const profile = {
+    accountSelection: { kind: "fixed" as const, accountId: "account-a" },
     provider: "claude-work",
     modelId: "opus",
     modeId: "plan",
@@ -100,4 +101,30 @@ test("a saved profile submits its complete configuration without requiring custo
   expect(form.getState().canSubmit).toBe(true);
   expect(await form.submit()).toBe("successor");
   expect(send).toHaveBeenCalledWith(profile, "");
+});
+
+test("a continuation can change a profile's account without dropping its model and features", async () => {
+  const send = vi.fn(async () => "successor");
+  const form = openHandoffForm(send);
+  form.replaceCatalog(entries, true);
+  form.applyProfile({
+    provider: "claude-work",
+    modelId: "opus",
+    modeId: "plan",
+    thinkingOptionId: "high",
+    featureValues: { fast: true },
+    accountSelection: { kind: "fixed", accountId: "a" },
+  });
+  form.selectAccount({ kind: "fixed", accountId: "b" });
+  await form.submit();
+  expect(send).toHaveBeenCalledWith(
+    expect.objectContaining({
+      modelId: "opus",
+      modeId: "plan",
+      thinkingOptionId: "high",
+      featureValues: { fast: true },
+      accountSelection: { kind: "fixed", accountId: "b" },
+    }),
+    "",
+  );
 });

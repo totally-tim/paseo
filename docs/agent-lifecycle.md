@@ -55,7 +55,7 @@ Accepting new work after an ambiguous interruption would create a split-brain se
 
 **Continue with…** stops the source agent and opens an independent successor in the same workspace.
 Choose a saved agent profile first, or expand **Custom configuration** to select a provider and
-model. Continuation can cross providers and account aliases. It preserves uncommitted files and saved conversation context; it does not
+model. Continuation can select another [provider account](provider-accounts.md), provider alias, or provider. It preserves uncommitted files and saved conversation context; it does not
 transfer a provider's private session state. The `paseo-handoff` skill uses the same daemon operation.
 
 The source must acknowledge interruption and shutdown before the successor starts. A failed stop

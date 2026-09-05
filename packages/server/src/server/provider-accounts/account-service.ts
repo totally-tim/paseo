@@ -1,0 +1,723 @@
+import pLimit from "p-limit";
+import { randomUUID } from "node:crypto";
+import type {
+  AccountLogin,
+  AccountPolicy,
+  AccountProvider,
+  AccountSelection,
+  ProviderAccount,
+  ProviderAccountIdentity,
+} from "@getpaseo/protocol/provider-accounts";
+import type { ProviderUsage } from "../messages.js";
+import { unavailableUsage } from "../../services/quota-fetcher/usage.js";
+import type { ProviderAccountContext } from "../agent/provider-account-context.js";
+import { ProviderAccountStore } from "./account-store.js";
+
+export interface AccountBackend {
+  inspect(): Promise<ProviderAccountIdentity | null>;
+  login(input: {
+    signal: AbortSignal;
+    onChallenge: (challenge: AccountLogin["challenge"]) => void;
+    onSubmitCode: (submit: (code: string) => void) => void;
+  }): Promise<ProviderAccountIdentity>;
+  logout(): Promise<void>;
+  usage(): Promise<ProviderUsage>;
+}
+
+export interface AccountLease {
+  accountId: string;
+  context: ProviderAccountContext | undefined;
+  reason: string;
+  release(): void;
+}
+
+interface ActiveLogin {
+  view: AccountLogin;
+  abort: AbortController;
+  done: Promise<void>;
+  submit?: (code: string) => void;
+}
+
+export interface AccountChoice {
+  accountId: string | null;
+  reason: string;
+}
+
+export class AccountOperationError extends Error {}
+
+const USAGE_TTL_MS = 5 * 60_000;
+const LOGIN_TIMEOUT_MS = 10 * 60_000;
+
+export class ProviderAccountService {
+  private readonly logins = new Map<string, ActiveLogin>();
+  private readonly busy = new Set<string>();
+  private readonly leases = new Map<string, number>();
+  private readonly usageCache = new Map<
+    string,
+    { revision: number; at: number; usage: ProviderUsage }
+  >();
+  private readonly usageRequests = new Map<string, Promise<ProviderUsage>>();
+  private readonly inspections = new Map<string, Promise<ProviderAccount>>();
+  private closed = false;
+  private usageRefresh: Promise<void> | null = null;
+  private pendingAdds = 0;
+  private readonly usageLimit = pLimit(2);
+  private readonly updates = new Map<string, Promise<unknown>>();
+  private identityQueue: Promise<unknown> = Promise.resolve();
+  private readonly listeners = new Set<(account: ProviderAccount) => void>();
+
+  constructor(
+    readonly store: ProviderAccountStore,
+    private readonly backend: (
+      account: ProviderAccount,
+      context?: ProviderAccountContext,
+    ) => AccountBackend,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  async initialize(): Promise<void> {
+    await this.store.initialize();
+    await this.store.ensureExternal("claude");
+    await this.store.ensureExternal("codex");
+    for (const account of this.store.list()) {
+      if (account.authState === "authenticating") {
+        await this.update(account.id, {
+          authState: "signed-out",
+          error: "Login was interrupted by a daemon restart. Sign in again.",
+        });
+      }
+    }
+  }
+
+  list(): ProviderAccount[] {
+    return this.store.list();
+  }
+
+  onChange(listener: (account: ProviderAccount) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  activeLogins(): AccountLogin[] {
+    return [...this.logins.values()].map((login) => structuredClone(login.view));
+  }
+
+  async add(provider: AccountProvider, label: string): Promise<ProviderAccount> {
+    this.assertOpen();
+    if (this.list().length + this.pendingAdds >= 34)
+      throw new AccountOperationError("At most 32 managed accounts can be added.");
+    this.pendingAdds++;
+    try {
+      return await this.store.create(provider, label);
+    } finally {
+      this.pendingAdds--;
+    }
+  }
+
+  async edit(
+    id: string,
+    changes: Pick<
+      Partial<ProviderAccount>,
+      "label" | "enabled" | "reservePercent" | "interactiveOnly"
+    >,
+  ): Promise<ProviderAccount> {
+    this.assertOpen();
+    if (this.busy.has(id))
+      throw new AccountOperationError("An account operation is still in progress.");
+    this.busy.add(id);
+    try {
+      return await this.update(id, changes);
+    } finally {
+      this.busy.delete(id);
+    }
+  }
+
+  async setPolicy(policy: AccountPolicy): Promise<void> {
+    await this.store.setPolicy(policy);
+  }
+
+  async inspect(id: string): Promise<ProviderAccount> {
+    this.assertOpen();
+    const pending = this.inspections.get(id);
+    if (pending) return pending;
+    const inspection = this.inspectAccount(id);
+    this.inspections.set(id, inspection);
+    try {
+      return await inspection;
+    } finally {
+      this.inspections.delete(id);
+    }
+  }
+
+  private async inspectAccount(id: string): Promise<ProviderAccount> {
+    const account = this.store.get(id);
+    if (this.busy.has(id)) return account;
+    this.busy.add(id);
+    try {
+      const identity = await this.backend(account, this.store.context(id)).inspect();
+      if (identity && account.identity && account.identity.key !== identity.key) {
+        return await this.update(id, {
+          authState: "error",
+          error:
+            "The provider login belongs to a different identity. Re-authenticate the original account.",
+        });
+      }
+      if (identity) return await this.commitIdentity(account, identity);
+      return await this.update(id, { authState: "signed-out", error: null });
+    } finally {
+      this.busy.delete(id);
+    }
+  }
+
+  async startLogin(id: string): Promise<AccountLogin> {
+    this.assertMutable(id);
+    this.busy.add(id);
+    try {
+      const account = await this.update(id, { authState: "authenticating", error: null });
+      const abort = new AbortController();
+      const view: AccountLogin = {
+        id: randomUUID(),
+        accountId: id,
+        expiresAt: new Date(this.now() + LOGIN_TIMEOUT_MS).toISOString(),
+        challenge: { kind: "starting" },
+      };
+      const active: ActiveLogin = { view, abort, done: Promise.resolve() };
+      this.logins.set(id, active);
+      const timer = setTimeout(() => abort.abort(), LOGIN_TIMEOUT_MS);
+      timer.unref();
+      active.done = (async () => {
+        try {
+          const identity = await this.backend(account, this.store.context(id)).login({
+            signal: abort.signal,
+            onChallenge: (challenge) => {
+              if (!abort.signal.aborted) active.view.challenge = challenge;
+            },
+            onSubmitCode: (submit) => {
+              active.submit = submit;
+            },
+          });
+          if (abort.signal.aborted) throw new AccountOperationError("canceled");
+          if (account.identity && account.identity.key !== identity.key) {
+            await this.update(id, {
+              authState: "error",
+              error:
+                "This login belongs to a different identity. Sign in with the original account.",
+            });
+            return;
+          }
+          await this.commitIdentity(account, identity);
+        } catch {
+          await this.update(id, {
+            authState: "signed-out",
+            error: abort.signal.aborted
+              ? "Login canceled or expired. Sign in again."
+              : "Login did not complete. Try again.",
+          });
+        } finally {
+          clearTimeout(timer);
+          this.logins.delete(id);
+          this.busy.delete(id);
+        }
+      })();
+      // Persistence failure is visible on the next read; never leak provider output through logs.
+      void active.done.catch(() => undefined);
+      return structuredClone(view);
+    } catch (error) {
+      this.busy.delete(id);
+      throw error;
+    }
+  }
+
+  private commitIdentity(
+    account: ProviderAccount,
+    identity: ProviderAccountIdentity,
+  ): Promise<ProviderAccount> {
+    const commit = this.identityQueue.then(async () => {
+      const duplicate =
+        account.ownership === "managed"
+          ? this.list().find(
+              (other) =>
+                other.id !== account.id &&
+                other.ownership === "managed" &&
+                !other.removedAt &&
+                other.identity?.key === identity.key &&
+                other.provider === account.provider,
+            )
+          : undefined;
+      if (duplicate)
+        return this.update(account.id, {
+          authState: "error",
+          identity,
+          enabled: false,
+          error: `This identity is already registered as ${duplicate.label}.`,
+        });
+      return this.update(account.id, {
+        authState: "ready",
+        identity,
+        enabled: account.identity ? account.enabled : true,
+        error: null,
+      });
+    });
+    this.identityQueue = commit.catch(() => undefined);
+    return commit;
+  }
+
+  async remove(id: string, credentials: "retain" | "logout"): Promise<void> {
+    this.assertMutable(id);
+    this.busy.add(id);
+    try {
+      if (credentials === "logout")
+        await this.backend(this.store.get(id), this.store.context(id)).logout();
+      await this.update(id, {
+        removedAt: new Date(this.now()).toISOString(),
+        enabled: false,
+        ...(credentials === "logout" ? { authState: "signed-out" as const } : {}),
+      });
+    } finally {
+      this.busy.delete(id);
+    }
+  }
+
+  async restore(id: string): Promise<void> {
+    this.assertMutable(id);
+    this.busy.add(id);
+    try {
+      await this.update(id, { removedAt: undefined, enabled: false });
+    } finally {
+      this.busy.delete(id);
+    }
+  }
+
+  async reportCapacity(id: string, model?: string, resetsAt?: string): Promise<void> {
+    await this.update(id, {
+      capacityLimit: { observedAt: new Date(this.now()).toISOString(), model, resetsAt },
+    });
+  }
+
+  async cancelLogin(id: string, loginId: string): Promise<void> {
+    const active = this.requireLogin(id, loginId);
+    active.abort.abort();
+    await active.done;
+  }
+
+  submitCode(id: string, loginId: string, code: string): void {
+    const active = this.requireLogin(id, loginId);
+    if (
+      !active.submit ||
+      !code.trim() ||
+      code.length > 2048 ||
+      code.includes("\n") ||
+      code.includes("\r") ||
+      code.includes(String.fromCharCode(0))
+    ) {
+      throw new AccountOperationError("This login is not accepting a valid one-time code.");
+    }
+    active.submit(code.trim());
+  }
+
+  async logout(id: string): Promise<void> {
+    this.assertMutable(id);
+    this.busy.add(id);
+    try {
+      await this.backend(this.store.get(id), this.store.context(id)).logout();
+      await this.update(id, { authState: "signed-out", error: null });
+    } finally {
+      this.busy.delete(id);
+    }
+  }
+
+  usageSnapshot(id: string): { accountId: string; usage: ProviderUsage; stale: boolean } {
+    const account = this.store.get(id);
+    const cached = this.usageCache.get(id);
+    const current = cached?.revision === account.revision;
+    return {
+      accountId: id,
+      usage: current
+        ? cached.usage
+        : unavailableUsage({ providerId: account.provider, displayName: account.label }),
+      stale: !current || this.now() - cached.at >= USAGE_TTL_MS,
+    };
+  }
+
+  refreshUsage(): void {
+    if (this.closed || this.usageRefresh) return;
+    const accounts = this.list().filter(
+      (account) => account.authState === "ready" && !account.removedAt,
+    );
+    this.usageRefresh = (async () => {
+      for (let offset = 0; offset < accounts.length && !this.closed; offset += 2) {
+        await Promise.allSettled(
+          accounts.slice(offset, offset + 2).map((account) => this.usage(account.id)),
+        );
+      }
+    })().finally(() => {
+      this.usageRefresh = null;
+    });
+  }
+
+  async usage(id: string): Promise<ProviderUsage> {
+    const account = this.store.get(id);
+    const unavailable = () =>
+      unavailableUsage({ providerId: account.provider, displayName: account.label });
+    if (account.removedAt || account.authState !== "ready" || this.busy.has(id))
+      return unavailable();
+    const cached = this.usageCache.get(id);
+    if (cached?.revision === account.revision && this.now() - cached.at < USAGE_TTL_MS)
+      return cached.usage;
+    const key = `${id}:${account.revision}`;
+    const pending = this.usageRequests.get(key);
+    if (pending) return pending;
+    const request = this.usageLimit(async () => {
+      if (this.closed || this.store.get(id).revision !== account.revision) return unavailable();
+      let usage: ProviderUsage;
+      try {
+        usage = await this.backend(account, this.store.context(id)).usage();
+      } catch {
+        usage = unavailableUsage({
+          providerId: account.provider,
+          displayName: account.label,
+          error: "Could not read usage from the provider. Try again after the next refresh.",
+        });
+      }
+      if (this.store.get(id).revision !== account.revision) return unavailable();
+      const at = this.now();
+      usage = {
+        ...usage,
+        providerId: account.provider,
+        displayName: account.label,
+        fetchedAt: new Date(at).toISOString(),
+        nextRefreshAt: new Date(at + USAGE_TTL_MS).toISOString(),
+      };
+      this.usageCache.set(id, { revision: account.revision, at, usage });
+      return usage;
+    });
+    this.usageRequests.set(key, request);
+    try {
+      return await request;
+    } finally {
+      this.usageRequests.delete(key);
+    }
+  }
+
+  choice(
+    provider: AccountProvider,
+    selection: AccountSelection,
+    unattended: boolean,
+    model?: string,
+  ): AccountChoice {
+    const candidates = this.list().filter((account) => account.provider === provider);
+    if (selection.kind === "default")
+      return this.store.get(`default:${provider}`).enabled
+        ? { accountId: `default:${provider}`, reason: "Host CLI account" }
+        : { accountId: null, reason: "The host CLI account is disabled for new agents." };
+    if (selection.kind === "fixed") {
+      const account = candidates.find((entry) => entry.id === selection.accountId);
+      if (
+        !account ||
+        !account.enabled ||
+        account.authState !== "ready" ||
+        this.busy.has(account.id)
+      ) {
+        return {
+          accountId: null,
+          reason: "The selected account is unavailable. Sign in or enable it in Settings.",
+        };
+      }
+      return this.eligibility(account, unattended, true, model);
+    }
+    const eligible = candidates
+      .filter(
+        (account) =>
+          account.ownership === "managed" &&
+          (!selection.accountIds || selection.accountIds.includes(account.id)),
+      )
+      .map((account) => ({ account, choice: this.eligibility(account, unattended, false, model) }))
+      .filter((entry) => entry.choice.accountId !== null);
+    eligible.sort(
+      (a, b) =>
+        this.score(b.account, model) - this.score(a.account, model) ||
+        a.account.id.localeCompare(b.account.id),
+    );
+    return (
+      eligible[0]?.choice ?? {
+        accountId: null,
+        reason:
+          "No eligible account has capacity. Check account usage, reset times, and reserve settings.",
+      }
+    );
+  }
+
+  preview(provider: string, selection?: AccountSelection, model?: string): AccountChoice {
+    if (provider !== "claude" && provider !== "codex")
+      return { accountId: null, reason: "This provider uses its configured login." };
+    const managed = this.list().some(
+      (account) =>
+        account.provider === provider &&
+        account.ownership === "managed" &&
+        account.enabled &&
+        !account.removedAt,
+    );
+    return this.choice(
+      provider,
+      selection ?? { kind: managed ? "automatic" : "default" },
+      false,
+      model,
+    );
+  }
+
+  async reserve(input: {
+    provider: string;
+    selection?: AccountSelection;
+    pinnedAccountId?: string;
+    unattended: boolean;
+    model?: string;
+  }): Promise<AccountLease | null> {
+    this.assertOpen();
+    if (input.provider !== "claude" && input.provider !== "codex") {
+      if (input.pinnedAccountId || (input.selection && input.selection.kind !== "default"))
+        throw new AccountOperationError("This provider does not support native accounts.");
+      return null;
+    }
+    const provider = input.provider;
+    if (input.pinnedAccountId) {
+      const account = this.store.get(input.pinnedAccountId);
+      if (account.removedAt)
+        throw new AccountOperationError(
+          "Restore the pinned account in Settings before resuming this agent.",
+        );
+      if (account.provider !== provider)
+        throw new AccountOperationError("The pinned account belongs to a different provider.");
+      if (this.busy.has(account.id))
+        throw new AccountOperationError("An account operation is still in progress.");
+      if (account.ownership === "managed" && account.authState !== "ready")
+        throw new AccountOperationError(
+          "Sign in to the pinned account before resuming this agent.",
+        );
+      return this.lease(account.id, "Pinned account");
+    }
+    const managed = this.list().filter(
+      (account) =>
+        account.provider === provider &&
+        account.ownership === "managed" &&
+        account.enabled &&
+        !account.removedAt,
+    );
+    const selection =
+      input.selection ?? (managed.length ? { kind: "automatic" } : { kind: "default" });
+    if (selection.kind !== "default") {
+      // Fetch before admission; the synchronous decision and reservation below cannot interleave.
+      const ids =
+        selection.kind === "fixed" ? [selection.accountId] : managed.map((account) => account.id);
+      for (let offset = 0; offset < ids.length; offset += 2) {
+        await Promise.all(ids.slice(offset, offset + 2).map((id) => this.usage(id)));
+      }
+    }
+    this.assertOpen();
+    const chosen = this.choice(provider, selection, input.unattended, input.model);
+    if (!chosen.accountId) throw new AccountOperationError(chosen.reason);
+    return this.lease(chosen.accountId, chosen.reason);
+  }
+
+  hasRuntime(id: string): boolean {
+    return (this.leases.get(id) ?? 0) > 0;
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    for (const active of this.logins.values()) active.abort.abort();
+    await Promise.allSettled([...this.logins.values()].map((login) => login.done));
+    await Promise.allSettled(this.usageRequests.values());
+    await Promise.allSettled(this.inspections.values());
+    await Promise.allSettled(this.updates.values());
+  }
+
+  private eligibility(
+    account: ProviderAccount,
+    unattended: boolean,
+    fixed: boolean,
+    model?: string,
+  ): AccountChoice {
+    const no = (reason: string): AccountChoice => ({ accountId: null, reason });
+    if (
+      account.removedAt ||
+      !account.enabled ||
+      account.authState !== "ready" ||
+      this.busy.has(account.id)
+    )
+      return no("Account is unavailable.");
+    if (unattended && account.interactiveOnly)
+      return no("This account is reserved for interactive work.");
+    const usage = this.currentUsage(account);
+    const windows = applicableWindows(usage, model);
+    const capacityError = capacityRejection(
+      account.capacityLimit,
+      usage,
+      windows.length,
+      model,
+      this.now(),
+    );
+    if (capacityError) return no(capacityError);
+    const blocked = windows.find(
+      (window) => typeof window.usedPct === "number" && window.usedPct >= 100,
+    );
+    if (blocked)
+      return no(
+        blocked.resetsAt
+          ? `Account capacity resets at ${blocked.resetsAt}.`
+          : "Account capacity is exhausted.",
+      );
+    if (
+      unattended &&
+      windows.some(
+        (window) =>
+          typeof window.usedPct === "number" &&
+          100 - window.usedPct <= (account.reservePercent ?? 0),
+      )
+    )
+      return no("The account's interactive reserve is protected.");
+    const unknown =
+      windows.length === 0 || windows.some((window) => typeof window.usedPct !== "number");
+    if (unknown && unattended) {
+      const policy = this.store.getPolicy();
+      if (!policy)
+        return no(
+          "Choose the unknown-usage policy in account settings before starting unattended work.",
+        );
+      if (policy.unknownQuota === "pause-unattended")
+        return no("Unattended work waits until account usage is available.");
+    }
+    let reason = fixed ? "Fixed account" : "Available capacity balanced with active agents";
+    if (unknown) reason = "Usage is unknown";
+    return { accountId: account.id, reason };
+  }
+
+  private currentUsage(account: ProviderAccount): ProviderUsage | null {
+    const cached = this.usageCache.get(account.id);
+    if (cached?.revision !== account.revision || this.now() - cached.at >= USAGE_TTL_MS)
+      return null;
+    return cached.usage;
+  }
+
+  private score(account: ProviderAccount, model?: string): number {
+    const usage = this.currentUsage(account);
+    const percentages = applicableWindows(usage, model)
+      .map((window) => window.usedPct)
+      .filter((value): value is number => typeof value === "number");
+    const remaining = percentages.length ? Math.max(0, 100 - Math.max(...percentages)) : 0;
+    return remaining / (1 + (this.leases.get(account.id) ?? 0));
+  }
+
+  private lease(id: string, reason: string): AccountLease {
+    this.leases.set(id, (this.leases.get(id) ?? 0) + 1);
+    let released = false;
+    return {
+      accountId: id,
+      context: this.store.context(id),
+      reason,
+      release: () => {
+        if (released) return;
+        released = true;
+        const count = (this.leases.get(id) ?? 1) - 1;
+        if (count) this.leases.set(id, count);
+        else this.leases.delete(id);
+      },
+    };
+  }
+
+  private update(id: string, changes: Partial<ProviderAccount>): Promise<ProviderAccount> {
+    const next = (this.updates.get(id) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(() => this.applyUpdate(id, changes));
+    this.updates.set(id, next);
+    void next
+      .finally(() => {
+        if (this.updates.get(id) === next) this.updates.delete(id);
+      })
+      .catch(() => undefined);
+    return next;
+  }
+
+  private async applyUpdate(
+    id: string,
+    changes: Partial<ProviderAccount>,
+  ): Promise<ProviderAccount> {
+    const account = this.store.get(id);
+    const next = {
+      ...account,
+      ...changes,
+      revision: account.revision + 1,
+      updatedAt: new Date(this.now()).toISOString(),
+    };
+    await this.store.save(next);
+    this.usageCache.delete(id);
+    const saved = this.store.get(id);
+    for (const listener of this.listeners) listener(saved);
+    return saved;
+  }
+
+  private assertMutable(id: string): void {
+    this.assertOpen();
+    if (this.store.get(id).ownership === "external")
+      throw new AccountOperationError(
+        "Manage the host CLI login in its own terminal. Add an account for a separate Paseo login.",
+      );
+    if (this.busy.has(id))
+      throw new AccountOperationError("An account operation is still in progress.");
+    if (this.hasRuntime(id))
+      throw new AccountOperationError("Close this account's agents before changing its login.");
+    if ([...this.usageRequests.keys()].some((key) => key.startsWith(`${id}:`)))
+      throw new AccountOperationError(
+        "Wait for the account usage refresh before changing its login.",
+      );
+  }
+
+  private assertOpen(): void {
+    if (this.closed) throw new AccountOperationError("Account management is shutting down.");
+  }
+
+  private requireLogin(id: string, loginId: string): ActiveLogin {
+    const active = this.logins.get(id);
+    if (!active || active.view.id !== loginId)
+      throw new AccountOperationError("This login has expired. Start a new login.");
+    return active;
+  }
+}
+
+// The provider supplies model bucket labels, not a mapping to model IDs. Unknown
+// buckets remain visible but cannot reject a different model's admission.
+function applicableWindows(usage: ProviderUsage | null, model?: string): ProviderUsage["windows"] {
+  if (usage?.status !== "available") return [];
+  const selected = model?.toLowerCase();
+  return usage.windows.filter((window) => {
+    if (window.id === "seven_day_opus") return Boolean(selected?.includes("opus"));
+    if (window.id === "seven_day_sonnet") return Boolean(selected?.includes("sonnet"));
+    if (window.id.startsWith("model:"))
+      return Boolean(selected?.includes(window.id.split(":").slice(2).join(":").toLowerCase()));
+    return true;
+  });
+}
+
+function capacityRejection(
+  capacity: ProviderAccount["capacityLimit"],
+  usage: ProviderUsage | null,
+  windowCount: number,
+  model: string | undefined,
+  now: number,
+): string | null {
+  if (
+    !capacity ||
+    (capacity.model && capacity.model !== model) ||
+    (capacity.resetsAt && Date.parse(capacity.resetsAt) <= now)
+  )
+    return null;
+  if (
+    usage?.status === "available" &&
+    windowCount > 0 &&
+    usage.fetchedAt &&
+    Date.parse(usage.fetchedAt) > Date.parse(capacity.observedAt)
+  )
+    return null;
+  return capacity.resetsAt
+    ? `Account capacity resets at ${capacity.resetsAt}.`
+    : "The provider reported exhausted capacity. Refresh usage before starting another agent.";
+}

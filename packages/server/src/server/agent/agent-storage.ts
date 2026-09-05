@@ -1,3 +1,4 @@
+import { AccountSelectionSchema } from "@getpaseo/protocol/provider-accounts";
 import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -14,6 +15,9 @@ import { AgentHandoffStateSchema, type AgentHandoffState } from "./handoff-state
 
 const SERIALIZABLE_CONFIG_SCHEMA = z
   .object({
+    accountId: z.string().optional(),
+    accountSelection: AccountSelectionSchema.optional(),
+    accountSelectionReason: z.string().optional(),
     modeId: z.string().nullable().optional(),
     model: z.string().nullable().optional(),
     thinkingOptionId: z.string().nullable().optional(),
@@ -81,6 +85,9 @@ const STORED_AGENT_SCHEMA = z.object({
 
 export type SerializableAgentConfig = Pick<
   AgentSessionConfig,
+  | "accountId"
+  | "accountSelection"
+  | "accountSelectionReason"
   | "modeId"
   | "model"
   | "thinkingOptionId"
@@ -194,10 +201,13 @@ export class AgentStorage {
   async listByProviderSession(
     provider: string,
     providerHandleId: string,
+    accountId?: string,
   ): Promise<StoredAgentRecord[]> {
     await this.load();
     return Array.from(this.cache.values()).filter(
       (record) =>
+        (record.config?.accountId ?? `default:${provider}`) ===
+          (accountId ?? `default:${provider}`) &&
         record.persistence?.provider === provider &&
         (record.persistence.sessionId === providerHandleId ||
           record.persistence.nativeHandle === providerHandleId),

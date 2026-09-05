@@ -1,3 +1,4 @@
+import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { Keyboard, ScrollView, StyleSheet as RNStyleSheet, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
@@ -66,6 +67,7 @@ const DRAFT_CAPABILITIES: AgentCapabilityFlags = {
 };
 
 interface AutoSubmitConfig {
+  accountSelection?: AccountSelection;
   provider: string;
   modeId: string | null;
   model: string | null;
@@ -75,6 +77,7 @@ interface AutoSubmitConfig {
 
 function resolveAutoSubmitConfig(
   pending: {
+    accountSelection?: AccountSelection;
     provider: string;
     modeId?: string | null;
     model?: string | null;
@@ -85,6 +88,7 @@ function resolveAutoSubmitConfig(
   if (!pending) return null;
   return {
     provider: pending.provider,
+    accountSelection: pending.accountSelection,
     modeId: pending.modeId ?? null,
     model: pending.model ?? null,
     thinkingOptionId: pending.thinkingOptionId ?? null,
@@ -136,6 +140,13 @@ function resolveDraftModeId(input: {
   return null;
 }
 
+function draftAccountSelection(
+  auto: AutoSubmitConfig | null,
+  selection: AccountSelection | undefined,
+): AccountSelection | undefined {
+  return auto?.accountSelection ?? selection;
+}
+
 async function submitDraftCreateRequest(input: {
   attempt: { clientMessageId: string };
   text: string;
@@ -148,6 +159,7 @@ async function submitDraftCreateRequest(input: {
   autoSubmitConfig: AutoSubmitConfig | null;
   composerState: {
     selectedProvider: string | null;
+    accountSelection?: AccountSelection;
     selectedMode: string;
     modeOptions: readonly { id: string }[];
     effectiveModelId: string | null;
@@ -186,6 +198,7 @@ async function submitDraftCreateRequest(input: {
     selectedMode: composerState.selectedMode,
   });
   const config = buildWorkspaceDraftAgentConfig({
+    accountSelection: draftAccountSelection(autoSubmitConfig, composerState.accountSelection),
     provider,
     cwd,
     ...modeIdOverride,
@@ -224,6 +237,7 @@ function buildDraftAgentSnapshot(input: {
     modeOptions: readonly { id: string }[];
     selectedMode: string;
     selectedProvider: string | null;
+    accountSelection?: AccountSelection;
     agentControls: { features?: Agent["features"] };
   };
   selectModelMessage: string;

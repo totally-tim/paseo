@@ -254,6 +254,8 @@ async function resolveSessionCreateAgent(
   const resolvedCreateConfig = await dependencies.providerSnapshotManager.resolveCreateConfig({
     cwd: builtSessionConfig.cwd,
     provider: builtSessionConfig.provider,
+    accountSelection: builtSessionConfig.accountSelection,
+    model: builtSessionConfig.model,
     requestedMode: builtSessionConfig.modeId,
     featureValues: builtSessionConfig.featureValues,
     parent: null,
@@ -358,6 +360,7 @@ async function resolveMcpCreateAgent(
       workspaceId: intent.workspaceId,
       owner: input.owner,
       env: input.env,
+      unattended: input.unattended ?? Boolean(input.callerAgentId),
     },
     prompt: trimmedPrompt ? trimmedPrompt : undefined,
     setupContinuation,
@@ -393,6 +396,8 @@ async function resolveMcpProviderCreateConfig(params: {
   return params.dependencies.providerSnapshotManager.resolveCreateConfig({
     cwd: params.resolvedCwd,
     provider: params.provider,
+    accountSelection: passthroughConfig?.accountSelection,
+    model: passthroughConfig?.model,
     requestedMode: params.input.mode ?? passthroughConfig?.modeId,
     featureValues: params.input.features ?? passthroughConfig?.featureValues,
     parent: params.parentAgent,

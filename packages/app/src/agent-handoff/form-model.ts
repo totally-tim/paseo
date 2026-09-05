@@ -1,3 +1,4 @@
+import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import type { ProviderSnapshotEntry } from "@getpaseo/protocol/agent-types";
 import type { MaterializedAgentProfile } from "@/agent-profiles";
 
@@ -71,6 +72,11 @@ export function openHandoffForm<T>(
       if (pending) return;
       selection = { ...profile };
       error = null;
+      commit();
+    },
+    selectAccount(accountSelection: AccountSelection) {
+      if (pending) return;
+      selection = { ...selection, accountSelection };
       commit();
     },
     selectMode(modeId: string) {

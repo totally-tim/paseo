@@ -5,7 +5,10 @@ export const AgentHandoffStateSchema = z.object({
   sourceAgentId: z.string(),
   successorAgentId: z.string(),
   workspaceId: z.string(),
-  config: CreateAgentRequestMessageSchema.shape.config,
+  config: CreateAgentRequestMessageSchema.shape.config.extend({
+    accountId: z.string().optional(),
+    accountSelectionReason: z.string().optional(),
+  }),
   briefing: z.string().optional(),
   title: z.string(),
   prompt: z.string(),

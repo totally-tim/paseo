@@ -1,3 +1,4 @@
+import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import type { AgentConfigApply, AgentProfile } from "@getpaseo/protocol/messages";
 
 /**
@@ -7,6 +8,7 @@ import type { AgentConfigApply, AgentProfile } from "@getpaseo/protocol/messages
  * every consumer would otherwise re-derive the same trim-and-drop rules.
  */
 export interface MaterializedAgentProfile {
+  accountSelection?: AccountSelection;
   provider: string;
   /** Empty when the profile names no model, meaning "leave the model alone". */
   modelId: string;
@@ -22,6 +24,7 @@ function trimmed(value: string | undefined): string {
 export function materializeAgentProfile(profile: AgentProfile): MaterializedAgentProfile {
   return {
     provider: trimmed(profile.provider),
+    ...(profile.accountSelection ? { accountSelection: profile.accountSelection } : {}),
     modelId: trimmed(profile.model),
     modeId: trimmed(profile.modeId),
     thinkingOptionId: trimmed(profile.thinkingOptionId),

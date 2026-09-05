@@ -1,3 +1,4 @@
+import { AccountSelectionField } from "@/provider-accounts/selection-field";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
@@ -140,7 +141,7 @@ function OpenAgentProfileEditModal({
   );
   const model = useAgentProfileFormModel(snapshot);
   const state = useAgentProfileFormState(model);
-  useAgentProfileFormCatalog({ serverId, model });
+  useAgentProfileFormCatalog({ serverId, model, state });
   useAgentProfileFormFeatures({ serverId, model, state });
 
   const sheetHeader = useMemo<SheetHeader>(
@@ -274,6 +275,13 @@ function OpenAgentProfileEditModal({
           triggerTestID="agent-profile-provider-trigger"
         />
 
+        <AccountSelectionField
+          serverId={serverId}
+          provider={state.provider}
+          value={state.accountSelection}
+          onChange={model.setAccountSelection}
+          disabled={state.isSubmitting}
+        />
         {state.disclosure.showModelField ? (
           <SelectField
             label={t("settings.host.agentProfiles.modelLabel")}

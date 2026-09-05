@@ -1,3 +1,4 @@
+import type { AccountOperation, AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import type { z } from "zod";
 import { CLIENT_CAPS, type ClientCapability } from "@getpaseo/protocol/client-capabilities";
 import type { AgentAttentionNotificationPayload } from "@getpaseo/protocol/agent-attention-notification";
@@ -182,6 +183,7 @@ const perfNow: () => number =
 const PROJECT_GITHUB_CLONE_TIMEOUT_MS = 5 * 60 * 1000;
 
 interface ImportAgentInputBase {
+  accountId?: string;
   cwd?: string;
   workspaceId?: string;
   labels?: Record<string, string>;
@@ -734,6 +736,7 @@ export interface CreateScheduleOptions {
         type: "new-agent";
         config: {
           provider: AgentProvider;
+          accountSelection?: AccountSelection;
           cwd: string;
           modeId?: string;
           model?: string;
@@ -757,6 +760,7 @@ export interface InspectScheduleOptions {
 }
 export interface UpdateScheduleNewAgentConfig {
   provider?: string;
+  accountSelection?: AccountSelection | null;
   model?: string | null;
   modeId?: string | null;
   thinkingOptionId?: string | null;
@@ -2093,6 +2097,7 @@ export class DaemonClient {
     const message = SessionInboundMessageSchema.parse({
       type: "fetch_recent_provider_sessions_request",
       requestId: resolvedRequestId,
+      ...(options?.accountId ? { accountId: options.accountId } : {}),
       ...(options?.cwd ? { cwd: options.cwd } : {}),
       ...(options?.providers ? { providers: options.providers } : {}),
       ...(options?.since ? { since: options.since } : {}),
@@ -2548,6 +2553,33 @@ export class DaemonClient {
     return status.agent;
   }
 
+  async getProviderAccountCatalog(
+    input: Omit<
+      Extract<SessionInboundMessage, { type: "provider.accounts.catalog.request" }>,
+      "type" | "requestId"
+    >,
+    requestId?: string,
+  ) {
+    return this.sendNamespacedCorrelatedSessionRequest<"provider.accounts.catalog.response">({
+      requestId,
+      message: { type: "provider.accounts.catalog.request", ...input },
+    });
+  }
+
+  async listProviderAccounts(requestId?: string) {
+    return this.sendNamespacedCorrelatedSessionRequest<"provider.accounts.list.response">({
+      requestId,
+      message: { type: "provider.accounts.list.request" },
+    });
+  }
+
+  async manageProviderAccount(operation: AccountOperation, requestId?: string) {
+    return this.sendNamespacedCorrelatedSessionRequest<"provider.accounts.manage.response">({
+      requestId,
+      message: { type: "provider.accounts.manage.request", operation },
+    });
+  }
+
   async handoffAgent(
     input: Omit<HandoffAgentRequestMessage, "type" | "requestId">,
   ): Promise<AgentSnapshotPayload> {
@@ -2832,6 +2864,7 @@ export class DaemonClient {
     const message = SessionInboundMessageSchema.parse({
       type: "import_agent_request",
       requestId,
+      ...(input.accountId ? { accountId: input.accountId } : {}),
       ...("providerId" in input
         ? { providerId: input.providerId, providerHandleId: input.providerHandleId }
         : { provider: input.provider, sessionId: input.sessionId }),

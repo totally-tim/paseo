@@ -4,6 +4,10 @@ import {
   findExecutable,
 } from "../../executable-resolution/executable-resolution.js";
 import { createExternalProcessEnv, type ProcessEnvRecord } from "../paseo-env.js";
+import {
+  applyProviderAccountEnv,
+  type ProviderAccountContext,
+} from "./provider-account-context.js";
 export {
   AgentProviderRuntimeSettingsMapSchema,
   ProviderCommandSchema,
@@ -16,7 +20,6 @@ export {
   type ProviderOverride,
   type ProviderOverrides,
   type ProviderProfileModel,
-  type ProviderRuntimeSettings,
 } from "@getpaseo/protocol/provider-config";
 import {
   ProviderOverrideSchema,
@@ -25,8 +28,12 @@ import {
   type ProviderCommand,
   type ProviderOverride,
   type ProviderOverrides,
-  type ProviderRuntimeSettings,
+  type ProviderRuntimeSettings as WireProviderRuntimeSettings,
 } from "@getpaseo/protocol/provider-config";
+
+export interface ProviderRuntimeSettings extends WireProviderRuntimeSettings {
+  accountContext?: ProviderAccountContext;
+}
 
 export interface ProviderCommandPrefix {
   command: string;
@@ -235,6 +242,9 @@ export function createProviderEnvSpec(options: ProviderEnvOptions = {}): Provide
   const envOverlay: ProcessEnvRecord = Object.assign({}, ...overlays);
   for (const key of PARENT_SESSION_ENV_VARS) {
     envOverlay[key] = undefined;
+  }
+  if (options.runtimeSettings?.accountContext) {
+    applyProviderAccountEnv(envOverlay, options.runtimeSettings.accountContext);
   }
   return {
     ...(options.baseEnv ? { baseEnv: options.baseEnv } : {}),

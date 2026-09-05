@@ -2,6 +2,7 @@ import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
 
 export const es: TranslationResources = {
+  providerAccounts: en.providerAccounts,
   agentHandoff: {
     custom: "Configuración personalizada",
     action: "Continuar con…",

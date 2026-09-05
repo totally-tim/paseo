@@ -380,10 +380,13 @@ function SessionRows({
     <View style={styles.list}>
       {entries.map((entry) => (
         <ImportSessionSheetRow
-          key={`${entry.providerId}:${entry.providerHandleId}`}
+          key={`${entry.providerId}:${entry.accountId ?? "default"}:${entry.providerHandleId}`}
           entry={entry}
           disabled={disabled}
-          importing={importingSessionKey === `${entry.providerId}:${entry.providerHandleId}`}
+          importing={
+            importingSessionKey ===
+            `${entry.providerId}:${entry.accountId ?? "default"}:${entry.providerHandleId}`
+          }
           folder={resolveFolder(entry)}
           onImportSession={onImportSession}
         />
@@ -597,6 +600,7 @@ export function ImportSessionSheet({
       });
       const agent = await client.importAgent({
         providerId: entry.providerId,
+        ...(entry.accountId ? { accountId: entry.accountId } : {}),
         providerHandleId: entry.providerHandleId,
         cwd: entry.cwd,
         ...(target.workspaceId ? { workspaceId: target.workspaceId } : {}),
@@ -619,7 +623,7 @@ export function ImportSessionSheet({
 
   const importingSessionKey =
     importMutation.isPending && importMutation.variables
-      ? `${importMutation.variables.providerId}:${importMutation.variables.providerHandleId}`
+      ? `${importMutation.variables.providerId}:${importMutation.variables.accountId ?? "default"}:${importMutation.variables.providerHandleId}`
       : null;
 
   const handleImportSession = useCallback(

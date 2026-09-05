@@ -74,7 +74,12 @@ function applyNewAgentConfig(
     if (!trimmed) {
       throw new Error("provider cannot be empty");
     }
+    if (trimmed !== config.provider) delete config.accountSelection;
     config.provider = trimmed;
+  }
+  if (patch.accountSelection !== undefined) {
+    if (patch.accountSelection === null) delete config.accountSelection;
+    else config.accountSelection = patch.accountSelection;
   }
   if (patch.cwd !== undefined) {
     const trimmed = patch.cwd.trim();
@@ -1002,6 +1007,7 @@ function buildScheduleAgentConfig(
 ): AgentSessionConfig {
   return {
     provider: config.provider,
+    accountSelection: config.accountSelection,
     cwd: config.cwd,
     modeId: config.modeId,
     model: config.model,

@@ -1,3 +1,5 @@
+import { useAccountCatalog } from "@/provider-accounts/use-account-catalog";
+import { AccountSelectionField } from "@/provider-accounts/selection-field";
 import {
   useCallback,
   useEffect,
@@ -63,6 +65,7 @@ export function AgentHandoffSheet({
       return session.client.handoffAgent({
         sourceAgentId: agentId,
         provider: selection.provider,
+        accountSelection: selection.accountSelection,
         model: selection.modelId || undefined,
         modeId: selection.modeId || undefined,
         thinkingOptionId: selection.thinkingOptionId || undefined,
@@ -72,7 +75,15 @@ export function AgentHandoffSheet({
     }),
   );
   const state = useSyncExternalStore(form.subscribe, form.getState, form.getState);
-  useHandoffCatalog(form, catalog.entries, connected && Boolean(client));
+  const accountEntries = useAccountCatalog({
+    serverId,
+    entries: catalog.entries,
+    provider: state.selection.provider,
+    selection: state.selection.accountSelection,
+    model: state.selection.modelId,
+    cwd,
+  });
+  useHandoffCatalog(form, accountEntries, connected && Boolean(client));
   const providers = useMemo(
     () => buildSelectableProviderSelectorProviders(state.entries),
     [state.entries],
@@ -242,6 +253,13 @@ export function AgentHandoffSheet({
             ) : null}
           </>
         ) : null}
+        <AccountSelectionField
+          serverId={serverId}
+          provider={state.selection.provider}
+          value={state.selection.accountSelection}
+          onChange={form.selectAccount}
+          disabled={state.pending}
+        />
         <Field label={t("agentHandoff.briefing")}>
           <FormTextInput
             multiline

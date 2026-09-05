@@ -1,3 +1,4 @@
+import type { NativeAccountUsageSource } from "./providers/native-account.js";
 import type { Logger } from "pino";
 import type { ProviderUsage } from "../../server/messages.js";
 
@@ -10,6 +11,7 @@ export interface ProviderUsageFetcher {
 }
 
 export interface ProviderUsageFetcherFactoryOptions {
+  accounts?: NativeAccountUsageSource;
   logger: Logger;
   fetch?: ProviderApiFetch;
 }

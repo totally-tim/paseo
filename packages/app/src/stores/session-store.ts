@@ -72,6 +72,7 @@ export interface AgentRuntimeInfo {
 }
 
 export interface Agent {
+  accountId?: string;
   serverId: string;
   id: string;
   provider: AgentProvider;

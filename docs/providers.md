@@ -1,5 +1,7 @@
 # Adding a New Provider to Paseo
 
+For subscription login, account selection, and storage ownership, see [Provider accounts](provider-accounts.md).
+
 This guide walks through adding a new agent provider end-to-end. There are two integration patterns, and this doc covers both.
 
 ## Provider-native session options

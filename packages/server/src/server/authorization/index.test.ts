@@ -69,6 +69,23 @@ describe("SessionAuthorization", () => {
     ).toBe(false);
   });
 
+  test("account metadata is readable but login challenges and mutations require daemon management", () => {
+    const reader = new SessionAuthorization(["daemon.read"]);
+    for (const type of [
+      "provider.accounts.list.request",
+      "provider.accounts.catalog.request",
+    ] as const)
+      expect(reader.allowsInbound(inboundMessage(type))).toBe(true);
+    expect(reader.allowsInbound(inboundMessage("provider.accounts.manage.request"))).toBe(false);
+    expect(reader.allowsOutbound(outboundMessage("provider.accounts.manage.response"))).toBe(false);
+    const manager = new SessionAuthorization(["daemon.manage"]);
+    expect(manager.allowsInbound(inboundMessage("provider.accounts.manage.request"))).toBe(true);
+    expect(manager.allowsOutbound(outboundMessage("provider.accounts.manage.response"))).toBe(true);
+    const execution = new SessionAuthorization(["hub.execute"]);
+    expect(execution.allowsInbound(inboundMessage("provider.accounts.list.request"))).toBe(false);
+    expect(execution.allowsInbound(inboundMessage("provider.accounts.manage.request"))).toBe(false);
+  });
+
   test("correlated authorization errors can always be emitted", () => {
     const authorization = new SessionAuthorization([]);
 

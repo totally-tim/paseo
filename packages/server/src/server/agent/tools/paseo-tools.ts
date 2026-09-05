@@ -1,3 +1,8 @@
+import {
+  AccountSelectionSchema,
+  ProviderAccountSchema,
+  type AccountSelection,
+} from "@getpaseo/protocol/provider-accounts";
 import { z } from "zod";
 import { ensureValidJson } from "../../json-utils.js";
 import type { Logger } from "pino";
@@ -385,6 +390,7 @@ function resolveScheduleUpdateProviderAndModel(params: {
 
 interface ScheduleUpdateToolInput {
   id: string;
+  accountSelection?: AccountSelection | null;
   every?: string;
   cron?: string;
   timezone?: string;
@@ -468,6 +474,7 @@ function buildScheduleUpdateInput(input: ScheduleUpdateToolInput): UpdateSchedul
     model: input.model,
   });
   const newAgentConfig = {
+    ...(input.accountSelection !== undefined ? { accountSelection: input.accountSelection } : {}),
     ...(providerModelPatch.provider !== undefined ? { provider: providerModelPatch.provider } : {}),
     ...(providerModelPatch.model !== undefined ? { model: providerModelPatch.model } : {}),
     ...(input.mode !== undefined ? { modeId: input.mode } : {}),
@@ -763,6 +770,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
 
   const resolveNewAgentScheduleTarget = (params?: {
     provider?: string;
+    accountSelection?: AccountSelection;
     cwd?: string;
     isolation?: "local" | "worktree";
   }) => {
@@ -772,6 +780,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         type: "new-agent" as const,
         config: {
           ...buildCallerAgentScheduleConfig(callerAgent, params),
+          ...(params?.accountSelection ? { accountSelection: params.accountSelection } : {}),
           ...(params?.isolation ? { isolation: params.isolation } : {}),
         },
       };
@@ -789,6 +798,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       type: "new-agent" as const,
       config: {
         provider: resolvedProviderModel.provider,
+        ...(params?.accountSelection ? { accountSelection: params.accountSelection } : {}),
         cwd: params?.cwd?.trim() ? expandUserPath(params.cwd) : process.cwd(),
         ...(resolvedProviderModel.model ? { model: resolvedProviderModel.model } : {}),
         ...(params?.isolation ? { isolation: params.isolation } : {}),
@@ -852,6 +862,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     );
   const CreateAgentSettingsInputSchema = z
     .object({
+      accountSelection: AccountSelectionSchema.optional(),
       modeId: z.string().optional().describe("Session mode to configure before the first run."),
       thinkingOptionId: z.string().optional().describe("Thinking option ID."),
       features: z
@@ -877,6 +888,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     .strict();
   const InspectProviderSettingsInputSchema = z
     .object({
+      accountSelection: AccountSelectionSchema.optional(),
       modeId: z.string().optional().describe("Draft session mode ID."),
       model: z.string().optional().describe("Draft model ID."),
       thinkingOptionId: z.string().optional().describe("Draft thinking option ID."),
@@ -1462,7 +1474,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           provider: parsedArgs.provider,
           title: parsedArgs.title,
           initialPrompt: parsedArgs.initialPrompt,
-          config: inheritedConfig,
+          config: { ...inheritedConfig, accountSelection: parsedArgs.settings?.accountSelection },
           cwd: resolvedArgs.cwd,
           workspaceId: resolvedArgs.workspaceId,
           thinking: parsedArgs.settings?.thinkingOptionId,
@@ -2523,6 +2535,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       title: "Create schedule",
       description: "Create a recurring schedule that starts a new agent on a cron cadence.",
       inputSchema: {
+        accountSelection: AccountSelectionSchema.optional(),
         prompt: z.string().trim().min(1, "prompt is required"),
         cron: z.string().trim().min(1, "cron is required"),
         timezone: z
@@ -2542,7 +2555,18 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
       outputSchema: ScheduleSummarySchema.shape,
     },
-    async ({ prompt, cron, timezone, name, provider, cwd, isolation, maxRuns, expiresIn }) => {
+    async ({
+      prompt,
+      cron,
+      timezone,
+      name,
+      provider,
+      accountSelection,
+      cwd,
+      isolation,
+      maxRuns,
+      expiresIn,
+    }) => {
       if (!scheduleService) {
         throw new Error("Schedule service is not configured");
       }
@@ -2554,7 +2578,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           cron,
           ...(timezone !== undefined ? { timezone } : {}),
         }),
-        target: resolveNewAgentScheduleTarget({ provider, cwd, isolation }),
+        target: resolveNewAgentScheduleTarget({ provider, accountSelection, cwd, isolation }),
         ...(name?.trim() ? { name: name.trim() } : {}),
         ...(maxRuns === undefined ? {} : { maxRuns }),
         ...(expiresAt === undefined ? {} : { expiresAt }),
@@ -2790,6 +2814,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
             .nullable()
             .optional()
             .describe("New max runs limit (null to clear)."),
+          accountSelection: AccountSelectionSchema.nullable().optional(),
           provider: z
             .string()
             .trim()
@@ -2882,6 +2907,44 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     },
   );
 
+  async function readProviderCatalog(
+    provider: string,
+    cwd?: string,
+    accountSelection?: AccountSelection,
+    model?: string,
+  ) {
+    if (agentManager.accounts && (provider === "claude" || provider === "codex")) {
+      const result = await agentManager.getAccountCatalog({
+        provider,
+        cwd,
+        selection: accountSelection,
+        model,
+      });
+      if (!result.entry) throw new Error(result.error ?? result.reason);
+      return result.entry;
+    }
+    const entry = await providerSnapshotManager.getProvider({ provider, cwd, wait: true });
+    if (!entry.enabled) throw new Error(`Provider '${provider}' is disabled`);
+    if (entry.status !== "ready")
+      throw new Error(entry.error ?? `Provider '${provider}' is unavailable`);
+    return entry;
+  }
+
+  registerTool(
+    "list_provider_accounts",
+    {
+      title: "List provider accounts",
+      description:
+        "List account IDs, labels, login state, and eligibility settings. Login and credential changes belong in Settings.",
+      inputSchema: {},
+      outputSchema: { accounts: z.array(ProviderAccountSchema) },
+    },
+    async () => ({
+      content: [],
+      structuredContent: ensureValidJson({ accounts: agentManager.accounts?.list() ?? [] }),
+    }),
+  );
+
   registerTool(
     "list_providers",
     {
@@ -2910,17 +2973,16 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       description: "List models for an agent provider.",
       inputSchema: {
         provider: AgentProviderEnum,
+        accountSelection: AccountSelectionSchema.optional(),
+        cwd: z.string().optional(),
       },
       outputSchema: {
         provider: z.string(),
         models: z.array(AgentModelSchema),
       },
     },
-    async ({ provider }) => {
-      const models = await providerSnapshotManager.listModels({
-        provider,
-        wait: true,
-      });
+    async ({ provider, accountSelection, cwd }) => {
+      const models = (await readProviderCatalog(provider, cwd, accountSelection)).models ?? [];
       return {
         content: [],
         structuredContent: ensureValidJson({
@@ -2939,7 +3001,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         "List agent profiles: named provider/model/mode bundles a human configured for specific " +
         "kinds of work. Read each profile's `notes` to pick the one that fits the task you're " +
         "delegating, then copy its `provider`, `model`, `modeId`, `thinkingOptionId`, and " +
-        "`featureValues` into create_agent (there is no `profile` parameter). Returns an empty " +
+        "`featureValues`, and `accountSelection` into create_agent (there is no `profile` parameter). Returns an empty " +
         "list if none are configured.",
       inputSchema: {},
       outputSchema: {
@@ -2980,11 +3042,12 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       });
       const providerId = resolvedProviderModel.provider;
       const resolvedCwd = resolveScopedCwd(cwd, { required: true });
-      const entry = await providerSnapshotManager.getProvider({
-        cwd: resolvedCwd,
-        provider: providerId,
-        wait: true,
-      });
+      const entry = await readProviderCatalog(
+        providerId,
+        resolvedCwd,
+        settings?.accountSelection,
+        settings?.model ?? resolvedProviderModel.model,
+      );
       const summary = toProviderSummary(entry);
       if (!entry.enabled) {
         throw new Error(`Provider '${providerId}' is disabled`);
@@ -2995,6 +3058,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       const selectedModel = settings?.model ?? resolvedProviderModel.model;
       const features = await agentManager.listDraftFeatures({
         provider: providerId,
+        accountSelection: settings?.accountSelection,
         cwd: resolvedCwd,
         ...(settings?.modeId ? { modeId: settings.modeId } : {}),
         ...(selectedModel ? { model: selectedModel } : {}),

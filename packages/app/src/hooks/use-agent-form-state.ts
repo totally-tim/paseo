@@ -1,3 +1,5 @@
+import { useAccountCatalog } from "@/provider-accounts/use-account-catalog";
+import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import type { AgentProviderDefinition } from "@getpaseo/protocol/provider-manifest";
 import type {
@@ -52,6 +54,8 @@ export interface UseAgentFormStateOptions {
 }
 
 export interface UseAgentFormStateResult {
+  accountSelection?: AccountSelection;
+  setAccountSelection: (value: AccountSelection) => void;
   selectedServerId: string | null;
   setSelectedServerId: (value: string | null) => void;
   setSelectedServerIdFromUser: (value: string | null) => void;
@@ -263,13 +267,22 @@ export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAg
   }, [isVisible]);
 
   const {
-    entries: snapshotEntries,
+    entries: hostSnapshotEntries,
     isLoading: snapshotIsLoading,
     isRefreshing: snapshotIsRefreshing,
     error: snapshotError,
     refresh: refreshSnapshot,
     refetchIfStale: refetchSnapshotIfStale,
   } = useProvidersSnapshot(formState.serverId, { cwd: formState.workingDir });
+
+  const snapshotEntries = useAccountCatalog({
+    serverId: formState.serverId ?? "",
+    entries: hostSnapshotEntries,
+    provider: formState.provider,
+    selection: formState.accountSelection,
+    cwd: formState.workingDir,
+    model: formState.model,
+  });
 
   const allProviderEntries = useMemo(() => snapshotEntries ?? [], [snapshotEntries]);
   const snapshotProviderDefinitions = useMemo(
@@ -452,6 +465,10 @@ export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAg
     [allProviderModels, selectableProviderDefinitionMap, updateCurrentPreferences],
   );
 
+  const setAccountSelection = useCallback(
+    (value: AccountSelection) => dispatch({ type: "SET_ACCOUNT_SELECTION", value }),
+    [],
+  );
   const clearProviderSelectionFromUser = useCallback(() => {
     dispatch({ type: "CLEAR_PROVIDER_SELECTION_FROM_USER" });
   }, []);
@@ -469,6 +486,7 @@ export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAg
       const providerPrefs = preferenceOverlayRef.current.current().providerPreferences?.[provider];
       const action = {
         type: "APPLY_PROFILE_FROM_USER" as const,
+        accountSelection: profile.accountSelection,
         provider,
         modelId: profile.modelId,
         modeId: profile.modeId,
@@ -631,6 +649,8 @@ export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAg
   return useMemo(
     () => ({
       selectedServerId: formState.serverId,
+      accountSelection: formState.accountSelection,
+      setAccountSelection,
       setSelectedServerId,
       setSelectedServerIdFromUser,
       selectedProvider: formState.provider,
@@ -666,6 +686,8 @@ export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAg
     }),
     [
       formState.serverId,
+      formState.accountSelection,
+      setAccountSelection,
       formState.provider,
       formState.modeId,
       formState.model,

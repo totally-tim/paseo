@@ -2,6 +2,7 @@ import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
 
 export const ko: TranslationResources = {
+  providerAccounts: en.providerAccounts,
   agentHandoff: {
     custom: "사용자 지정 설정",
     action: "다른 에이전트로 계속…",

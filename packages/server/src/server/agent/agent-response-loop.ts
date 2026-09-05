@@ -358,6 +358,7 @@ export async function generateStructuredAgentResponse<T>(
     options;
   const agent = await manager.createAgent(agentConfig, agentId, {
     persistSession,
+    unattended: true,
     workspaceId: undefined,
   });
   try {

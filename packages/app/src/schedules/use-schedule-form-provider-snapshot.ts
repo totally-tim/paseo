@@ -1,3 +1,4 @@
+import { useAccountCatalog } from "@/provider-accounts/use-account-catalog";
 import { useEffect } from "react";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import type { ScheduleFormModel, ScheduleFormState } from "./schedule-form-model";
@@ -14,12 +15,21 @@ export function useScheduleFormProviderSnapshot(
     enabled,
   });
 
+  const entries = useAccountCatalog({
+    serverId: serverId ?? "",
+    entries: snapshot.entries,
+    cwd,
+    provider: state.selectedProvider,
+    selection: state.accountSelection,
+    model: state.selectedModel,
+  });
+
   useEffect(() => {
-    if (!enabled || !serverId || !snapshot.entries) {
+    if (!enabled || !serverId || !entries) {
       return;
     }
-    model.applyProviderSnapshot(serverId, { entries: snapshot.entries });
-  }, [enabled, model, serverId, snapshot.entries]);
+    model.applyProviderSnapshot(serverId, { entries });
+  }, [enabled, model, serverId, entries]);
 
   return snapshot;
 }

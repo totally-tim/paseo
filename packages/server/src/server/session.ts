@@ -1,3 +1,5 @@
+import { handleAccountCatalog } from "./provider-accounts/account-catalog.js";
+import { handleAccountList, handleAccountOperation } from "./provider-accounts/account-session.js";
 import equal from "fast-deep-equal";
 import { v4 as uuidv4 } from "uuid";
 import { lstat, mkdir, mkdtemp, rename, rm, stat } from "node:fs/promises";
@@ -2330,6 +2332,14 @@ export class Session {
       }
       case "agent.fork_context.request":
         return this.handleAgentForkContextRequest(msg);
+      case "provider.accounts.catalog.request":
+        return handleAccountCatalog(this.agentManager, msg, (message) => this.emit(message));
+      case "provider.accounts.list.request":
+        return handleAccountList(this.agentManager.accounts, msg, (message) => this.emit(message));
+      case "provider.accounts.manage.request":
+        return handleAccountOperation(this.agentManager.accounts, msg, (message) =>
+          this.emit(message),
+        );
       case "agent.handoff.start.request":
         return this.handleHandoffAgentRequest(msg);
       default:
@@ -4391,6 +4401,7 @@ export class Session {
       if (!agent && draftConfig) {
         const sessionConfig: AgentSessionConfig = {
           provider: draftConfig.provider,
+          accountSelection: draftConfig.accountSelection,
           cwd: expandTilde(draftConfig.cwd),
           ...(draftConfig.modeId ? { modeId: draftConfig.modeId } : {}),
           ...(draftConfig.model ? { model: draftConfig.model } : {}),

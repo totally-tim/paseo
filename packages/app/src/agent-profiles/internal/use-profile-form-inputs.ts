@@ -1,3 +1,4 @@
+import { useAccountCatalog } from "@/provider-accounts/use-account-catalog";
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { useFetchQuery } from "@/data/query";
@@ -16,8 +17,18 @@ const HOME_SCOPE_CWD = "~";
 export function useAgentProfileFormCatalog(input: {
   serverId: string;
   model: AgentProfileFormModel;
+  state: AgentProfileFormState;
 }): void {
-  const { entries } = useProvidersSnapshot(input.serverId, { cwd: null });
+  const { entries: hostEntries } = useProvidersSnapshot(input.serverId, { cwd: null });
+
+  const entries = useAccountCatalog({
+    serverId: input.serverId,
+    entries: hostEntries,
+    provider: input.state.provider,
+    selection: input.state.accountSelection,
+    model: input.state.modelId,
+    cwd: HOME_SCOPE_CWD,
+  });
 
   useEffect(() => {
     if (!entries) {

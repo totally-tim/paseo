@@ -1,3 +1,4 @@
+import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import type {
   AgentFeature,
   AgentMode,
@@ -61,6 +62,7 @@ export interface AgentProfileFormSnapshot {
  * with model/mode/thinking, so every one of those is part of the request.
  */
 export interface AgentProfileFeatureRequest {
+  accountSelection?: AccountSelection;
   provider: string;
   model?: string;
   modeId?: string;
@@ -77,6 +79,7 @@ export interface AgentProfileFormDisclosure {
 }
 
 export interface AgentProfileFormState {
+  accountSelection?: AccountSelection;
   mode: "create" | "edit";
   name: string;
   icon: string;
@@ -112,6 +115,7 @@ export interface AgentProfileFormState {
 }
 
 export interface AgentProfileFormModel {
+  setAccountSelection: (value: AccountSelection) => void;
   getState: () => AgentProfileFormState;
   subscribe: (listener: () => void) => () => void;
   close: () => void;
@@ -318,6 +322,7 @@ function buildFeatureRequest(state: AgentProfileFormState): AgentProfileFeatureR
   }
   return {
     provider: state.provider,
+    ...(state.accountSelection ? { accountSelection: state.accountSelection } : {}),
     ...(state.modelId ? { model: state.modelId } : {}),
     ...(state.modeId ? { modeId: state.modeId } : {}),
     ...(state.thinkingOptionId ? { thinkingOptionId: state.thinkingOptionId } : {}),
@@ -347,6 +352,7 @@ function buildSubmitValue(state: AgentProfileFormState): AgentProfileValue | nul
     ...(state.icon ? { icon: state.icon } : {}),
     ...(state.color ? { color: state.color } : {}),
     provider: state.provider,
+    ...(state.accountSelection ? { accountSelection: state.accountSelection } : {}),
     ...(state.modelId ? { model: state.modelId } : {}),
     ...(state.modeId ? { modeId: state.modeId } : {}),
     ...(state.thinkingOptionId ? { thinkingOptionId: state.thinkingOptionId } : {}),
@@ -384,6 +390,7 @@ function buildInitialState(snapshot: AgentProfileFormSnapshot): AgentProfileForm
   const modelId = seed?.modelId ?? profile.model ?? "";
   return {
     mode: snapshot.mode,
+    accountSelection: profile.accountSelection,
     name,
     icon: profile.icon ?? "",
     color: profile.color ?? "",
@@ -550,6 +557,7 @@ export function openAgentProfileForm(snapshot: AgentProfileFormSnapshot): AgentP
       resolvedFeatures = [];
       publish((current) => current);
     },
+    setAccountSelection: (value) => publish((current) => ({ ...current, accountSelection: value })),
     setName: (value) => publish((current) => ({ ...current, name: value })),
     setAppearance: (value) =>
       publish((current) => ({ ...current, icon: value.icon, color: value.color })),
@@ -565,6 +573,7 @@ export function openAgentProfileForm(snapshot: AgentProfileFormSnapshot): AgentP
         return {
           ...current,
           provider: providerId,
+          accountSelection: undefined,
           providerDisplay: display,
           modelId: "",
           modelDisplay: null,

@@ -1,3 +1,4 @@
+import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import type {
   AgentMode,
   AgentModelDefinition,
@@ -93,6 +94,7 @@ export interface ScheduleFormState {
   projectOptions: ScheduleFormProjectOption[];
   selectedServerId: string | null;
   selectedProvider: AgentProvider | null;
+  accountSelection?: AccountSelection;
   selectedModel: string;
   selectedMode: string;
   selectedThinkingOptionId: string;
@@ -128,6 +130,7 @@ export interface ScheduleFormModel {
   applyProviderSnapshot: (serverId: string, snapshot: ScheduleFormProviderSnapshot) => void;
   setHost: (serverId: string | null) => void;
   setProject: (optionId: string, display: ScheduleFormDisplay) => void;
+  setAccountSelection: (selection: AccountSelection) => void;
   setModel: (provider: AgentProvider, modelId: string) => void;
   setThinking: (thinkingOptionId: string) => void;
   setSessionMode: (modeId: string) => void;
@@ -666,6 +669,7 @@ function buildInitialState(snapshot: ScheduleFormSnapshot): ScheduleFormState {
     projectOptions: buildProjectOptions(snapshot.defaults.projectTargets, selectedServerId),
     selectedServerId,
     selectedProvider: config?.provider ?? null,
+    accountSelection: initialAccountSelection(snapshot),
     selectedModel: initialModel,
     selectedMode: initialMode,
     selectedThinkingOptionId: initialThinking,
@@ -713,6 +717,7 @@ function toFormState(state: ScheduleFormState): FormState {
   return {
     serverId: state.selectedServerId,
     provider: state.selectedProvider,
+    accountSelection: state.accountSelection,
     modeId: state.selectedMode,
     model: state.selectedModel,
     thinkingOptionId: state.selectedThinkingOptionId,
@@ -725,6 +730,7 @@ function applyResolvedFormState(state: ScheduleFormState, form: FormState): Sche
     ...state,
     selectedServerId: form.serverId,
     selectedProvider: form.provider,
+    accountSelection: form.accountSelection,
     selectedMode: form.modeId,
     selectedModel: form.model,
     selectedThinkingOptionId: form.thinkingOptionId,
@@ -909,6 +915,7 @@ export function openScheduleForm(snapshot: ScheduleFormSnapshot): ScheduleFormMo
     return {
       ...nextState,
       selectedProvider: null,
+      accountSelection: undefined,
       selectedModel: "",
       selectedMode: "",
       selectedThinkingOptionId: "",
@@ -1060,6 +1067,9 @@ export function openScheduleForm(snapshot: ScheduleFormSnapshot): ScheduleFormMo
       }
       requestProviderSnapshot(target.serverId, target.cwd);
     },
+    setAccountSelection(selection) {
+      if (!closed) publish({ ...state, accountSelection: selection });
+    },
     setModel(provider, modelId) {
       if (closed) {
         return;
@@ -1085,6 +1095,7 @@ export function openScheduleForm(snapshot: ScheduleFormSnapshot): ScheduleFormMo
       publish({
         ...state,
         selectedProvider: provider,
+        accountSelection: state.selectedProvider === provider ? state.accountSelection : undefined,
         selectedModel,
         selectedMode: pickModeForProvider({
           entries: providerEntries,
@@ -1139,4 +1150,8 @@ export function openScheduleForm(snapshot: ScheduleFormSnapshot): ScheduleFormMo
       publish({ ...state, submitError: value });
     },
   };
+}
+
+function initialAccountSelection(snapshot: ScheduleFormSnapshot): AccountSelection | undefined {
+  return newAgentConfig(snapshot.schedule)?.accountSelection;
 }

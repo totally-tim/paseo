@@ -1,3 +1,5 @@
+import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
+import { isDeepStrictEqual } from "node:util";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { HANDOFF_FROM_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
@@ -19,6 +21,7 @@ interface HandoffDependencies {
 }
 
 export interface HandoffAgentInput {
+  accountSelection?: AccountSelection;
   sourceAgentId: string;
   provider: string;
   model?: string;
@@ -32,6 +35,7 @@ export function handoffAgent(
   deps: HandoffDependencies,
   {
     sourceAgentId,
+    accountSelection,
     provider,
     model,
     modeId,
@@ -43,6 +47,7 @@ export function handoffAgent(
   // Compare the selection, not transport fields such as an RPC request ID.
   const input = {
     sourceAgentId,
+    accountSelection,
     provider,
     model,
     modeId,
@@ -55,6 +60,23 @@ export function handoffAgent(
   );
 }
 
+function assertHandoffSelection(
+  successor: StoredAgentRecord,
+  state: AgentHandoffState | null,
+  input: HandoffAgentInput,
+): void {
+  const requested = input.accountSelection;
+  const matchesAccount =
+    requested === undefined ||
+    isDeepStrictEqual(state?.config.accountSelection, requested) ||
+    (requested.kind === "fixed" && requested.accountId === successor.config?.accountId);
+  if (successor.provider !== input.provider || !matchesAccount) {
+    throw new Error(
+      `This agent already has a continuation (${successor.id}). Open it to continue with its pinned account.`,
+    );
+  }
+}
+
 async function prepareHandoff(
   deps: HandoffDependencies,
   input: HandoffAgentInput,
@@ -63,15 +85,13 @@ async function prepareHandoff(
   const { agentManager, agentStorage } = deps;
   let state = await agentStorage.getHandoff(source.id);
   const savedSuccessor = state ? await agentStorage.get(state.successorAgentId) : null;
-  if (savedSuccessor && savedSuccessor.provider !== input.provider) {
-    throw new Error(
-      `This agent already has a continuation using ${savedSuccessor.provider}. Open ${savedSuccessor.id} to continue there.`,
-    );
-  }
+  if (savedSuccessor) assertHandoffSelection(savedSuccessor, state, input);
   if (!state || (state.phase === "prepared" && !savedSuccessor)) {
     const resolved = await deps.providerSnapshotManager.resolveCreateConfig({
       cwd: source.cwd,
       provider: input.provider,
+      accountSelection: input.accountSelection,
+      model: input.model,
       requestedMode: input.modeId,
       featureValues: input.featureValues,
       parent: null,
@@ -79,6 +99,7 @@ async function prepareHandoff(
     });
     const config: AgentSessionConfig = {
       provider: input.provider,
+      accountSelection: input.accountSelection,
       cwd: source.cwd,
       model: input.model,
       modeId: resolved.modeId,
@@ -141,12 +162,16 @@ async function performHandoff(
     });
     state = { ...state, ...context };
     await agentStorage.saveHandoff(state);
-    await agentManager.createAgent(state.config, state.successorAgentId, {
+    const created = await agentManager.createAgent(state.config, state.successorAgentId, {
       workspaceId: state.workspaceId,
       initialTitle: state.title,
       labels: { [HANDOFF_FROM_AGENT_ID_LABEL]: source.id },
     });
-    state = { ...state, phase: "created" };
+    state = {
+      ...state,
+      config: { ...state.config, accountId: created.config.accountId },
+      phase: "created",
+    };
     await agentStorage.saveHandoff(state);
   }
 
@@ -155,11 +180,11 @@ async function performHandoff(
     const currentTarget = await agentStorage.get(state.successorAgentId);
     if (currentTarget?.archivedAt)
       throw new Error("The continuation was archived before it could start");
+    await ensureAgentLoaded(state.successorAgentId, { agentManager, agentStorage, logger });
     // Persist before dispatch. An ambiguous crash never sends the task twice;
     // the existing successor stays available for the user to inspect and prompt.
     state = { ...state, phase: "dispatching" };
     await agentStorage.saveHandoff(state);
-    await ensureAgentLoaded(state.successorAgentId, { agentManager, agentStorage, logger });
     await startCreatedAgentInitialPrompt({
       agentManager,
       agentId: state.successorAgentId,

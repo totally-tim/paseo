@@ -1,6 +1,8 @@
+import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import type { AgentSessionConfig } from "@getpaseo/protocol/agent-types";
 
 export function buildWorkspaceDraftAgentConfig(input: {
+  accountSelection?: AccountSelection;
   provider: AgentSessionConfig["provider"];
   cwd: string;
   modeId?: string;
@@ -10,6 +12,7 @@ export function buildWorkspaceDraftAgentConfig(input: {
 }): AgentSessionConfig {
   return {
     provider: input.provider,
+    ...(input.accountSelection ? { accountSelection: input.accountSelection } : {}),
     cwd: input.cwd,
     ...(input.modeId ? { modeId: input.modeId } : {}),
     ...(input.model ? { model: input.model } : {}),

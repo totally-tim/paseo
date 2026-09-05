@@ -1,3 +1,5 @@
+import { codexLimitNotification } from "../provider-limit.js";
+import { providerConfigDir } from "../provider-account-context.js";
 import {
   getAgentStreamEventTurnId,
   type AgentPermissionAction,
@@ -46,7 +48,6 @@ import type { ChildProcess, ChildProcessWithoutNullStreams } from "node:child_pr
 import { randomUUID } from "node:crypto";
 import { Dirent } from "node:fs";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { renderPromptAttachmentAsText } from "../prompt-attachments.js";
@@ -252,6 +253,7 @@ interface CodexAppServerClientLike {
 }
 
 interface CodexAppServerAgentDeps {
+  runtimeSettings?: ProviderRuntimeSettings;
   workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">;
   customProvider?: {
     id: string;
@@ -550,8 +552,8 @@ async function checkCodexLaunchAvailable(launch: ResolvedProviderLaunch) {
   });
 }
 
-function resolveCodexHomeDir(): string {
-  return process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
+function resolveCodexHomeDir(runtimeSettings?: ProviderRuntimeSettings): string {
+  return providerConfigDir("codex", createProviderEnv({ runtimeSettings }));
 }
 
 function decodeEscapedChar(next: string): string {
@@ -661,8 +663,10 @@ function parseFrontMatter(markdown: string): {
   return { frontMatter, body };
 }
 
-async function listCodexCustomPrompts(): Promise<AgentSlashCommand[]> {
-  const codexHome = resolveCodexHomeDir();
+async function listCodexCustomPrompts(
+  runtimeSettings?: ProviderRuntimeSettings,
+): Promise<AgentSlashCommand[]> {
+  const codexHome = resolveCodexHomeDir(runtimeSettings);
   const promptsDir = path.join(codexHome, "prompts");
   let entries: Dirent[];
   try {
@@ -705,6 +709,7 @@ async function listCodexCustomPrompts(): Promise<AgentSlashCommand[]> {
 export async function listCodexSkills(
   cwd: string,
   workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">,
+  runtimeSettings?: ProviderRuntimeSettings,
 ): Promise<AgentSlashCommand[]> {
   const candidates: string[] = [];
   candidates.push(path.join(cwd, ".codex", "skills"));
@@ -717,7 +722,7 @@ export async function listCodexSkills(
     candidates.push(path.join(repoRoot, ".codex", "skills"));
   }
 
-  candidates.push(path.join(resolveCodexHomeDir(), "skills"));
+  candidates.push(path.join(resolveCodexHomeDir(runtimeSettings), "skills"));
 
   const candidateReads = await Promise.all(
     candidates.map(async (dir) => {
@@ -2118,6 +2123,7 @@ const TurnCompletedNotificationSchema = z
         error: z
           .object({
             message: z.string().optional(),
+            codexErrorInfo: z.unknown().optional(),
           })
           .passthrough()
           .nullable()
@@ -2407,6 +2413,7 @@ type ParsedCodexNotification =
       kind: "turn_completed";
       status: string;
       errorMessage: string | null;
+      errorInfo?: unknown;
       threadId: string | null;
     }
   | {
@@ -2559,6 +2566,7 @@ const CodexNotificationSchema = z.union([
         kind: "turn_completed",
         status: params.turn.status,
         errorMessage: params.turn.error?.message ?? null,
+        errorInfo: params.turn.error?.codexErrorInfo,
         threadId: params.threadId ?? null,
       }),
     ),
@@ -3936,7 +3944,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   ): Promise<CodexPromptInput> {
     if (commandName.startsWith("prompts:")) {
       const promptName = commandName.slice("prompts:".length);
-      const codexHome = resolveCodexHomeDir();
+      const codexHome = resolveCodexHomeDir(this.deps.runtimeSettings);
       const promptPath = path.join(codexHome, "prompts", `${promptName}.md`);
       const raw = await fs.readFile(promptPath, "utf8");
       const parsed = parseFrontMatter(raw);
@@ -4804,7 +4812,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 
   async listCommands(): Promise<AgentSlashCommand[]> {
-    const prompts = await listCodexCustomPrompts();
+    const prompts = await listCodexCustomPrompts(this.deps.runtimeSettings);
     if (!this.connected) {
       await this.connect();
     } else {
@@ -4818,7 +4826,11 @@ export class CodexAppServerAgentSession implements AgentSession {
     }));
     const fallbackSkills =
       this.cachedSkills === null
-        ? await listCodexSkills(this.config.cwd, this.deps.workspaceGitService)
+        ? await listCodexSkills(
+            this.config.cwd,
+            this.deps.workspaceGitService,
+            this.deps.runtimeSettings,
+          )
         : [];
     const builtin: AgentSlashCommand[] = [
       {
@@ -5859,6 +5871,9 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (subAgentCallId) {
       let status: ToolCallTimelineItem["status"] = "completed";
       if (parsed.status === "failed") {
+        const notification = codexLimitNotification(parsed.errorInfo);
+        if (notification)
+          this.emitEvent({ type: "timeline", item: notification, provider: CODEX_PROVIDER });
         status = "failed";
       } else if (parsed.status === "interrupted") {
         status = "canceled";
@@ -5868,6 +5883,9 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
     this.completePendingRootCompactions();
     if (parsed.status === "failed") {
+      const notification = codexLimitNotification(parsed.errorInfo);
+      if (notification)
+        this.emitEvent({ type: "timeline", item: notification, provider: CODEX_PROVIDER });
       this.emitEvent({
         type: "turn_failed",
         provider: CODEX_PROVIDER,
@@ -6841,6 +6859,7 @@ export class CodexAppServerAgentClient implements AgentClient {
   private sessionDeps(): CodexAppServerAgentDeps {
     return {
       ...this.deps,
+      runtimeSettings: this.runtimeSettings,
       customCodexConfig: buildCodexCustomProviderConfig(
         this.runtimeSettings,
         this.deps.customProvider,
@@ -6906,6 +6925,7 @@ export class CodexAppServerAgentClient implements AgentClient {
   ): Promise<ChildProcessWithoutNullStreams> {
     const launchPrefix = await resolveCodexLaunchPrefix(this.runtimeSettings);
     const args = [...launchPrefix.args, "app-server"];
+    if (this.runtimeSettings?.accountContext) args.push("-c", 'cli_auth_credentials_store="file"');
     if (options?.goalsEnabled) {
       args.push("--enable", "goals");
     }

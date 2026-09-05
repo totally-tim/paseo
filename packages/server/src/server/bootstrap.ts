@@ -1,3 +1,6 @@
+import { ProviderAccountStore } from "./provider-accounts/account-store.js";
+import { ProviderAccountService } from "./provider-accounts/account-service.js";
+import { createAccountBackend } from "./provider-accounts/provider-backends.js";
 import express from "express";
 import { createServer as createHTTPServer, type IncomingMessage, type ServerResponse } from "http";
 import { constants, existsSync, unlinkSync } from "fs";
@@ -909,7 +912,25 @@ export async function createPaseoDaemon(
     if (git) configureGitProcessPolicy(git);
   });
   const initialAgentManagerState = providerSnapshotManager.getAgentManagerProviderState();
+  const providerAccounts = new ProviderAccountService(
+    new ProviderAccountStore(config.paseoHome),
+    (account, context) =>
+      createAccountBackend({
+        account,
+        context,
+        runtimeSettings: config.agentProviderSettings?.[account.provider],
+        logger,
+        managedProcesses,
+      }),
+  );
+  await providerAccounts.initialize();
+  for (const provider of ["claude", "codex"] as const) {
+    void providerAccounts.inspect(`default:${provider}`).catch(() => undefined);
+  }
   const agentManager = new AgentManager({
+    accounts: providerAccounts,
+    createAccountClient: (provider, context) =>
+      providerSnapshotManager.createAccountClient(provider, context),
     clients: initialAgentManagerState.clients,
     providerDefinitions: initialAgentManagerState.providerDefinitions,
     registry: agentStorage,
@@ -921,6 +942,24 @@ export async function createPaseoDaemon(
     resolvePaseoToolPolicy: (provider) =>
       resolvePaseoToolPolicy(provider, daemonConfigStore.get().providers),
     logger,
+  });
+
+  providerSnapshotManager.setAccountCatalogReader(async (input) => {
+    if (input.provider !== "claude" && input.provider !== "codex") return null;
+    const selection =
+      input.parent?.provider === input.provider && input.parent.config.accountId
+        ? { kind: "fixed" as const, accountId: input.parent.config.accountId }
+        : input.accountSelection;
+    const choice = providerAccounts.preview(input.provider, selection, input.model);
+    if (choice.accountId?.startsWith("default:")) return null;
+    const result = await agentManager.getAccountCatalog({
+      provider: input.provider,
+      selection,
+      model: input.model,
+      cwd: input.cwd ?? undefined,
+    });
+    if (!result.entry) throw new Error(result.error ?? result.reason);
+    return result.entry;
   });
 
   const detachAgentStoragePersistence = attachAgentStoragePersistence(
@@ -1747,6 +1786,7 @@ export async function createPaseoDaemon(
     } catch (error) {
       await pluginRuntime.stopAllPlugins().catch(() => undefined);
       await serviceProxy.stopStandalone().catch(() => undefined);
+      await providerAccounts.close().catch(() => undefined);
       await agentProviderRuntime.shutdown().catch(() => undefined);
       if (mainStarted) {
         httpServer.closeAllConnections();
@@ -1764,8 +1804,10 @@ export async function createPaseoDaemon(
     // Freeze both ingress and registration before taking the agent closure snapshot.
     wsServer?.prepareForShutdown();
     agentManager.prepareForShutdown();
+    await providerAccounts.close();
     await closeAllAgents(logger, agentManager);
     await agentManager.flushForShutdown().catch(() => undefined);
+    await agentManager.closeAccountClients();
     detachAgentStoragePersistence();
     await agentStorage.flush().catch(() => undefined);
     await agentProviderRuntime.shutdown();

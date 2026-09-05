@@ -1,3 +1,4 @@
+import { AccountSelectionField } from "@/provider-accounts/selection-field";
 import equal from "fast-deep-equal";
 import {
   useCallback,
@@ -342,6 +343,7 @@ function OpenScheduleFormSheet({
         ...(state.submitCadence ? { cadence: state.submitCadence } : {}),
         newAgentConfig: {
           provider,
+          accountSelection: scheduleAccountUpdate(state),
           model: state.selectedModel || null,
           modeId: state.selectedMode || null,
           thinkingOptionId: state.selectedThinkingOptionId || null,
@@ -364,6 +366,7 @@ function OpenScheduleFormSheet({
         type: "new-agent",
         config: {
           provider,
+          accountSelection: state.accountSelection,
           cwd,
           model: state.selectedModel || undefined,
           modeId: state.selectedMode || undefined,
@@ -759,6 +762,8 @@ function ScheduleTargetFields({
         </Field>
       ) : null}
 
+      <ScheduleAccountField model={model} state={state} />
+
       {state.disclosure.showThinkingField ? (
         <SelectField
           label="Thinking"
@@ -1081,3 +1086,25 @@ const styles = StyleSheet.create((theme) => {
     },
   };
 });
+
+function ScheduleAccountField({
+  model,
+  state,
+}: {
+  model: ScheduleFormModel;
+  state: ScheduleFormState;
+}) {
+  if (!state.selectedServerId || !state.selectedProvider) return null;
+  return (
+    <AccountSelectionField
+      serverId={state.selectedServerId}
+      provider={state.selectedProvider}
+      value={state.accountSelection}
+      onChange={model.setAccountSelection}
+    />
+  );
+}
+
+function scheduleAccountUpdate(state: ScheduleFormState) {
+  return state.accountSelection ?? null;
+}

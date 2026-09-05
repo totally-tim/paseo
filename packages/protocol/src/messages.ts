@@ -1,3 +1,13 @@
+import {
+  ProviderAccountCatalogRequestSchema,
+  AccountSelectionSchema,
+  AccountPolicySchema,
+  AccountLoginSchema,
+  AccountProviderSchema,
+  ProviderAccountSchema,
+  ProviderAccountsListRequestSchema,
+  ProviderAccountsManageRequestSchema,
+} from "./provider-accounts.js";
 import { z } from "zod";
 import { TerminalActivitySchema } from "./terminal-activity.js";
 import { CLIENT_CAPS } from "./client-capabilities.js";
@@ -169,6 +179,7 @@ export const AgentProfileSchema = z
     /** An identity colour name shared with host badges. Unknown values draw unthemed. */
     color: z.string().optional(),
     provider: z.string(),
+    accountSelection: AccountSelectionSchema.optional(),
     model: z.string().optional(),
     modeId: z.string().optional(),
     thinkingOptionId: z.string().optional(),
@@ -476,6 +487,7 @@ const ToolPolicySchema = z
 
 const AgentSessionConfigSchema = z.object({
   provider: AgentProviderSchema,
+  accountSelection: AccountSelectionSchema.optional(),
   cwd: z.string(),
   modeId: z.string().optional(),
   model: z.string().optional(),
@@ -736,6 +748,9 @@ export const AgentTimelineItemPayloadSchema: z.ZodType<AgentTimelineItem, unknow
   }),
   z.object({
     type: z.literal("notification"),
+    code: z.string().optional(),
+    resetsAt: z.string().optional(),
+    capacityScope: z.enum(["account", "model"]).optional(),
     level: z.enum(["info", "warning", "error"]),
     message: z.string(),
   }),
@@ -848,6 +863,7 @@ const AgentActiveTurnPayloadSchema = z.object({
 });
 
 export const AgentSnapshotPayloadSchema = z.object({
+  accountId: z.string().optional(),
   id: z.string(),
   provider: AgentProviderSchema,
   cwd: z.string(),
@@ -881,6 +897,7 @@ export const AgentSnapshotPayloadSchema = z.object({
 export type AgentSnapshotPayload = z.infer<typeof AgentSnapshotPayloadSchema>;
 
 export const AgentListItemPayloadSchema = z.object({
+  accountId: z.string().optional(),
   id: z.string(),
   shortId: z.string(),
   title: z.string().nullable(),
@@ -906,6 +923,7 @@ export type AgentListItemPayload = z.infer<typeof AgentListItemPayloadSchema>;
 export type AgentStreamEventPayload = z.infer<typeof AgentStreamEventPayloadSchema>;
 
 export const RecentProviderSessionDescriptorPayloadSchema = z.object({
+  accountId: z.string().optional(),
   providerId: z.string(),
   providerLabel: z.string(),
   providerHandleId: z.string(),
@@ -1380,6 +1398,7 @@ export const FetchAgentHistoryRequestMessageSchema = z.object({
 });
 
 export const FetchRecentProviderSessionsRequestMessageSchema = z.object({
+  accountId: z.string().optional(),
   type: z.literal("fetch_recent_provider_sessions_request"),
   requestId: z.string(),
   cwd: z.string().optional(),
@@ -1756,6 +1775,7 @@ export const ResumeAgentRequestMessageSchema = z.object({
 });
 
 export const ImportAgentRequestMessageSchema = z.object({
+  accountId: z.string().optional(),
   type: z.literal("import_agent_request"),
   provider: AgentProviderSchema.optional(),
   providerId: z.string().optional(),
@@ -1854,6 +1874,7 @@ export const HandoffAgentRequestMessageSchema = z.object({
   type: z.literal("agent.handoff.start.request"),
   sourceAgentId: z.string(),
   provider: AgentProviderSchema,
+  accountSelection: AccountSelectionSchema.optional(),
   model: z.string().optional(),
   modeId: z.string().optional(),
   thinkingOptionId: z.string().optional(),
@@ -2817,6 +2838,7 @@ export const PingMessageSchema = z.object({
 });
 
 const ListCommandsDraftConfigSchema = z.object({
+  accountSelection: AccountSelectionSchema.optional(),
   provider: AgentProviderSchema,
   cwd: z.string(),
   modeId: z.string().optional(),
@@ -3160,6 +3182,9 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   SetAgentTimelineSubscriptionRequestMessageSchema,
   AgentForkContextRequestMessageSchema,
   HandoffAgentRequestMessageSchema,
+  ProviderAccountCatalogRequestSchema,
+  ProviderAccountsListRequestSchema,
+  ProviderAccountsManageRequestSchema,
   SetAgentModeRequestMessageSchema,
   SetAgentModelRequestMessageSchema,
   SetAgentThinkingRequestMessageSchema,
@@ -3525,6 +3550,7 @@ export const ServerInfoStatusPayloadSchema = z
         // COMPAT(agentForkContext): added in v0.1.102, remove gate after 2026-12-28.
         agentForkContext: z.boolean().optional(),
         agentHandoff: z.boolean().optional(),
+        providerAccounts: z.boolean().optional(),
         // COMPAT(agentForkContextCursor): added in v0.1.108, remove gate after 2027-01-14.
         agentForkContextCursor: z.boolean().optional(),
         // COMPAT(providerSubagents): added in v0.1.107, remove gate after 2027-01-12.
@@ -5989,6 +6015,45 @@ export const ProviderUsageSchema = z.object({
   error: z.string().nullable().optional(),
 });
 
+export const ProviderAccountCatalogResponseSchema = z.object({
+  type: z.literal("provider.accounts.catalog.response"),
+  payload: z.object({
+    requestId: z.string(),
+    accountId: z.string().nullable(),
+    reason: z.string(),
+    entry: ProviderSnapshotEntrySchema.nullable(),
+    error: z.string().nullable(),
+  }),
+});
+export const ProviderAccountsListResponseSchema = z.object({
+  type: z.literal("provider.accounts.list.response"),
+  payload: z.object({
+    requestId: z.string(),
+    error: z.string().nullable(),
+    accounts: z.array(ProviderAccountSchema),
+    policy: AccountPolicySchema.nullable(),
+    usage: z.array(
+      z.object({ accountId: z.string(), usage: ProviderUsageSchema, stale: z.boolean() }),
+    ),
+    next: z.array(
+      z.object({
+        provider: AccountProviderSchema,
+        accountId: z.string().nullable(),
+        reason: z.string(),
+      }),
+    ),
+  }),
+});
+export const ProviderAccountsManageResponseSchema = z.object({
+  type: z.literal("provider.accounts.manage.response"),
+  payload: z.object({
+    requestId: z.string(),
+    error: z.string().nullable(),
+    account: ProviderAccountSchema.nullable(),
+    login: AccountLoginSchema.nullable(),
+  }),
+});
+
 export const ProviderUsageListResponseMessageSchema = z.object({
   type: z.literal("provider.usage.list.response"),
   payload: z.object({
@@ -6527,6 +6592,9 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   AgentAttentionRequiredMessageSchema,
   AgentForkContextResponseMessageSchema,
   HandoffAgentResponseMessageSchema,
+  ProviderAccountCatalogResponseSchema,
+  ProviderAccountsListResponseSchema,
+  ProviderAccountsManageResponseSchema,
   CancelAgentResponseMessageSchema,
   ClearAgentAttentionResponseMessageSchema,
   WorkspaceCreateResponseSchema,

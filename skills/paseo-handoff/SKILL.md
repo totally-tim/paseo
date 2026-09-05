@@ -16,7 +16,7 @@ Read the **paseo** skill. Call `list_profiles` before choosing the receiving age
 
 ## Parsing arguments
 
-1. **Agent profile** — explicit profile name first; otherwise choose the profile whose `notes` best match the work. Use its provider, model, mode, thinking option, and feature values. If no profile fits, use Paseo's provider discovery fallback. The provider may be a configured account alias or a local provider.
+1. **Agent profile** — explicit profile name first; otherwise choose the profile whose `notes` best match the work. Use its provider, model, mode, thinking option, feature values, and `accountSelection`. If no profile fits, use Paseo's provider discovery fallback. A fixed account stays fixed. Automatic selection uses that provider's configured account pool. A local provider remains an explicit target.
 2. **Isolation** — native continuation keeps the same workspace, including uncommitted files. If the user requests another workspace, explain this constraint before stopping the source.
 3. **Task description** — anything else the user said.
 
@@ -54,7 +54,9 @@ The receiving agent has zero context. Include:
 
 ## Launch
 
-Call `handoff_agent` with the source Paseo `agentId`, the configured `provider` ID, `model`, `modeId`, `thinkingOptionId`, `featureValues`, and the briefing in `briefing`. Provider and model are separate fields here.
+Call `handoff_agent` with the source Paseo `agentId`, the configured `provider` ID, `model`, `modeId`, `thinkingOptionId`, `featureValues`, `accountSelection`, and the briefing in `briefing`. Provider and model are separate fields here.
+
+Use `list_provider_accounts` to resolve an account name to its stable ID. Do not copy credentials, change a global CLI login, or infer that the successor shares the source account. A repeated handoff must keep the already-created successor's account.
 
 Make this your last action: the daemon stops the source process before it starts the successor. The successor is independent, keeps the same workspace, and appears through Paseo's continuation link. It does not need to be detached. Repeating the call returns the existing successor instead of creating another one.
 
