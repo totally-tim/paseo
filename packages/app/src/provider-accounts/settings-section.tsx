@@ -11,7 +11,7 @@ import { SelectField } from "@/components/ui/select-field";
 import { Switch } from "@/components/ui/switch";
 import type { EditingTextInputHandle } from "@/components/ui/text-input";
 import { useIsCompactFormFactor } from "@/constants/layout";
-import { SettingsSection } from "@/screens/settings/settings-section";
+import { SettingsSection } from "@/components/settings/headings/settings-section";
 import { ProviderUsageCard } from "@/provider-usage/card";
 import { settingsStyles } from "@/styles/settings";
 import { useProviderAccounts } from "./use-provider-accounts";

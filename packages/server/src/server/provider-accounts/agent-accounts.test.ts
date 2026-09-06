@@ -245,6 +245,33 @@ describe("agent account boundaries", () => {
     await accounts.logout(account.id);
   });
 
+  it("releases the account lease when a reload closes the runtime and the resume fails", async () => {
+    const { add, manager, directory, accountClients, accounts } = await setup();
+    const account = await add("codex", "A");
+    const client = createTestAgentClient("codex");
+    accountClients.set(account.id, client);
+    const id = randomUUID();
+    await manager.createAgent({ provider: "codex", cwd: directory }, id, {
+      workspaceId: "workspace",
+    });
+    expect(accounts.hasRuntime(account.id)).toBe(true);
+
+    // Reload closes the original runtime before resuming, so a failed resume leaves
+    // the agent closed. The lease has to go with it or the account is stranded.
+    vi.spyOn(client, "resumeSession").mockRejectedValue(new Error("Resume failed"));
+    await expect(manager.reloadAgentSession(id)).rejects.toThrow("Resume failed");
+
+    expect(accounts.hasRuntime(account.id)).toBe(false);
+    vi.mocked(client.resumeSession).mockRestore();
+    await expect(
+      manager.createAgent({ provider: "codex", cwd: directory }, id, {
+        workspaceId: "workspace",
+      }),
+    ).resolves.toBeDefined();
+    await manager.closeAgent(id);
+    await accounts.logout(account.id);
+  });
+
   it("discovers catalogs by account and directory and invalidates them on account changes", async () => {
     const { add, manager, directory, accountClients, accounts } = await setup();
     const a = await add("codex", "A");
