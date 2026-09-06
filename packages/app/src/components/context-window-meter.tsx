@@ -1,16 +1,19 @@
 import { useCallback, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import Svg, { Circle } from "react-native-svg";
-import { StyleSheet, useUnistyles } from "react-native-unistyles";
+import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
+import type { AgentRequestUsage } from "@getpaseo/protocol/agent-types";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ProviderUsageTooltipSection } from "@/provider-usage/tooltip-section";
 import { useProviderUsage } from "@/provider-usage/use-provider-usage";
+import type { Theme } from "@/styles/theme";
 import { formatTokenCount } from "./context-window-meter.utils";
 
-interface ContextWindowMeterProps {
+export interface ContextWindowMeterProps {
   maxTokens: number | null;
   usedTokens: number | null;
+  lastRequest?: AgentRequestUsage | null;
   totalCostUsd?: number | null;
   showPercentage?: boolean;
   serverId?: string;
@@ -59,18 +62,16 @@ function formatSessionCost(value: number): string | null {
   return `$${value.toFixed(2)}`;
 }
 
-function getMeterColors(
-  percentage: number,
-  theme: ReturnType<typeof useUnistyles>["theme"],
-): { progress: string; track: string } {
-  const track = theme.colors.surface3;
-  if (percentage > 90) {
-    return { progress: theme.colors.destructive, track };
-  }
-  if (percentage >= 70) {
-    return { progress: theme.colors.palette.amber[500], track };
-  }
-  return { progress: theme.colors.foregroundMuted, track };
+const ThemedCircle = withUnistyles(Circle);
+const trackStroke = (theme: Theme) => ({ stroke: theme.colors.surface3 });
+const normalStroke = (theme: Theme) => ({ stroke: theme.colors.foregroundMuted });
+const warningStroke = (theme: Theme) => ({ stroke: theme.colors.palette.amber[500] });
+const criticalStroke = (theme: Theme) => ({ stroke: theme.colors.destructive });
+
+function progressStrokeFor(percentage: number) {
+  if (percentage > 90) return criticalStroke;
+  if (percentage >= 70) return warningStroke;
+  return normalStroke;
 }
 
 function getMeterGeometry(showPercentage: boolean, glyphSize?: number) {
@@ -96,9 +97,100 @@ function getMeterGeometry(showPercentage: boolean, glyphSize?: number) {
   };
 }
 
+function count(value: number | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function observedSpeed(
+  output: number | null,
+  firstToken: number | null,
+  duration: number | null,
+): number | null {
+  // Approximate received-stream rate; a delta can contain several tokens.
+  if (
+    output === null ||
+    output <= 1 ||
+    firstToken === null ||
+    duration === null ||
+    duration <= firstToken
+  )
+    return null;
+  return ((output - 1) * 1000) / (duration - firstToken);
+}
+
+function RequestMetrics({ lastRequest }: Pick<ContextWindowMeterProps, "lastRequest">) {
+  const { t } = useTranslation();
+  if (!lastRequest) return null;
+  const request = lastRequest;
+  const input = count(request.inputTokens);
+  const cached = count(request.cachedInputTokens);
+  const output = count(request.outputTokens);
+  const reasoning = count(request.reasoningTokens);
+  const firstToken = count(request.firstTokenMs);
+  const duration = count(request.durationMs);
+  const validCache = input !== null && cached !== null && cached <= input;
+  const cacheHit = validCache && input > 0 ? (100 * cached) / input : null;
+  const speed = observedSpeed(output, firstToken, duration);
+
+  let cacheText = t("contextWindow.cacheNotReported");
+  if (cached !== null)
+    cacheText = t("contextWindow.cachedInput", { tokens: cached.toLocaleString() });
+  if (cacheHit !== null && cached !== null)
+    cacheText = t("contextWindow.cacheHit", {
+      tokens: cached.toLocaleString(),
+      percentage: cacheHit.toLocaleString(undefined, { maximumFractionDigits: 1 }),
+    });
+  return (
+    <>
+      <Text style={styles.tooltipTitle}>{t("contextWindow.lastRequest")}</Text>
+      {input !== null ? (
+        <Text style={styles.tooltipDetail}>
+          {t("contextWindow.input", { tokens: input.toLocaleString() })}
+        </Text>
+      ) : null}
+      <Text style={styles.tooltipDetail}>{cacheText}</Text>
+      {validCache ? (
+        <Text style={styles.tooltipDetail}>
+          {t("contextWindow.uncachedInput", { tokens: (input - cached).toLocaleString() })}
+        </Text>
+      ) : null}
+      {output !== null ? (
+        <Text style={styles.tooltipDetail}>
+          {t("contextWindow.output", { tokens: output.toLocaleString() })}
+        </Text>
+      ) : null}
+      {reasoning !== null && (output === null || reasoning <= output) ? (
+        <Text style={styles.tooltipDetail}>
+          {t("contextWindow.reasoning", { tokens: reasoning.toLocaleString() })}
+        </Text>
+      ) : null}
+      {firstToken !== null ? (
+        <Text style={styles.tooltipDetail}>
+          {t("contextWindow.firstToken", {
+            seconds: (firstToken / 1000).toLocaleString(undefined, {
+              maximumFractionDigits: 2,
+            }),
+          })}
+        </Text>
+      ) : null}
+      {speed !== null ? (
+        <Text style={styles.tooltipDetail}>
+          {t("contextWindow.generationSpeed", {
+            speed: speed.toLocaleString(undefined, { maximumFractionDigits: 1 }),
+          })}
+        </Text>
+      ) : null}
+      {speed !== null ? (
+        <Text style={styles.tooltipDetail}>{t("contextWindow.generationHint")}</Text>
+      ) : null}
+    </>
+  );
+}
+
 export function ContextWindowMeter({
   maxTokens,
   usedTokens,
+  lastRequest,
   totalCostUsd,
   showPercentage = false,
   serverId,
@@ -106,7 +198,6 @@ export function ContextWindowMeter({
   pending = false,
   glyphSize,
 }: ContextWindowMeterProps) {
-  const { theme } = useUnistyles();
   const { t } = useTranslation();
   const [isTooltipOpen, setIsTooltipOpen] = useState(false);
   const { view: providerUsageView, refresh: refreshProviderUsage } = useProviderUsage(
@@ -144,12 +235,12 @@ export function ContextWindowMeter({
           accessibilityElementsHidden
           importantForAccessibility="no-hide-descendants"
         >
-          <Circle
+          <ThemedCircle
             cx={geometry.center}
             cy={geometry.center}
             r={geometry.radius}
             fill="none"
-            stroke={theme.colors.surface3}
+            uniProps={trackStroke}
             strokeWidth={geometry.strokeWidth}
           />
         </Svg>
@@ -162,7 +253,7 @@ export function ContextWindowMeter({
   const roundedPercentage = Math.round(percentage);
   const { svgSize, center, radius, strokeWidth, circumference, containerStyle } = geometry;
   const dashOffset = circumference - (clampedPercentage / 100) * circumference;
-  const colors = getMeterColors(clampedPercentage, theme);
+  const progressStroke = progressStrokeFor(clampedPercentage);
   const formattedSessionCost =
     typeof totalCostUsd === "number" ? formatSessionCost(totalCostUsd) : null;
 
@@ -191,20 +282,20 @@ export function ContextWindowMeter({
             accessibilityElementsHidden
             importantForAccessibility="no-hide-descendants"
           >
-            <Circle
+            <ThemedCircle
               cx={center}
               cy={center}
               r={radius}
               fill="none"
-              stroke={colors.track}
+              uniProps={trackStroke}
               strokeWidth={strokeWidth}
             />
-            <Circle
+            <ThemedCircle
               cx={center}
               cy={center}
               r={radius}
               fill="none"
-              stroke={colors.progress}
+              uniProps={progressStroke}
               strokeWidth={strokeWidth}
               strokeLinecap="round"
               strokeDasharray={circumference}
@@ -228,6 +319,7 @@ export function ContextWindowMeter({
               max: formatTokenCount(maxTokens),
             })}
           </Text>
+          <RequestMetrics lastRequest={lastRequest} />
           {formattedSessionCost ? (
             <Text style={styles.tooltipDetail}>
               {t("contextWindow.sessionCost", { cost: formattedSessionCost })}

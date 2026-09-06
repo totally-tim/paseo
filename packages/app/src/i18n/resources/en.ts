@@ -1975,6 +1975,17 @@ export const en = {
     tokens: "{{used}} / {{max}} tokens",
     sessionCost: "Session cost {{cost}}",
     accessibility: "Context window {{percentage}}% used",
+    lastRequest: "Last model request",
+    input: "Input: {{tokens}} tokens",
+    cachedInput: "Cached: {{tokens}} tokens",
+    cacheHit: "Cached: {{tokens}} tokens ({{percentage}}%)",
+    cacheNotReported: "Cached: not reported",
+    uncachedInput: "Uncached: {{tokens}} tokens",
+    output: "Output: {{tokens}} tokens",
+    reasoning: "Of which thinking: {{tokens}} tokens",
+    firstToken: "First token: {{seconds}} s",
+    generationSpeed: "Observed output: ~{{speed}} tokens/s",
+    generationHint: "Measured from first output to completion; includes thinking.",
   },
   review: {
     comment: {

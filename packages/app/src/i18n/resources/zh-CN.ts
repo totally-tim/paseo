@@ -1893,6 +1893,17 @@ export const zhCN: TranslationResources = {
     tokens: "{{used}} / {{max}} tokens",
     sessionCost: "会话费用 {{cost}}",
     accessibility: "上下文窗口已使用 {{percentage}}%",
+    lastRequest: "最近一次模型请求",
+    input: "输入：{{tokens}} 个 token",
+    cachedInput: "缓存：{{tokens}} 个 token",
+    cacheHit: "缓存：{{tokens}} 个 token（{{percentage}}%）",
+    cacheNotReported: "缓存：未报告",
+    uncachedInput: "未缓存：{{tokens}} 个 token",
+    output: "输出：{{tokens}} 个 token",
+    reasoning: "其中思考：{{tokens}} 个 token",
+    firstToken: "首个 token：{{seconds}} 秒",
+    generationSpeed: "观测输出速度：约 {{speed}} token/秒",
+    generationHint: "从首次输出到完成的测量值，包含思考。",
   },
   review: {
     comment: {

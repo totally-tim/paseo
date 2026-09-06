@@ -44,6 +44,33 @@ const LegacyAgentSnapshotPayloadSchema = AgentSnapshotPayloadSchema.extend({
 });
 
 describe("wire schema compatibility", () => {
+  test("last-request usage is optional and survives the wire without mixing request fields", () => {
+    const schema = AgentSnapshotPayloadSchema.pick({ lastUsage: true });
+    const oldUsage = { inputTokens: 100, cachedInputTokens: 80 };
+    const lastRequest = {
+      inputTokens: 200,
+      cachedInputTokens: 150,
+      outputTokens: 50,
+      reasoningTokens: 30,
+      firstTokenMs: 800,
+      durationMs: 1800,
+    };
+    expect(schema.parse({ lastUsage: oldUsage }).lastUsage).toEqual(oldUsage);
+    expect(
+      schema.parse({ lastUsage: { ...oldUsage, lastRequest } }).lastUsage?.lastRequest,
+    ).toEqual(lastRequest);
+    expect(
+      schema.parse({ lastUsage: { lastRequest: { inputTokens: 10 } } }).lastUsage?.lastRequest,
+    ).toEqual({ inputTokens: 10 });
+    const oldReader = z.object({
+      inputTokens: z.number().optional(),
+      cachedInputTokens: z.number().optional(),
+    });
+    expect(oldReader.parse({ ...oldUsage, lastRequest })).toEqual(oldUsage);
+    expect(schema.safeParse({ lastUsage: { lastRequest: { durationMs: -1 } } }).success).toBe(
+      false,
+    );
+  });
   test("hello parses with and without the project update capability", () => {
     const legacy = WSHelloMessageSchema.parse({
       type: "hello",

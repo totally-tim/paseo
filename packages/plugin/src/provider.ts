@@ -373,7 +373,20 @@ export type ProviderPermissionResponse =
       interrupt?: boolean;
     };
 
+/** One completed model request. Input includes cached tokens; output includes reasoning when reported. */
+export interface ProviderRequestUsage {
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  /** Request start to first generated delta, measured by the client. */
+  firstTokenMs?: number;
+  /** Request start to completion, measured by the client. */
+  durationMs?: number;
+}
+
 export interface ProviderUsage {
+  lastRequest?: ProviderRequestUsage;
   inputTokens?: number;
   cachedInputTokens?: number;
   outputTokens?: number;
@@ -1009,6 +1022,16 @@ const commandSchema = z
   .strip();
 const usageSchema = z
   .object({
+    lastRequest: z
+      .object({
+        inputTokens: z.number().nonnegative().optional(),
+        cachedInputTokens: z.number().nonnegative().optional(),
+        outputTokens: z.number().nonnegative().optional(),
+        reasoningTokens: z.number().nonnegative().optional(),
+        firstTokenMs: z.number().nonnegative().optional(),
+        durationMs: z.number().nonnegative().optional(),
+      })
+      .optional(),
     inputTokens: z.number().optional(),
     cachedInputTokens: z.number().optional(),
     outputTokens: z.number().optional(),

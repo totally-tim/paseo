@@ -106,6 +106,28 @@ function createManagedAgent(overrides: ManagedAgentOverrides = {}): ManagedAgent
   };
 }
 
+describe("last-request usage projection", () => {
+  it("preserves request measurements through the agent snapshot", () => {
+    const lastRequest = {
+      inputTokens: 8000,
+      cachedInputTokens: 6000,
+      outputTokens: 500,
+      reasoningTokens: 400,
+      firstTokenMs: 800,
+      durationMs: 10800,
+    };
+    expect(
+      toAgentPayload(createManagedAgent({ lastUsage: { lastRequest } })).lastUsage?.lastRequest,
+    ).toEqual(lastRequest);
+  });
+  it("omits invalid measurements and does not invent missing ones", () => {
+    const lastRequest = { inputTokens: 10, cachedInputTokens: -1, firstTokenMs: Number.NaN };
+    expect(
+      toAgentPayload(createManagedAgent({ lastUsage: { lastRequest } })).lastUsage?.lastRequest,
+    ).toEqual({ inputTokens: 10 });
+  });
+});
+
 it("projects the daemon-owned active turn identity", () => {
   expect(toAgentPayload(createManagedAgent({ lifecycle: "running" })).activeTurn).toEqual({
     turnId: "test-turn-id",

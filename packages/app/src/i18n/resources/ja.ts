@@ -1932,6 +1932,17 @@ export const ja: TranslationResources = {
     tokens: "{{used}} / {{max}}トークン",
     sessionCost: "セッションコスト: {{cost}}",
     accessibility: "コンテキストウィンドウ{{percentage}}%使用",
+    lastRequest: "直近のモデルリクエスト",
+    input: "入力: {{tokens}} トークン",
+    cachedInput: "キャッシュ: {{tokens}} トークン",
+    cacheHit: "キャッシュ: {{tokens}} トークン ({{percentage}}%)",
+    cacheNotReported: "キャッシュ: 報告なし",
+    uncachedInput: "未キャッシュ: {{tokens}} トークン",
+    output: "出力: {{tokens}} トークン",
+    reasoning: "うち思考: {{tokens}} トークン",
+    firstToken: "最初のトークン: {{seconds}} 秒",
+    generationSpeed: "観測した出力速度: 約{{speed}} トークン/秒",
+    generationHint: "最初の出力から完了まで。思考を含みます。",
   },
   review: {
     comment: {

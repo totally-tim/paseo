@@ -1945,6 +1945,17 @@ export const ru: TranslationResources = {
     tokens: "Токены: {{used}} / {{max}}",
     sessionCost: "Стоимость сессии: {{cost}}",
     accessibility: "Использовано {{percentage}}% контекстного окна",
+    lastRequest: "Последний запрос к модели",
+    input: "Вход: {{tokens}} токенов",
+    cachedInput: "В кэше: {{tokens}} токенов",
+    cacheHit: "В кэше: {{tokens}} токенов ({{percentage}}%)",
+    cacheNotReported: "Кэш: нет данных",
+    uncachedInput: "Без кэша: {{tokens}} токенов",
+    output: "Выход: {{tokens}} токенов",
+    reasoning: "Из них рассуждения: {{tokens}} токенов",
+    firstToken: "Первый токен: {{seconds}} с",
+    generationSpeed: "Скорость вывода: ~{{speed}} токенов/с",
+    generationHint: "От первого вывода до завершения; включая рассуждения.",
   },
   review: {
     comment: {

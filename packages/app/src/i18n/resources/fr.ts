@@ -1965,6 +1965,17 @@ export const fr: TranslationResources = {
     tokens: "Jetons{{used}}/{{max}}",
     sessionCost: "Coût de la séance{{cost}}",
     accessibility: "Fenêtre contextuelle{{percentage}}% utilisé",
+    lastRequest: "Dernière requête au modèle",
+    input: "Entrée : {{tokens}} tokens",
+    cachedInput: "En cache : {{tokens}} tokens",
+    cacheHit: "En cache : {{tokens}} tokens ({{percentage}} %)",
+    cacheNotReported: "Cache : non indiqué",
+    uncachedInput: "Hors cache : {{tokens}} tokens",
+    output: "Sortie : {{tokens}} tokens",
+    reasoning: "Dont raisonnement : {{tokens}} tokens",
+    firstToken: "Premier token : {{seconds}} s",
+    generationSpeed: "Débit observé : ~{{speed}} tokens/s",
+    generationHint: "De la première sortie à la fin ; raisonnement inclus.",
   },
   review: {
     comment: {

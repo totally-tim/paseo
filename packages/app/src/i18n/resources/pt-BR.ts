@@ -1946,6 +1946,17 @@ export const ptBR: TranslationResources = {
     tokens: "{{used}} / {{max}} tokens",
     sessionCost: "Custo da sessão {{cost}}",
     accessibility: "Janela de contexto {{percentage}}% usada",
+    lastRequest: "Última solicitação ao modelo",
+    input: "Entrada: {{tokens}} tokens",
+    cachedInput: "Em cache: {{tokens}} tokens",
+    cacheHit: "Em cache: {{tokens}} tokens ({{percentage}}%)",
+    cacheNotReported: "Cache: não informado",
+    uncachedInput: "Sem cache: {{tokens}} tokens",
+    output: "Saída: {{tokens}} tokens",
+    reasoning: "Dos quais raciocínio: {{tokens}} tokens",
+    firstToken: "Primeiro token: {{seconds}} s",
+    generationSpeed: "Saída observada: ~{{speed}} tokens/s",
+    generationHint: "Da primeira saída até a conclusão; inclui raciocínio.",
   },
   review: {
     comment: {

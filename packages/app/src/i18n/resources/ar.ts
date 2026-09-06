@@ -1914,6 +1914,17 @@ export const ar: TranslationResources = {
     tokens: "رموز{{used}}/{{max}}",
     sessionCost: "تكلفة الجلسة{{cost}}",
     accessibility: "تم استخدام نافذة السياق{{percentage}}%",
+    lastRequest: "آخر طلب للنموذج",
+    input: "الإدخال: {{tokens}} رمز",
+    cachedInput: "المخزّن مؤقتًا: {{tokens}} رمز",
+    cacheHit: "المخزّن مؤقتًا: {{tokens}} رمز ({{percentage}}%)",
+    cacheNotReported: "التخزين المؤقت: لم يُبلَّغ عنه",
+    uncachedInput: "غير المخزّن مؤقتًا: {{tokens}} رمز",
+    output: "الإخراج: {{tokens}} رمز",
+    reasoning: "منها للتفكير: {{tokens}} رمز",
+    firstToken: "أول رمز: {{seconds}} ث",
+    generationSpeed: "الإخراج المرصود: ~{{speed}} رمز/ث",
+    generationHint: "من أول إخراج حتى الاكتمال؛ يشمل التفكير.",
   },
   review: {
     comment: {

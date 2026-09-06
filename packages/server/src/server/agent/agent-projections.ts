@@ -469,7 +469,7 @@ function sanitizeMetadataArray(value: unknown): AgentMetadata[] | undefined {
   return sanitized.length > 0 ? sanitized : undefined;
 }
 
-type UsageNumericField = Exclude<keyof AgentUsage, never>;
+type UsageNumericField = Exclude<keyof AgentUsage, "lastRequest">;
 
 function assignFiniteNumber(
   source: { [key: string]: JsonValue },
@@ -502,6 +502,23 @@ function sanitizeUsage(value: unknown): AgentUsage | undefined {
     if (!assignFiniteNumber(sanitized, result, field)) {
       return undefined;
     }
+  }
+  if (isJsonObject(sanitized.lastRequest)) {
+    const request: NonNullable<AgentUsage["lastRequest"]> = {};
+    const requestFields = [
+      "inputTokens",
+      "cachedInputTokens",
+      "outputTokens",
+      "reasoningTokens",
+      "firstTokenMs",
+      "durationMs",
+    ] as const;
+    for (const field of requestFields) {
+      const raw = sanitized.lastRequest[field];
+      if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) request[field] = raw;
+    }
+    // Keep each request atomic: absent fields must never inherit older measurements.
+    result.lastRequest = request;
   }
   return Object.keys(result).length ? result : undefined;
 }
