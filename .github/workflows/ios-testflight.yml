@@ -173,6 +173,16 @@ jobs:
             CODE_SIGN_IDENTITY="Apple Distribution" \
             | { command -v xcbeautify >/dev/null && xcbeautify --renderer github-actions || cat; }
 
+      - name: Inspect the archive
+        run: |
+          set -euo pipefail
+          echo "--- archive tree (2 levels) ---"
+          find "$RUNNER_TEMP/Paseo.xcarchive" -maxdepth 2 -print
+          echo "--- archive Info.plist ---"
+          plutil -p "$RUNNER_TEMP/Paseo.xcarchive/Info.plist" || true
+          echo "--- embedded app, if any ---"
+          ls -la "$RUNNER_TEMP/Paseo.xcarchive/Products/Applications" 2>/dev/null || echo "no Products/Applications"
+
       - name: Export the IPA
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
