@@ -191,7 +191,7 @@ function createProviderHarness(options: ProviderHarnessOptions = {}) {
     },
   };
 
-  return { registration, inputs, closeCount: () => closeCount };
+  return { registration, inputs, emit, closeCount: () => closeCount };
 }
 
 function eventsOfType(events: AgentStreamEvent[], type: AgentStreamEvent["type"]) {
@@ -256,6 +256,105 @@ describe("PluginAgentClientRegistry", () => {
 
     registry.replace([]);
     expect(eventsOfType(events, "turn_failed")).toHaveLength(1);
+  });
+
+  test.each(["before", "after"])(
+    "restores the same provider child when closing the parent %s replacement opens",
+    async (closeOrder) => {
+      const harness = createProviderHarness();
+      const registry = new PluginAgentClientRegistry(createTestLogger());
+      registry.replace([harness.registration]);
+      const client = registry.clients()[harness.registration.id]!;
+      let session = await client.createSession({ provider: "plugin-direct", cwd: "/workspace" });
+      const persistence = session.describePersistence()!;
+
+      try {
+        for (let reopen = 0; reopen < 3; reopen += 1) {
+          const history: AgentStreamEvent[] = [];
+          for await (const event of session.streamHistory()) history.push(event);
+          expect(history).toContainEqual(
+            expect.objectContaining({
+              type: "provider_subagent",
+              event: expect.objectContaining({
+                type: "timeline",
+                id: "child-1",
+                item: expect.objectContaining({ text: "Child result" }),
+              }),
+            }),
+          );
+          expect(history).toContainEqual(
+            expect.objectContaining({
+              type: "provider_subagent",
+              event: expect.objectContaining({
+                type: "upsert",
+                id: "child-1",
+                status: "completed",
+              }),
+            }),
+          );
+          const previous = session;
+          if (closeOrder === "before") await previous.close();
+          session = await client.resumeSession(persistence, { cwd: "/workspace" });
+          if (closeOrder === "after") await previous.close();
+          const events: AgentStreamEvent[] = [];
+          const unsubscribe = session.subscribe((event) => events.push(event));
+          harness.emit({
+            type: "timeline.item",
+            sessionId: "child-1",
+            item: { type: "assistant_message", id: `restored-${reopen}`, text: "Still routed" },
+          });
+          unsubscribe();
+          expect(events).toContainEqual(
+            expect.objectContaining({
+              type: "provider_subagent",
+              event: expect.objectContaining({
+                type: "timeline",
+                id: "child-1",
+                item: expect.objectContaining({ text: "Still routed" }),
+              }),
+            }),
+          );
+        }
+      } finally {
+        await session.close();
+        registry.replace([]);
+      }
+    },
+  );
+
+  test("keeps the original child reachable when a replacement is discarded", async () => {
+    const harness = createProviderHarness();
+    const registry = new PluginAgentClientRegistry(createTestLogger());
+    registry.replace([harness.registration]);
+    const client = registry.clients()[harness.registration.id]!;
+    const original = await client.createSession({ provider: "plugin-direct", cwd: "/workspace" });
+    const events: AgentStreamEvent[] = [];
+    const unsubscribe = original.subscribe((event) => events.push(event));
+    try {
+      const replacement = await client.resumeSession(original.describePersistence()!, {
+        cwd: "/workspace",
+      });
+      await replacement.close();
+      harness.emit({
+        type: "timeline.item",
+        sessionId: "child-1",
+        item: { type: "assistant_message", id: "surviving-child", text: "Original child remains" },
+      });
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "provider_subagent",
+          event: expect.objectContaining({
+            type: "timeline",
+            id: "child-1",
+            item: expect.objectContaining({ text: "Original child remains" }),
+          }),
+        }),
+      );
+    } finally {
+      unsubscribe();
+      await original.close();
+      registry.replace([]);
+    }
   });
 
   test("adapts callback providers into the existing AgentClient and AgentSession path", async () => {

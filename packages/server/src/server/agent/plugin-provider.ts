@@ -287,7 +287,16 @@ class ProviderRuntime {
 
   removeSession(sessionId: string, providerSessionId: string): void {
     this.sessions.delete(sessionId);
-    this.providerSessions.delete(providerSessionId);
+    // A replacement parent can replay this provider ID before its predecessor closes.
+    if (this.providerSessions.get(providerSessionId)?.id === sessionId) {
+      this.providerSessions.delete(providerSessionId);
+      // A rejected replacement leaves the original session alive. Restore its child routing.
+      for (const surviving of this.sessions.values()) {
+        if (surviving.providerId === providerSessionId) {
+          this.providerSessions.set(providerSessionId, surviving);
+        }
+      }
+    }
   }
 
   private getConnection(): Promise<ProviderConnection> {
@@ -398,11 +407,15 @@ class ProviderRuntime {
   }
 
   private acceptProviderChild(event: ProviderEvent): boolean {
-    if (event.type !== "session.opened" || this.providerSessions.has(event.sessionId)) return false;
-    const parent = event.parentSessionId
-      ? this.providerSessions.get(event.parentSessionId)
-      : undefined;
+    if (event.type !== "session.opened" || !event.parentSessionId) return false;
+    const parent = this.providerSessions.get(event.parentSessionId);
     if (!parent) return true;
+    const existing = this.providerSessions.get(event.sessionId);
+    if (existing && (existing.restoration === "core" || existing.parentId === parent.id)) {
+      return false;
+    }
+    // Reload opens the replacement before closing its predecessor. A replayed child belongs
+    // to the newly announced parent, even while the previous runtime still owns its old copy.
     const sessionId = randomUUID();
     const session = new ProviderRuntimeSession(
       this,
@@ -410,6 +423,7 @@ class ProviderRuntime {
       sessionId,
       event.sessionId,
       event.restoration,
+      parent.id,
     );
     this.sessions.set(sessionId, session);
     this.providerSessions.set(event.sessionId, session);
@@ -536,6 +550,7 @@ class ProviderRuntimeSession {
     readonly id: string,
     private readonly providerSessionId: string,
     readonly restoration: "core" | "parent",
+    readonly parentId?: string,
   ) {}
 
   get providerId(): string {
@@ -972,7 +987,9 @@ class PluginAgentClient implements AgentClient {
       history: input.history,
     });
     const session = new PluginAgentSession(this.provider, bridge, () => {
-      this.rootsBySession.delete(bridge.id);
+      for (const [ownedSessionId, owner] of this.rootsBySession) {
+        if (owner === session) this.rootsBySession.delete(ownedSessionId);
+      }
     });
     this.rootsBySession.set(bridge.id, session);
     this.attachPendingChildren();
@@ -1021,7 +1038,10 @@ class PluginAgentSession implements AgentSession {
   private readonly permissionResponses = new Map<string, AgentPermissionResponse>();
   private readonly revertTokens = new Map<string, ProviderTimelineItem["revertToken"]>();
   private readonly timelineSnapshots = new Map<string, ProviderTimelineItem>();
-  private readonly childUnsubscribes = new Map<string, () => void>();
+  private readonly children = new Map<
+    string,
+    { session: ProviderRuntimeSession; unsubscribe: () => void }
+  >();
   private readonly childSnapshots = new Map<string, Map<string, ProviderTimelineItem>>();
   private unsubscribe: (() => void) | null = null;
   private currentTurnId: string | null = null;
@@ -1171,8 +1191,13 @@ class PluginAgentSession implements AgentSession {
     this.closed = true;
     this.unsubscribe?.();
     this.unsubscribe = null;
-    for (const unsubscribe of this.childUnsubscribes.values()) unsubscribe();
-    this.childUnsubscribes.clear();
+    for (const child of this.children.values()) {
+      child.unsubscribe();
+      // Parent-owned children have no independent close RPC. Release their runtime registrations
+      // so a later parent resume can replay the same provider IDs into a new session.
+      await child.session.close();
+    }
+    this.children.clear();
     this.listeners.clear();
     this.onClose();
     await this.bridge.close();
@@ -1245,10 +1270,10 @@ class PluginAgentSession implements AgentSession {
     const snapshots = new Map<string, ProviderTimelineItem>();
     this.childSnapshots.set(childId, snapshots);
     for (const event of child.history) this.acceptChildEvent(childId, event, snapshots);
-    this.childUnsubscribes.set(
-      child.id,
-      child.onEvent((event) => this.acceptChildEvent(childId, event, snapshots)),
-    );
+    this.children.set(child.id, {
+      session: child,
+      unsubscribe: child.onEvent((event) => this.acceptChildEvent(childId, event, snapshots)),
+    });
   }
 
   private accept(event: ProviderEvent, live: boolean): void {
