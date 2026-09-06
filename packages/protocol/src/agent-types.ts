@@ -175,7 +175,22 @@ export interface AgentRunOptions {
   maxThinkingTokens?: number;
 }
 
+/** One completed model request. Counts are never session totals. */
+export interface AgentRequestUsage {
+  /** Total input, including cached tokens. */
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  /** Total generated tokens, including reasoning when the provider reports it. */
+  outputTokens?: number;
+  reasoningTokens?: number;
+  /** Client-observed time from sending the request to its first generated delta. */
+  firstTokenMs?: number;
+  /** Client-observed time from sending the request to completion. */
+  durationMs?: number;
+}
+
 export interface AgentUsage {
+  lastRequest?: AgentRequestUsage;
   inputTokens?: number;
   cachedInputTokens?: number;
   outputTokens?: number;

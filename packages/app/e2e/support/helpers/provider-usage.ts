@@ -1,5 +1,10 @@
 import type { Page } from "@playwright/test";
-import type { ProviderUsage } from "@getpaseo/protocol/messages";
+import type {
+  AgentSnapshotPayload,
+  ProviderUsage,
+  SessionOutboundMessage,
+} from "@getpaseo/protocol/messages";
+import type { AgentRequestUsage } from "@getpaseo/protocol/agent-types";
 import { daemonWsRoutePattern } from "./daemon-port";
 
 interface ProviderUsageFixturePayload {
@@ -75,9 +80,45 @@ function withProviderUsageFeature(message: WebSocketMessage): string | null {
   });
 }
 
+function withRequestMetrics(
+  message: WebSocketMessage,
+  lastRequest?: AgentRequestUsage,
+): string | null {
+  if (!lastRequest) return null;
+  const sessionMessage = getSessionMessage(message) as SessionOutboundMessage | null;
+  if (!sessionMessage) return null;
+  const withUsage = (agent: AgentSnapshotPayload): AgentSnapshotPayload =>
+    agent.provider === "mock"
+      ? { ...agent, lastUsage: { ...agent.lastUsage, lastRequest } }
+      : agent;
+  switch (sessionMessage.type) {
+    case "fetch_agent_response":
+    case "fetch_agent_timeline_response":
+      if (sessionMessage.payload.agent)
+        sessionMessage.payload.agent = withUsage(sessionMessage.payload.agent);
+      break;
+    case "agent_update":
+      if (sessionMessage.payload.kind === "upsert")
+        sessionMessage.payload.agent = withUsage(sessionMessage.payload.agent);
+      break;
+    case "fetch_agents_response":
+    case "fetch_agent_history_response":
+      for (const entry of sessionMessage.payload.entries) entry.agent = withUsage(entry.agent);
+      break;
+    case "clear_agent_attention_response":
+      sessionMessage.payload.agents = sessionMessage.payload.agents.map(withUsage);
+      break;
+    default:
+      return null;
+  }
+  const encoded = JSON.stringify({ type: "session", message: sessionMessage });
+  return encoded;
+}
+
 export async function installProviderUsageFixture(
   page: Page,
   payloads: ProviderUsageFixturePayload[],
+  lastRequest?: AgentRequestUsage,
 ): Promise<ProviderUsageFixture> {
   let requests = 0;
   const waiters: Array<{ count: number; resolve: () => void }> = [];
@@ -134,7 +175,7 @@ export async function installProviderUsageFixture(
 
     server.onMessage((message) => {
       const serverInfo = typeof message === "string" ? withProviderUsageFeature(message) : null;
-      ws.send(serverInfo ?? message);
+      ws.send(serverInfo ?? withRequestMetrics(message, lastRequest) ?? message);
     });
   });
 

@@ -103,6 +103,17 @@ Draft metadata lookups should avoid creating provider sessions when the upstream
 
 Provider session import has its own contract. The picker calls `listImportableSessions` and receives rows only: provider handle, cwd, title, prompt previews, and last activity. Import calls `importSession({ providerHandleId, cwd })` for the selected row and must not call listing again. The provider returns the resumed session, storage config, persistence handle, and hydrated timeline for that one native session; `AgentManager.importProviderSession` seeds the daemon timeline and publishes the Paseo agent only after it is ready.
 
+## Request usage
+
+Keep `lastRequest` measurements together for one completed model request. Input includes cached
+tokens, and output includes reasoning when the provider reports it. An absent measurement stays
+unknown; it does not inherit a value from the previous request. Session totals and the active
+context size cannot supply missing request measurements.
+
+The context tooltip derives its cache percentage from that request's input and cached counts.
+Its output rate uses client-observed request and first-delta timing, so it includes transport
+effects and approximates batched deltas. Do not label it engine decode speed or prefill timing.
+
 ## Provider Helper Processes
 
 Provider-owned helper processes that can outlive an individual agent session must be recorded in the daemon's managed-process registry. Store provider/kind metadata, the PID, launch command/args, and process identity captured from the platform process table. Remove the record on normal exit or shutdown.

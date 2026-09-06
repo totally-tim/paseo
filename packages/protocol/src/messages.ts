@@ -423,6 +423,16 @@ const AgentCapabilityFlagsSchema: z.ZodType<AgentCapabilityFlags> = z
   .catchall(z.boolean());
 
 const AgentUsageSchema: z.ZodType<AgentUsage> = z.object({
+  lastRequest: z
+    .object({
+      inputTokens: z.number().nonnegative().optional(),
+      cachedInputTokens: z.number().nonnegative().optional(),
+      outputTokens: z.number().nonnegative().optional(),
+      reasoningTokens: z.number().nonnegative().optional(),
+      firstTokenMs: z.number().nonnegative().optional(),
+      durationMs: z.number().nonnegative().optional(),
+    })
+    .optional(),
   inputTokens: z.number().optional(),
   cachedInputTokens: z.number().optional(),
   outputTokens: z.number().optional(),
