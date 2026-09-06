@@ -24,6 +24,10 @@ primed.
 Handed-off agents remain closed. Their conversation is read-only and comes from the saved handoff;
 opening it does not resume the old provider. Send new work to the linked successor.
 
+Reload releases the old runtime before resuming its durable session: an idle provider process can
+still own an exclusive writer. A close failure retains that runtime for cleanup and blocks the
+replacement. Once closure succeeds, a failed resume leaves the durable agent closed and retryable.
+
 Idle agents remain resident indefinitely. Runtime closure happens only through an explicit lifecycle
 action such as archive, replacement, reload, workspace teardown, or daemon shutdown.
 

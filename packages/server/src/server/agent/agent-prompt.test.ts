@@ -90,7 +90,7 @@ function createFinishNotificationScenario(
   Reflect.set(callerAgent, "config", { title: "Caller Agent" });
   Reflect.set(callerAgent, "labels", {});
 
-  const agentManager: AgentManager = Object.create(AgentManager.prototype);
+  const agentManager = new AgentManager({ clients: {}, logger: createTestLogger() });
   Reflect.set(agentManager, "getAgent", (agentId: string) => {
     if (agentId === "child-agent") {
       return childAgent;
@@ -472,7 +472,7 @@ it("does not notify archived callers", async () => {
   const streamAgentSpy = vi.fn(() => (async function* noop() {})());
   const replaceAgentRunSpy = vi.fn(() => (async function* noop() {})());
 
-  const agentManager: AgentManager = Object.create(AgentManager.prototype);
+  const agentManager = new AgentManager({ clients: {}, logger: createTestLogger() });
   Reflect.set(
     agentManager,
     "getAgent",

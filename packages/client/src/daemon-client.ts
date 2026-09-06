@@ -369,6 +369,7 @@ export interface CreateAgentRequestOptions extends AgentConfigOverrides {
   workspaceId?: string;
   callerAgentId?: string;
   initialPrompt?: string;
+  idempotencyKey?: string;
   clientMessageId?: string;
   outputSchema?: Record<string, unknown>;
   images?: CreateAgentRequestMessage["images"];
@@ -1405,6 +1406,14 @@ export class DaemonClient {
       this.connectionState.status === "connected" ||
       this.connectionState.status === "connecting"
     ) {
+      return;
+    }
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+    if (this.connectPromise) {
+      this.attemptConnect();
       return;
     }
     void this.connect();
@@ -2520,6 +2529,7 @@ export class DaemonClient {
   }
 
   async createAgent(options: CreateAgentRequestOptions): Promise<AgentSnapshotPayload> {
+    if (options.idempotencyKey !== undefined) this.requireAgentRequestReceipts();
     const requestId = this.createRequestId(options.requestId);
     const config = resolveAgentConfig(options);
     this.requireContinuationSupport(config);
@@ -2532,6 +2542,7 @@ export class DaemonClient {
       ...(options.workspaceId !== undefined ? { workspaceId: options.workspaceId } : {}),
       ...(options.callerAgentId !== undefined ? { callerAgentId: options.callerAgentId } : {}),
       ...(options.initialPrompt ? { initialPrompt: options.initialPrompt } : {}),
+      idempotencyKey: options.idempotencyKey,
       ...(options.clientMessageId ? { clientMessageId: options.clientMessageId } : {}),
       ...(options.outputSchema ? { outputSchema: options.outputSchema } : {}),
       ...(options.images && options.images.length > 0 ? { images: options.images } : {}),
@@ -2644,6 +2655,13 @@ export class DaemonClient {
     });
     if (payload.error || !payload.agent) throw new Error(payload.error ?? "Handoff failed");
     return payload.agent;
+  }
+
+  private requireAgentRequestReceipts(): void {
+    // COMPAT(agentRequestReceipts): added in v0.7.3; remove gate after 2027-03-05.
+    if (this.lastServerInfoMessage?.features?.agentRequestReceipts !== true) {
+      throw new Error("Update the host to use retry-safe agent creation.");
+    }
   }
 
   async deleteAgent(agentId: string): Promise<void> {
@@ -6077,6 +6095,10 @@ export class DaemonClient {
 
   setReconnectEnabled(enabled: boolean): void {
     this.config = { ...this.config, reconnect: { ...this.config.reconnect, enabled } };
+    if (!enabled && this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
   }
 
   private scheduleReconnect(input?: {
