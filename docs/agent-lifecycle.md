@@ -80,6 +80,12 @@ Some providers can create their own child sessions inside one provider runtime. 
 
 The provider still owns the underlying runtime. Paseo keeps an agent record so the child can be opened, tracked, archived, and cascaded with the parent, but prompts and history hydration route through the provider adapter for that native child handle.
 
+For plugin children restored by their parent, replay binds the provider's child ID to the current
+parent runtime. Parent replacement can open the new runtime before closing the old one. Closing
+either runtime must release only its own registrations and subscriptions; it must not remove a
+replacement's child or strand the original when replacement is discarded. Reopening can then
+reuse the same provider IDs and replay the child's history.
+
 ## Archive
 
 Archive is a **soft delete**: the agent record stays on disk with `archivedAt` set, the runtime is closed, and the agent disappears from active lists. Archive is **global** — it lives on the server and propagates to every connected client.
