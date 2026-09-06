@@ -1,3 +1,5 @@
+import type { AgentContinuationPolicy } from "@getpaseo/protocol/agent-continuation";
+import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ReactElement, RefObject } from "react";
 import { useTranslation } from "react-i18next";
@@ -765,6 +767,8 @@ type NewWorkspaceComposerState = NonNullable<
 >;
 
 interface WorkspaceDraftSubmissionConfig {
+  accountSelection?: AccountSelection;
+  continuationPolicy?: AgentContinuationPolicy;
   cwd: string;
   provider: AgentProvider;
   modeId: string | null;
@@ -875,6 +879,8 @@ function buildWorkspaceDraftSetupFromComposer(input: {
 }): WorkspaceDraftTabSetup {
   return {
     provider: input.provider,
+    accountSelection: input.composerState.accountSelection,
+    continuationPolicy: input.composerState.continuationPolicy,
     cwd: input.cwd,
     modeId: input.composerState.selectedMode || null,
     model: input.composerState.effectiveModelId || null,
@@ -911,6 +917,8 @@ function buildComposerInitialValues(input: {
     return {
       workingDir: input.workingDir ?? input.initialSetup.cwd,
       provider: input.initialSetup.provider,
+      accountSelection: input.initialSetup.accountSelection,
+      continuationPolicy: input.initialSetup.continuationPolicy,
       modeId: input.initialSetup.modeId,
       model: input.initialSetup.model,
       thinkingOptionId: input.initialSetup.thinkingOptionId,
@@ -1009,6 +1017,8 @@ function resolveWorkspaceDraftSubmissionConfig(input: {
     return {
       cwd: initialSetup.cwd,
       provider: initialSetup.provider,
+      accountSelection: initialSetup.accountSelection,
+      continuationPolicy: initialSetup.continuationPolicy,
       modeId: initialSetup.modeId,
       model: initialSetup.model,
       thinkingOptionId: initialSetup.thinkingOptionId,
@@ -1019,6 +1029,8 @@ function resolveWorkspaceDraftSubmissionConfig(input: {
   return {
     cwd: workspaceDirectory,
     provider,
+    accountSelection: composerState.accountSelection,
+    continuationPolicy: composerState.continuationPolicy,
     modeId: composerState.selectedMode || null,
     model: composerState.effectiveModelId || null,
     thinkingOptionId: composerState.effectiveThinkingOptionId || null,
@@ -1074,6 +1086,8 @@ function submitWorkspaceDraft(input: SubmitDraftInput): void {
     attachments,
     cwd: submission.cwd,
     provider: submission.provider,
+    accountSelection: submission.accountSelection,
+    continuationPolicy: submission.continuationPolicy,
     clientMessageId,
     timestamp,
     ...(submission.modeId ? { modeId: submission.modeId } : {}),

@@ -1,3 +1,8 @@
+import { useProviderAccounts } from "@/provider-accounts/use-provider-accounts";
+import {
+  ProviderAccountsSettingsSection,
+  ProviderAccountsUsageSection,
+} from "@/provider-accounts/settings-section";
 import {
   ArrowDown,
   ArrowUp,
@@ -285,6 +290,7 @@ export function HostAgentsPage({ serverId }: { serverId: string }) {
         </View>
       )}
       <AgentSkillsSection serverId={serverId} />
+      <ProviderAccountsSettingsSection serverId={serverId} />
       <AgentProfilesSection serverId={serverId} />
     </View>
   );
@@ -329,11 +335,28 @@ export function HostProvidersPage({ serverId }: { serverId: string }) {
 }
 
 export function HostUsagePage({ serverId }: { serverId: string }) {
+  const { supported: accountsSupported, refresh: refreshAccounts } = useProviderAccounts(serverId);
   const host = useHostProfile(serverId);
   const { view: providerUsageView, refresh: refreshProviderUsage } = useProviderUsage(serverId);
   const handleRefresh = useCallback(() => {
     void refreshProviderUsage();
-  }, [refreshProviderUsage]);
+    void refreshAccounts();
+  }, [refreshProviderUsage, refreshAccounts]);
+  const otherUsage = useMemo(
+    () =>
+      accountsSupported && providerUsageView.kind === "ready"
+        ? {
+            ...providerUsageView,
+            payload: {
+              ...providerUsageView.payload,
+              providers: providerUsageView.payload.providers.filter(
+                (provider) => provider.providerId !== "claude" && provider.providerId !== "codex",
+              ),
+            },
+          }
+        : providerUsageView,
+    [accountsSupported, providerUsageView],
+  );
 
   if (!host) {
     return <HostNotFound />;
@@ -341,7 +364,8 @@ export function HostUsagePage({ serverId }: { serverId: string }) {
 
   return (
     <View>
-      <ProviderUsageSettingsSection view={providerUsageView} onRefresh={handleRefresh} />
+      <ProviderAccountsUsageSection serverId={serverId} />
+      <ProviderUsageSettingsSection view={otherUsage} onRefresh={handleRefresh} />
     </View>
   );
 }

@@ -196,6 +196,11 @@ export async function startE2EWorker(
         NODE_ENV: "development",
         PATH: `${fakeEditorBin}${path.delimiter}${process.env.PATH ?? ""}`,
         PASEO_E2E_EDITOR_RECORD_PATH: editorRecordPath,
+        // The host CLI account is read from the provider's own home. Point both at empty
+        // worker directories, or a developer's real logins and live quota readings appear
+        // in the app under test and the suite stops being reproducible.
+        CLAUDE_CONFIG_DIR: path.join(paseoHome, "provider-home-claude"),
+        CODEX_HOME: path.join(paseoHome, "provider-home-codex"),
         ...options.environment,
       },
     });

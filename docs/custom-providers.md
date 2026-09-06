@@ -261,7 +261,7 @@ You can create multiple entries that extend the same built-in provider. Each get
 
 "Profile" here means a provider alias, and it is not an **Agent profile** — that is a named bundle of provider, model, mode, thinking option and features, stored under `daemon.agentProfiles`. See [glossary.md](glossary.md) for all four senses of the word.
 
-Example: two different Anthropic accounts as separate profiles:
+For Claude and Codex subscription logins, use [native provider accounts](provider-accounts.md). The following example configures two Anthropic API credentials as separate provider aliases:
 
 ```json
 {
@@ -270,7 +270,7 @@ Example: two different Anthropic accounts as separate profiles:
       "claude-work": {
         "extends": "claude",
         "label": "Claude (Work)",
-        "description": "Work Anthropic account",
+        "description": "Work Anthropic API credentials",
         "env": {
           "ANTHROPIC_API_KEY": "sk-ant-work-..."
         }
@@ -278,7 +278,7 @@ Example: two different Anthropic accounts as separate profiles:
       "claude-personal": {
         "extends": "claude",
         "label": "Claude (Personal)",
-        "description": "Personal Anthropic account",
+        "description": "Personal Anthropic API credentials",
         "env": {
           "ANTHROPIC_API_KEY": "sk-ant-personal-..."
         }

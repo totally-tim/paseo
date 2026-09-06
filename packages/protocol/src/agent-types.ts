@@ -1,3 +1,5 @@
+import type { AgentContinuationPolicy } from "./agent-continuation.js";
+import type { AccountSelection } from "./provider-accounts.js";
 import type { AgentAttachment } from "./messages.js";
 
 export type AgentProvider = string;
@@ -498,6 +500,8 @@ export interface ToolPolicy {
 }
 
 export interface AgentSessionConfig {
+  accountSelection?: AccountSelection;
+  continuationPolicy?: AgentContinuationPolicy;
   provider: AgentProvider;
   cwd: string;
   /**

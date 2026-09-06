@@ -109,6 +109,7 @@ export function toAgentPayload(
   });
 
   const payload: AgentSnapshotPayload = {
+    ...(agent.config.accountId ? { accountId: agent.config.accountId } : {}),
     id: agent.id,
     provider: agent.provider,
     cwd: agent.cwd,
@@ -220,6 +221,7 @@ export function buildStoredAgentPayload(
   return {
     id: record.id,
     provider: record.provider,
+    ...(record.config?.accountId ? { accountId: record.config.accountId } : {}),
     cwd: record.cwd,
     ...(record.workspaceId ? { workspaceId: record.workspaceId } : {}),
     model: record.config?.model ?? null,
@@ -254,6 +256,7 @@ export function toAgentListItemPayload(agent: AgentSnapshotPayload): AgentListIt
     shortId: agent.id.slice(0, 7),
     title: agent.title,
     provider: agent.provider,
+    ...(agent.accountId ? { accountId: agent.accountId } : {}),
     model: agent.runtimeInfo?.model ?? agent.model,
     thinkingOptionId: agent.thinkingOptionId,
     effectiveThinkingOptionId: agent.effectiveThinkingOptionId,
@@ -272,10 +275,11 @@ export function toAgentListItemPayload(agent: AgentSnapshotPayload): AgentListIt
 }
 
 export function toRecentProviderSessionDescriptorPayload(
-  session: ImportableProviderSession & { provider: string },
+  session: ImportableProviderSession & { provider: string; accountId?: string },
   options: RecentProviderSessionProjectionOptions,
 ): RecentProviderSessionDescriptorPayload {
   return {
+    accountId: session.accountId,
     providerId: session.provider,
     providerLabel: options.providerLabel,
     providerHandleId: session.providerHandleId,
@@ -304,8 +308,19 @@ export function resolveStoredAgentPayloadUpdatedAt(record: StoredAgentRecord): s
   return timestamps[0].raw;
 }
 
-function buildSerializableConfig(config: AgentSessionConfig): SerializableAgentConfig | null {
-  const serializable: SerializableAgentConfig = {};
+export function buildSerializableConfig(
+  config: AgentSessionConfig,
+): SerializableAgentConfig | null {
+  const serializable: SerializableAgentConfig = {
+    ...(config.accountId ? { accountId: config.accountId } : {}),
+    ...(config.accountSelection ? { accountSelection: config.accountSelection } : {}),
+    ...(config.continuationPolicy
+      ? { continuationPolicy: structuredClone(config.continuationPolicy) }
+      : {}),
+    ...(config.accountSelectionReason
+      ? { accountSelectionReason: config.accountSelectionReason }
+      : {}),
+  };
   if (config.modeId) {
     serializable.modeId = config.modeId;
   }

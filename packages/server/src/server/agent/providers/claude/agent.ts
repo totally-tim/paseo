@@ -1,8 +1,9 @@
+import { claudeLimitNotification } from "../../provider-limit.js";
+import { providerConfigDir } from "../../provider-account-context.js";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { promises } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
   type AgentDefinition,
@@ -1499,7 +1500,7 @@ export class ClaudeAgentClient implements AgentClient {
   private readonly queryFactory?: ClaudeQueryFactory;
   private readonly resolveBinary: () => Promise<string>;
   private readonly resolveVersion: (signal?: AbortSignal) => Promise<string>;
-  private readonly configDir?: string;
+  private readonly configDir: string;
 
   constructor(options: ClaudeAgentClientOptions) {
     this.defaults = options.defaults;
@@ -1510,7 +1511,9 @@ export class ClaudeAgentClient implements AgentClient {
     this.resolveVersion =
       options.resolveVersion ??
       ((signal) => resolveClaudeCodeVersion(this.runtimeSettings, signal));
-    this.configDir = options.configDir;
+    this.configDir =
+      options.configDir ??
+      providerConfigDir("claude", createProviderEnv({ runtimeSettings: this.runtimeSettings }));
   }
 
   resolveConfiguredModel(model: AgentModelDefinition): AgentModelDefinition {
@@ -1540,6 +1543,7 @@ export class ClaudeAgentClient implements AgentClient {
     overrides?: Partial<AgentSessionConfig>,
     launchContext?: AgentLaunchContext,
   ): Promise<AgentSession> {
+    assertClaudeSessionId(handle.nativeHandle ?? handle.sessionId);
     const metadata = coerceSessionMetadata(handle.metadata);
     const merged: Partial<AgentSessionConfig> = { ...metadata, ...overrides };
     if (!merged.cwd) {
@@ -1608,7 +1612,7 @@ export class ClaudeAgentClient implements AgentClient {
   async listImportableSessions(
     options?: ListImportableSessionsOptions,
   ): Promise<ImportableProviderSession[]> {
-    const configDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
+    const configDir = this.configDir;
     const sessionsRoot = options?.cwd
       ? claudeProjectDirSync(options.cwd, { configDir })
       : path.join(configDir, "projects");
@@ -4034,6 +4038,26 @@ class ClaudeAgentSession implements AgentSession {
     }
   }
 
+  private appendSessionCaptureEvents(message: SDKMessage, events: AgentStreamEvent[]): void {
+    if (message.type !== "system") {
+      const sessionCapture = this.captureSessionIdFromMessage(message);
+      if (sessionCapture.notice) {
+        events.push({
+          type: "timeline",
+          provider: "claude",
+          item: sessionCapture.notice,
+        });
+      }
+      if (sessionCapture.threadStartedSessionId) {
+        events.push({
+          type: "thread_started",
+          provider: "claude",
+          sessionId: sessionCapture.threadStartedSessionId,
+        });
+      }
+    }
+  }
+
   private translateMessageToEvents(
     message: SDKMessage,
     options?: {
@@ -4062,27 +4086,14 @@ class ClaudeAgentSession implements AgentSession {
       const card = this.buildSubagentToolCallCard(observation);
       if (card) events.push(card);
     }
-    if (message.type !== "system") {
-      const sessionCapture = this.captureSessionIdFromMessage(message);
-      if (sessionCapture.notice) {
-        events.push({
-          type: "timeline",
-          provider: "claude",
-          item: sessionCapture.notice,
-        });
-      }
-      if (sessionCapture.threadStartedSessionId) {
-        events.push({
-          type: "thread_started",
-          provider: "claude",
-          sessionId: sessionCapture.threadStartedSessionId,
-        });
-      }
-    }
+    this.appendSessionCaptureEvents(message, events);
 
     this.forgetReadSteer(message);
 
     switch (message.type) {
+      case "rate_limit_event":
+        this.appendRateLimitEvent(message, events);
+        break;
       case "system":
         this.appendSystemMessageEvents(message, events);
         break;
@@ -4191,6 +4202,14 @@ class ClaudeAgentSession implements AgentSession {
         },
       },
     };
+  }
+
+  private appendRateLimitEvent(
+    message: Extract<SDKMessage, { type: "rate_limit_event" }>,
+    events: AgentStreamEvent[],
+  ): void {
+    const item = claudeLimitNotification(message.rate_limit_info);
+    if (item) events.push({ type: "timeline", item, provider: "claude" });
   }
 
   private appendSidechainResultEvents(message: SDKMessage, events: AgentStreamEvent[]): void {
@@ -5003,9 +5022,10 @@ class ClaudeAgentSession implements AgentSession {
   }
 
   private resolveHistoryPath(sessionId: string): string | null {
+    assertClaudeSessionId(sessionId);
     const cwd = this.config.cwd;
     if (!cwd) return null;
-    const configDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
+    const configDir = providerConfigDir("claude", this.buildSdkEnv());
     const candidates = [cwd];
     try {
       const realCwd = fs.realpathSync(cwd);
@@ -6372,4 +6392,9 @@ function readClaudeCommandLifecycle(message: unknown): ClaudeCommandLifecycle | 
     commandUuid: record.command_uuid,
     state: record.state as ClaudeCommandLifecycle["state"],
   };
+}
+
+function assertClaudeSessionId(sessionId: string): void {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(sessionId))
+    throw new Error("Invalid Claude session identifier.");
 }

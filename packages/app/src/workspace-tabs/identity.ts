@@ -1,3 +1,6 @@
+import equal from "fast-deep-equal";
+import { AccountSelectionSchema } from "@getpaseo/protocol/provider-accounts";
+import { AgentContinuationPolicySchema } from "@getpaseo/protocol/agent-continuation";
 import { normalizeWorkspaceFileLocation, workspaceFileLocationsEqual } from "@/workspace/file-open";
 import type { WorkspaceDraftTabSetup, WorkspaceTabTarget } from "@/workspace-tabs/model";
 
@@ -84,9 +87,14 @@ export function normalizeWorkspaceDraftTabSetup(
   if (!provider || !cwd) {
     return undefined;
   }
+  const accountSelection = AccountSelectionSchema.safeParse(record.accountSelection);
+  const continuationPolicy = AgentContinuationPolicySchema.safeParse(record.continuationPolicy);
   return {
     provider,
     cwd,
+    // A creation failure must be retryable with the account and policy the user picked.
+    ...(accountSelection.success ? { accountSelection: accountSelection.data } : {}),
+    ...(continuationPolicy.success ? { continuationPolicy: continuationPolicy.data } : {}),
     modeId: trimOptionalString(typeof record.modeId === "string" ? record.modeId : null),
     model: trimOptionalString(typeof record.model === "string" ? record.model : null),
     thinkingOptionId: trimOptionalString(
@@ -171,6 +179,8 @@ function workspaceDraftTabSetupsEqual(
     left.modeId === right.modeId &&
     left.model === right.model &&
     left.thinkingOptionId === right.thinkingOptionId &&
+    equal(left.accountSelection, right.accountSelection) &&
+    equal(left.continuationPolicy, right.continuationPolicy) &&
     recordsShallowEqual(left.featureValues, right.featureValues)
   );
 }

@@ -1,3 +1,4 @@
+import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import type pino from "pino";
 import { createHash } from "node:crypto";
 import { getErrorMessage } from "@getpaseo/protocol/error-utils";
@@ -306,6 +307,7 @@ export class ProviderCatalogSession {
   }
 
   private buildDraftAgentSessionConfig(draftConfig: {
+    accountSelection?: AccountSelection;
     provider: AgentProvider;
     cwd: string;
     modeId?: string;
@@ -315,6 +317,7 @@ export class ProviderCatalogSession {
   }): AgentSessionConfig {
     return {
       provider: draftConfig.provider,
+      accountSelection: draftConfig.accountSelection,
       cwd: expandTilde(draftConfig.cwd),
       ...(draftConfig.modeId ? { modeId: draftConfig.modeId } : {}),
       ...(draftConfig.model ? { model: draftConfig.model } : {}),

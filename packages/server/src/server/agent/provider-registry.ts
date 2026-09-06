@@ -1,4 +1,5 @@
 import type { Logger } from "pino";
+import type { ProviderAccountContext } from "./provider-account-context.js";
 import type { ProviderOptions, ToolPolicy } from "@getpaseo/protocol/agent-types";
 import { z } from "zod";
 
@@ -91,7 +92,8 @@ export interface ProviderDefinition extends AgentProviderDefinition {
     config: AgentSessionConfig,
     toolPolicy: ToolPolicy | undefined,
   ) => AgentSessionConfig;
-  createClient: (logger: Logger) => AgentClient;
+  createClient: (logger: Logger, accountContext?: ProviderAccountContext) => AgentClient;
+  runtimeSettings?: ProviderRuntimeSettings;
   resolveCreateConfig: (input: ResolveAgentCreateConfigInput) => ResolveAgentCreateConfigResult;
   isCreateConfigUnattended: (input: AgentCreateConfigUnattendedInput) => boolean;
   /**
@@ -143,7 +145,7 @@ interface ResolvedProvider {
   enabled: boolean;
   derivedFromProviderId: string | null;
   providerParams?: unknown;
-  createBaseClient: (logger: Logger) => AgentClient;
+  createBaseClient: (logger: Logger, accountContext?: ProviderAccountContext) => AgentClient;
   contract: ProviderContract;
 }
 
@@ -632,8 +634,9 @@ function createRegistryEntry(
           : undefined,
       };
     },
-    createClient: (providerLogger: Logger) =>
-      createResolvedProviderClient(providerLogger, provider, resolved),
+    runtimeSettings: resolved.runtimeSettings,
+    createClient: (providerLogger: Logger, accountContext?: ProviderAccountContext) =>
+      createResolvedProviderClient(providerLogger, provider, resolved, accountContext),
     resolveCreateConfig: modelClient.resolveCreateConfig ?? resolveDefaultAgentCreateConfig,
     isCreateConfigUnattended:
       modelClient.isCreateConfigUnattended ?? isDefaultAgentCreateConfigUnattended,
@@ -687,8 +690,9 @@ function createResolvedProviderClient(
   logger: Logger,
   provider: AgentProvider,
   resolved: ResolvedProvider,
+  accountContext?: ProviderAccountContext,
 ): AgentClient {
-  const inner = resolved.createBaseClient(logger);
+  const inner = resolved.createBaseClient(logger, accountContext);
   const profileModels = resolveConfiguredModels(provider, inner, resolved.profileModels);
   const additionalModels = resolveConfiguredModels(provider, inner, resolved.additionalModels);
   const hasModelOverrides = profileModels.length > 0 || additionalModels.length > 0;
@@ -736,14 +740,18 @@ function buildResolvedBuiltinProviders(
       enabled: override?.enabled ?? definition.enabledByDefault ?? true,
       derivedFromProviderId: null,
       providerParams: override?.params,
-      createBaseClient: (logger) =>
-        factory(logger, mergedRuntimeSettings, {
-          workspaceGitService: options.workspaceGitService,
-          managedProcesses: options.managedProcesses,
-          ompRuntime: options.ompRuntime,
-          openCodeBridge: options.openCodeBridge,
-          providerParams: override?.params,
-        }),
+      createBaseClient: (logger, accountContext) =>
+        factory(
+          logger,
+          { ...mergedRuntimeSettings, accountContext },
+          {
+            workspaceGitService: options.workspaceGitService,
+            managedProcesses: options.managedProcesses,
+            ompRuntime: options.ompRuntime,
+            openCodeBridge: options.openCodeBridge,
+            providerParams: override?.params,
+          },
+        ),
       contract: PROVIDER_CONTRACTS[definition.id] ?? UNSUPPORTED_PROVIDER_CONTRACT,
     });
   }
@@ -847,17 +855,21 @@ function addDerivedProviders(
       enabled: override.enabled !== false,
       derivedFromProviderId: baseProviderId,
       providerParams,
-      createBaseClient: (logger) =>
-        baseFactory(logger, mergedRuntimeSettings, {
-          managedProcesses: options.managedProcesses,
-          openCodeBridge: options.openCodeBridge,
-          providerParams,
-          customProvider: {
-            id: providerId,
-            label: override.label ?? providerId,
-            extends: baseProviderId,
+      createBaseClient: (logger, accountContext) =>
+        baseFactory(
+          logger,
+          { ...mergedRuntimeSettings, accountContext },
+          {
+            managedProcesses: options.managedProcesses,
+            openCodeBridge: options.openCodeBridge,
+            providerParams,
+            customProvider: {
+              id: providerId,
+              label: override.label ?? providerId,
+              extends: baseProviderId,
+            },
           },
-        }),
+        ),
       contract: baseProvider.contract,
     });
   }

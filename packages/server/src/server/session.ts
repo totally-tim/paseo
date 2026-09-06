@@ -1,3 +1,7 @@
+import { handleContinuationRequest } from "./agent-continuation/session.js";
+import type { AgentContinuationService } from "./agent-continuation/service.js";
+import { handleAccountCatalog } from "./provider-accounts/account-catalog.js";
+import { handleAccountList, handleAccountOperation } from "./provider-accounts/account-session.js";
 import equal from "fast-deep-equal";
 import { v4 as uuidv4 } from "uuid";
 import { lstat, mkdir, mkdtemp, rename, rm, stat } from "node:fs/promises";
@@ -64,7 +68,10 @@ import { loadPersistedConfig } from "./persisted-config.js";
 import { releaseWorkspaceServicePortPlan } from "./workspace-service-port-registry.js";
 import { getErrorMessage, getErrorMessageOr } from "@getpaseo/protocol/error-utils";
 import { getAgentStatusPriority } from "@getpaseo/protocol/agent-state-bucket";
-import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
+import {
+  getParentAgentIdFromLabels,
+  HANDOFF_TO_AGENT_ID_LABEL,
+} from "@getpaseo/protocol/agent-labels";
 import type { WorkspaceGitRuntimeSnapshot, WorkspaceGitService } from "./workspace-git-service.js";
 import type { ProjectUpdate } from "./workspace-reconciliation-service.js";
 import {
@@ -121,6 +128,7 @@ import {
   type TimelineProjectionMode,
 } from "./agent/timeline-projection.js";
 import { buildAgentForkContextAttachment } from "./agent/activity-curator.js";
+import { handoffAgent } from "./agent/handoff-agent.js";
 import { buildAgentPrompt } from "./agent/prompt-attachments.js";
 import type { StructuredGenerationDaemonConfig } from "./agent/structured-generation-providers.js";
 import {
@@ -445,6 +453,7 @@ type AgentMcpTransportFactory = () => Promise<unknown>;
 
 export interface SessionOptions {
   clientId: string;
+  continuations?: AgentContinuationService;
   permissions: readonly DaemonPermission[];
   appVersion?: string | null;
   clientCapabilities?: Record<string, unknown> | null;
@@ -690,6 +699,8 @@ export class Session {
   private readonly pushNotifications: PushNotifications;
   private readonly pluginRuntime: SessionOptions["pluginRuntime"];
   private readonly orchestrationSkills: SessionOptions["orchestrationSkills"];
+  private unsubscribeContinuation?: () => void;
+  private readonly continuations?: AgentContinuationService;
   private unsubscribeAgentEvents: (() => void) | null = null;
   private unsubscribeProjectMutations: (() => void) | null = null;
   private unsubscribePluginChanges: (() => void) | null = null;
@@ -840,6 +851,7 @@ export class Session {
       logger: this.sessionLogger,
     });
     this.agentManager = agentManager;
+    this.continuations = options.continuations;
     this.agentStorage = agentStorage;
     this.projectRegistry = projectRegistry;
     this.workspaceRegistry = workspaceRegistry;
@@ -1688,10 +1700,14 @@ export class Session {
   }
 
   private subscribeToAgentEvents(): void {
+    this.unsubscribeContinuation?.();
     if (this.unsubscribeAgentEvents) {
       this.unsubscribeAgentEvents();
     }
 
+    this.unsubscribeContinuation = this.continuations?.subscribe((rootAgentId, agentId) => {
+      this.emit({ type: "agent.continuation.changed", payload: { rootAgentId, agentId } });
+    });
     this.unsubscribeAgentEvents = this.agentManager.subscribe(
       (event) => {
         if (event.type === "timeline_replacement") {
@@ -1820,6 +1836,7 @@ export class Session {
     const storedRecord = await this.agentStorage.get(payload.id);
     payload.title = storedRecord?.title ?? null;
     payload.archivedAt = storedRecord?.archivedAt ?? null;
+    payload.continuation = this.continuations?.statusFor(payload.id);
     return payload;
   }
 
@@ -1831,7 +1848,10 @@ export class Session {
     record: StoredAgentRecord,
     registeredProviderIds = new Set(this.providerSnapshotManager.listRegisteredProviderIds()),
   ): AgentSnapshotPayload {
-    return buildStoredAgentPayload(record, registeredProviderIds);
+    return {
+      ...buildStoredAgentPayload(record, registeredProviderIds),
+      continuation: this.continuations?.statusFor(record.id),
+    };
   }
 
   private isProviderVisibleToClient(provider: string): boolean {
@@ -2326,6 +2346,20 @@ export class Session {
       }
       case "agent.fork_context.request":
         return this.handleAgentForkContextRequest(msg);
+      case "provider.accounts.catalog.request":
+        return handleAccountCatalog(this.agentManager, msg, (message) => this.emit(message));
+      case "provider.accounts.list.request":
+        return handleAccountList(this.agentManager.accounts, msg, (message) => this.emit(message));
+      case "provider.accounts.manage.request":
+        return handleAccountOperation(this.agentManager.accounts, msg, (message) =>
+          this.emit(message),
+        );
+      case "agent.continuation.inspect.request":
+      case "agent.continuation.cancel.request":
+      case "agent.queue.manage.request":
+        return handleContinuationRequest(this.continuations, msg, (message) => this.emit(message));
+      case "agent.handoff.start.request":
+        return this.handleHandoffAgentRequest(msg);
       default:
         return undefined;
     }
@@ -2790,6 +2824,7 @@ export class Session {
   }
 
   private async handleDeleteAgentRequest(agentId: string, requestId: string): Promise<void> {
+    await this.agentManager.cancelContinuation(agentId);
     this.sessionLogger.info({ agentId }, `Deleting agent ${agentId} from registry`);
 
     const knownWorkspaceId =
@@ -2812,6 +2847,13 @@ export class Session {
     // Drain queued persistence from the just-closed agent before removing its
     // durable snapshot, otherwise an in-flight background write can recreate it.
     await this.agentManager.flush();
+
+    // Only now is the successor really stopped. Releasing its predecessor any earlier would
+    // let the predecessor take a prompt while this agent's turn was still running.
+    await this.continuations?.forget(agentId);
+    await this.agentManager.releaseHandoffLink(agentId).catch((error) => {
+      this.sessionLogger.warn({ err: error, agentId }, "Could not release the handoff link");
+    });
 
     try {
       await this.agentStorage.remove(agentId);
@@ -4385,6 +4427,8 @@ export class Session {
       if (!agent && draftConfig) {
         const sessionConfig: AgentSessionConfig = {
           provider: draftConfig.provider,
+          accountSelection: draftConfig.accountSelection,
+          continuationPolicy: draftConfig.continuationPolicy,
           cwd: expandTilde(draftConfig.cwd),
           ...(draftConfig.modeId ? { modeId: draftConfig.modeId } : {}),
           ...(draftConfig.model ? { model: draftConfig.model } : {}),
@@ -7169,6 +7213,18 @@ export class Session {
     return this.selectProjectedTimelineProjection(input);
   }
 
+  private async fetchSavedProjectionFallback(input: {
+    agentId: string;
+    projection: TimelineProjectionMode;
+    timeline: AgentTimelineFetchResult;
+    pageLimit: number;
+  }): Promise<AgentTimelineFetchResult | undefined> {
+    if (input.projection === "canonical" || !this.shouldUseFullTimelineForProjectedPage(input)) {
+      return undefined;
+    }
+    return this.agentManager.fetchSavedTimeline(input.agentId, { direction: "tail", limit: 0 });
+  }
+
   private async handleFetchAgentTimelineRequest(
     msg: Extract<SessionInboundMessage, { type: "fetch_agent_timeline_request" }>,
     source?: object,
@@ -7185,18 +7241,27 @@ export class Session {
       : undefined;
 
     try {
-      const snapshot = await ensureAgentLoaded(msg.agentId, {
-        agentManager: this.agentManager,
-        agentStorage: this.agentStorage,
-        logger: this.sessionLogger,
-      });
-      const agentPayload = await this.buildAgentPayload(snapshot);
+      const stored = await this.agentStorage.get(msg.agentId);
+      const handedOff = Boolean(stored?.labels[HANDOFF_TO_AGENT_ID_LABEL]);
+      const snapshot = handedOff
+        ? null
+        : await ensureAgentLoaded(msg.agentId, {
+            agentManager: this.agentManager,
+            agentStorage: this.agentStorage,
+            logger: this.sessionLogger,
+          });
+      const agentPayload = snapshot
+        ? await this.buildAgentPayload(snapshot)
+        : await this.enrichAgentPayload(this.buildStoredAgentPayload(stored!));
 
-      const fetchedControlTimeline = this.agentManager.fetchTimeline(msg.agentId, {
+      const fetchOptions = {
         direction,
         cursor,
         limit: pageLimit,
-      });
+      };
+      const fetchedControlTimeline = handedOff
+        ? await this.agentManager.fetchSavedTimeline(msg.agentId, fetchOptions)
+        : this.agentManager.fetchTimeline(msg.agentId, fetchOptions);
       const selectedTimeline = this.selectTimelineProjection({
         agentId: msg.agentId,
         projection,
@@ -7204,6 +7269,16 @@ export class Session {
         direction,
         ...(cursor ? { cursor } : {}),
         pageLimit,
+        ...(handedOff
+          ? {
+              fullTimeline: await this.fetchSavedProjectionFallback({
+                agentId: msg.agentId,
+                projection,
+                timeline: fetchedControlTimeline,
+                pageLimit,
+              }),
+            }
+          : {}),
       });
       const startCursor =
         selectedTimeline.startSeq !== null
@@ -7238,7 +7313,7 @@ export class Session {
             ...(msg.mergeWindow === true ? { mergeWindow: true } : {}),
             entries: entries.map((entry) => {
               const payloadEntry = {
-                provider: snapshot.provider,
+                provider: agentPayload.provider,
                 item: entry.item,
                 timestamp: entry.timestamp,
                 seqStart: entry.seqStart,
@@ -7523,6 +7598,55 @@ export class Session {
         },
       });
     }
+  }
+
+  private async handleHandoffAgentRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.handoff.start.request" }>,
+  ): Promise<void> {
+    try {
+      const record = await handoffAgent(
+        {
+          agentManager: this.agentManager,
+          agentStorage: this.agentStorage,
+          providerSnapshotManager: this.providerSnapshotManager,
+          logger: this.sessionLogger,
+          getWorkspace: (id) => this.workspaceRegistry.get(id),
+        },
+        msg,
+      );
+      const agent = await this.enrichAgentPayload(this.buildStoredAgentPayload(record));
+      this.emit({
+        type: "agent.handoff.start.response",
+        payload: { requestId: msg.requestId, sourceAgentId: msg.sourceAgentId, agent, error: null },
+      });
+    } catch (error) {
+      this.sessionLogger.warn(
+        { error: this.toClientHandoffError(error), sourceAgentId: msg.sourceAgentId },
+        "agent.handoff.start failed",
+      );
+      this.emit({
+        type: "agent.handoff.start.response",
+        payload: {
+          requestId: msg.requestId,
+          sourceAgentId: msg.sourceAgentId,
+          agent: null,
+          // A provider helper's exception can carry its raw stderr. Only our own messages ship.
+          error: this.toClientHandoffError(error),
+        },
+      });
+    }
+  }
+
+  /**
+   * Handoff runs provider helpers whose exceptions can carry raw stdout or RPC payloads.
+   * Only errors this daemon raised are safe to show; everything else gets a fixed message.
+   */
+  private toClientHandoffError(error: unknown): string {
+    if (error instanceof AgentRunCancellationError) return error.message;
+    const message = error instanceof Error ? error.message : "";
+    return message && message.length <= 400 && !/[\r\n]/.test(message)
+      ? message
+      : "The continuation could not be started. Check the source agent and its provider account.";
   }
 
   private async handleSendAgentMessageRequest(
@@ -7810,6 +7934,7 @@ export class Session {
     this.sessionLogger.trace({}, "agent.session.lifecycle.cleanup");
     this.isCleanedUp = true;
 
+    this.unsubscribeContinuation?.();
     if (this.unsubscribeAgentEvents) {
       this.unsubscribeAgentEvents();
       this.unsubscribeAgentEvents = null;

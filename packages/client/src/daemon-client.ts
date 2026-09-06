@@ -1,3 +1,4 @@
+import type { AccountOperation, AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import type { z } from "zod";
 import { CLIENT_CAPS, type ClientCapability } from "@getpaseo/protocol/client-capabilities";
 import type { AgentAttentionNotificationPayload } from "@getpaseo/protocol/agent-attention-notification";
@@ -15,6 +16,7 @@ import {
   DaemonUpdateResponseSchema,
   SessionInboundMessageSchema,
   type ActiveTurnBehavior,
+  type HandoffAgentRequestMessage,
   type ServerInfoStatusPayload,
 } from "@getpaseo/protocol/messages";
 import { validateWSOutboundMessage } from "@getpaseo/protocol/validation/ws-outbound";
@@ -181,6 +183,7 @@ const perfNow: () => number =
 const PROJECT_GITHUB_CLONE_TIMEOUT_MS = 5 * 60 * 1000;
 
 interface ImportAgentInputBase {
+  accountId?: string;
   cwd?: string;
   workspaceId?: string;
   labels?: Record<string, string>;
@@ -733,6 +736,7 @@ export interface CreateScheduleOptions {
         type: "new-agent";
         config: {
           provider: AgentProvider;
+          accountSelection?: AccountSelection;
           cwd: string;
           modeId?: string;
           model?: string;
@@ -756,6 +760,7 @@ export interface InspectScheduleOptions {
 }
 export interface UpdateScheduleNewAgentConfig {
   provider?: string;
+  accountSelection?: AccountSelection | null;
   model?: string | null;
   modeId?: string | null;
   thinkingOptionId?: string | null;
@@ -2092,6 +2097,7 @@ export class DaemonClient {
     const message = SessionInboundMessageSchema.parse({
       type: "fetch_recent_provider_sessions_request",
       requestId: resolvedRequestId,
+      ...(options?.accountId ? { accountId: options.accountId } : {}),
       ...(options?.cwd ? { cwd: options.cwd } : {}),
       ...(options?.providers ? { providers: options.providers } : {}),
       ...(options?.since ? { since: options.since } : {}),
@@ -2494,9 +2500,29 @@ export class DaemonClient {
   // Agent Lifecycle
   // ============================================================================
 
+  private requireContinuationSupport(config: AgentSessionConfig): void {
+    if (
+      config.continuationPolicy &&
+      this.lastServerInfoMessage?.features?.agentContinuation !== true
+    )
+      throw new Error("Update this host to start a profile with automatic continuation.");
+    this.requireAccountSupport(config.accountSelection);
+  }
+
+  /**
+   * An older host drops the account fields from the request and launches with whatever
+   * credentials it already has, which would silently spend the wrong subscription.
+   */
+  private requireAccountSupport(selection: AccountSelection | null | undefined): void {
+    if (!selection || selection.kind === "default") return;
+    if (this.lastServerInfoMessage?.features?.providerAccounts !== true)
+      throw new Error("Update this host to start an agent with a selected provider account.");
+  }
+
   async createAgent(options: CreateAgentRequestOptions): Promise<AgentSnapshotPayload> {
     const requestId = this.createRequestId(options.requestId);
     const config = resolveAgentConfig(options);
+    this.requireContinuationSupport(config);
 
     const message = SessionInboundMessageSchema.parse({
       type: "create_agent_request",
@@ -2545,6 +2571,79 @@ export class DaemonClient {
     }
 
     return status.agent;
+  }
+
+  async getProviderAccountCatalog(
+    input: Omit<
+      Extract<SessionInboundMessage, { type: "provider.accounts.catalog.request" }>,
+      "type" | "requestId"
+    >,
+    requestId?: string,
+  ) {
+    return this.sendNamespacedCorrelatedSessionRequest<"provider.accounts.catalog.response">({
+      requestId,
+      message: { type: "provider.accounts.catalog.request", ...input },
+    });
+  }
+
+  async listProviderAccounts(requestId?: string) {
+    return this.sendNamespacedCorrelatedSessionRequest<"provider.accounts.list.response">({
+      requestId,
+      message: { type: "provider.accounts.list.request" },
+    });
+  }
+
+  async manageProviderAccount(operation: AccountOperation, requestId?: string) {
+    return this.sendNamespacedCorrelatedSessionRequest<"provider.accounts.manage.response">({
+      requestId,
+      message: { type: "provider.accounts.manage.request", operation },
+    });
+  }
+
+  async inspectAgentContinuation(agentId: string) {
+    return this.sendNamespacedCorrelatedSessionRequest<"agent.continuation.inspect.response">({
+      requestId: this.createRequestId(),
+      message: { type: "agent.continuation.inspect.request", agentId },
+    });
+  }
+
+  async cancelAgentContinuation(agentId: string) {
+    return this.sendNamespacedCorrelatedSessionRequest<"agent.continuation.cancel.response">({
+      requestId: this.createRequestId(),
+      message: { type: "agent.continuation.cancel.request", agentId },
+    });
+  }
+
+  async manageAgentQueue(
+    agentId: string,
+    operation: import("@getpaseo/protocol/messages").AgentQueueOperation,
+  ) {
+    return this.sendNamespacedCorrelatedSessionRequest<"agent.queue.manage.response">({
+      requestId: this.createRequestId(),
+      message: { type: "agent.queue.manage.request", agentId, operation },
+    });
+  }
+
+  async handoffAgent(
+    input: Omit<HandoffAgentRequestMessage, "type" | "requestId">,
+  ): Promise<AgentSnapshotPayload> {
+    const requestId = this.createRequestId();
+    const payload = await this.sendRequest({
+      requestId,
+      message: SessionInboundMessageSchema.parse({
+        ...input,
+        type: "agent.handoff.start.request",
+        requestId,
+      }),
+      options: { skipQueue: true },
+      timeout: 300_000, // Includes source shutdown, provider startup, and first prompt dispatch.
+      select: (msg) =>
+        msg.type === "agent.handoff.start.response" && msg.payload.requestId === requestId
+          ? msg.payload
+          : null,
+    });
+    if (payload.error || !payload.agent) throw new Error(payload.error ?? "Handoff failed");
+    return payload.agent;
   }
 
   async deleteAgent(agentId: string): Promise<void> {
@@ -2809,6 +2908,7 @@ export class DaemonClient {
     const message = SessionInboundMessageSchema.parse({
       type: "import_agent_request",
       requestId,
+      ...(input.accountId ? { accountId: input.accountId } : {}),
       ...("providerId" in input
         ? { providerId: input.providerId, providerHandleId: input.providerHandleId }
         : { provider: input.provider, sessionId: input.sessionId }),

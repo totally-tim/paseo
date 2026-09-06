@@ -1,3 +1,5 @@
+import { AgentContinuationPolicySchema } from "@getpaseo/protocol/agent-continuation";
+import { AccountSelectionSchema } from "@getpaseo/protocol/provider-accounts";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useState } from "react";
 import { create } from "zustand";
@@ -108,6 +110,7 @@ interface WorkspaceLayoutStore {
   explorerSidebarWidthByWorkspace: Record<string, number>;
   pinnedAgentIdsByWorkspace: Record<string, Set<string>>;
   pendingAgentIdsByWorkspace: Record<string, Set<string>>;
+  continuationPendingIdsByWorkspace: Record<string, Set<string>>;
   hiddenAgentIdsByWorkspace: Record<string, Set<string>>;
   focusRestorationByWorkspace: Record<string, WorkspaceFocusRestorationState>;
   explorerSidebarPaneIdByWorkspace: Record<string, string | null>;
@@ -127,6 +130,12 @@ interface WorkspaceLayoutStore {
     target: WorkspaceTabTarget,
     state?: JsonValue,
   ) => string | null;
+  retargetAgentContinuation: (
+    workspaceKey: string,
+    tabId: string,
+    sourceId: string,
+    agentId: string,
+  ) => void;
   setTabState: (workspaceKey: string, tabId: string, state: JsonValue | undefined) => void;
   convertDraftToAgent: (workspaceKey: string, tabId: string, agentId: string) => string | null;
   reconcileTabs: (workspaceKey: string, snapshot: WorkspaceTabSnapshot) => void;
@@ -177,6 +186,8 @@ interface WorkspaceFocusRestorationState {
 const MAX_TREE_DEPTH = 5;
 
 const WorkspaceDraftTabSetupStorageSchema = z.strictObject({
+  accountSelection: AccountSelectionSchema.optional(),
+  continuationPolicy: AgentContinuationPolicySchema.optional(),
   provider: z.string(),
   cwd: z.string(),
   modeId: z.string().nullable(),
@@ -765,6 +776,7 @@ export function createWorkspaceLayoutStore(
         explorerSidebarWidthByWorkspace: {},
         pinnedAgentIdsByWorkspace: {},
         pendingAgentIdsByWorkspace: {},
+        continuationPendingIdsByWorkspace: {},
         hiddenAgentIdsByWorkspace: {},
         focusRestorationByWorkspace: {},
         explorerSidebarPaneIdByWorkspace: {},
@@ -1138,6 +1150,46 @@ export function createWorkspaceLayoutStore(
           }));
           return result.tabId;
         },
+        retargetAgentContinuation: (workspaceKey, tabId, sourceId, agentId) => {
+          set((state) => {
+            let layout = getWorkspaceLayout(state.layoutByWorkspace, workspaceKey);
+            const source = collectAllTabs(layout.root).find((tab) => tab.tabId === tabId);
+            if (source?.target.kind !== "agent" || source.target.agentId !== sourceId) return state;
+            // Directory reconciliation may have opened the successor before this event arrived.
+            // Closing it focuses that pane's next tab, which a background transition must not do.
+            const focusedPaneId = layout.focusedPaneId;
+            for (const tab of collectAllTabs(layout.root)) {
+              if (
+                tab.tabId !== tabId &&
+                tab.target.kind === "agent" &&
+                tab.target.agentId === agentId
+              )
+                layout = closeTabInLayout({ layout, tabId: tab.tabId }) ?? layout;
+            }
+            if (layout.focusedPaneId !== focusedPaneId) layout = { ...layout, focusedPaneId };
+            const replaced = replaceTabTargetInLayout({
+              layout,
+              tabId,
+              target: { kind: "agent", agentId },
+              createTabId: createWorkspaceTabInstanceId,
+              state: source.state,
+            });
+            if (!replaced) return state;
+            return {
+              continuationPendingIdsByWorkspace: addAgentIdToWorkspaceSet(
+                state.continuationPendingIdsByWorkspace,
+                workspaceKey,
+                agentId,
+              ),
+              hiddenAgentIdsByWorkspace: addAgentIdToWorkspaceSet(
+                state.hiddenAgentIdsByWorkspace,
+                workspaceKey,
+                sourceId,
+              ),
+              layoutByWorkspace: { ...state.layoutByWorkspace, [workspaceKey]: replaced.layout },
+            };
+          });
+        },
         setTabState: (workspaceKey, tabId, tabState) => {
           const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);
           const normalizedTabId = trimNonEmpty(tabId);
@@ -1211,8 +1263,14 @@ export function createWorkspaceLayoutStore(
             const nextState = reconcileWorkspaceTabs(
               {
                 layout: currentLayout,
-                pinnedAgentIds: state.pinnedAgentIdsByWorkspace[normalizedWorkspaceKey] ?? null,
-                pendingAgentIds: state.pendingAgentIdsByWorkspace[normalizedWorkspaceKey] ?? null,
+                pinnedAgentIds: new Set([
+                  ...(state.pinnedAgentIdsByWorkspace[normalizedWorkspaceKey] ?? []),
+                  ...(state.continuationPendingIdsByWorkspace[normalizedWorkspaceKey] ?? []),
+                ]),
+                pendingAgentIds: new Set([
+                  ...(state.pendingAgentIdsByWorkspace[normalizedWorkspaceKey] ?? []),
+                  ...(state.continuationPendingIdsByWorkspace[normalizedWorkspaceKey] ?? []),
+                ]),
                 hiddenAgentIds: state.hiddenAgentIdsByWorkspace[normalizedWorkspaceKey] ?? null,
                 explorerSidebarPaneId,
               },
@@ -1223,11 +1281,30 @@ export function createWorkspaceLayoutStore(
               explorerSidebarPaneId,
               currentLayout.focusedPaneId,
             );
-            if (nextLayout === rawLayout) {
+            let continuationPendingIdsByWorkspace = state.continuationPendingIdsByWorkspace;
+            // Protection ends when the successor arrives, and also when it is archived or
+            // deleted elsewhere; otherwise its tab stays pinned to a workspace forever.
+            const protectedIds =
+              state.continuationPendingIdsByWorkspace[normalizedWorkspaceKey] ?? [];
+            const active = new Set(snapshot.activeAgentIds);
+            const known = new Set([...active, ...snapshot.knownAgentIds]);
+            for (const id of protectedIds) {
+              if (active.has(id) || (snapshot.agentsHydrated && !known.has(id)))
+                continuationPendingIdsByWorkspace = removeAgentIdFromWorkspaceSet(
+                  continuationPendingIdsByWorkspace,
+                  normalizedWorkspaceKey,
+                  id,
+                );
+            }
+            if (
+              nextLayout === rawLayout &&
+              continuationPendingIdsByWorkspace === state.continuationPendingIdsByWorkspace
+            ) {
               return state;
             }
 
             return {
+              continuationPendingIdsByWorkspace,
               layoutByWorkspace: {
                 ...state.layoutByWorkspace,
                 [normalizedWorkspaceKey]: nextLayout,

@@ -1737,6 +1737,39 @@ describe("ClaudeAgentSession context window usage", () => {
     });
   }
 
+  test("native rejected capacity emits a continuation notification without classifying warnings as exhaustion", async () => {
+    const session = await createSessionForTest();
+    try {
+      const events = session.translateMessageToEvents({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "rejected", resetsAt: 1800000000, rateLimitType: "five_hour" },
+      } as unknown as SDKMessage);
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "timeline",
+          item: expect.objectContaining({
+            type: "notification",
+            code: "provider_capacity",
+            resetsAt: "2027-01-15T08:00:00.000Z",
+            message: expect.stringContaining("Continue with"),
+          }),
+        }),
+      );
+      const allowed = session.translateMessageToEvents({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "allowed_warning", rateLimitType: "five_hour" },
+      } as unknown as SDKMessage);
+      expect(allowed).not.toContainEqual(
+        expect.objectContaining({
+          type: "timeline",
+          item: expect.objectContaining({ code: "provider_capacity" }),
+        }),
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
   test("emits canonical task snapshots from Claude TaskCreate results", async () => {
     const session = await createSessionForTest();
     try {

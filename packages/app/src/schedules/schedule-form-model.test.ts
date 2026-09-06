@@ -760,3 +760,29 @@ describe("schedule form model", () => {
     });
   });
 });
+
+it("retains a schedule's account through catalog refresh and clears it on a provider or host change", () => {
+  const schedule = scheduleOnHost({
+    serverId: "host-a",
+    serverName: "Host A",
+    cwd: "/repo/a",
+    model: "model-a",
+  });
+  if (schedule.target.type !== "new-agent") throw new Error("Expected new-agent schedule");
+  schedule.target.config.accountSelection = { kind: "fixed", accountId: "account-a" };
+  const form = open({
+    mode: "edit",
+    schedule,
+    defaults: { serverId: "host-a", projectTargets: PROJECT_TARGETS, preferences: {} },
+  });
+  form.applyProviderSnapshot("host-a", providerSnapshot(HOST_A_MODELS));
+  expect(form.getState().accountSelection).toEqual(schedule.target.config.accountSelection);
+  form.setModel("mock", "model-a");
+  expect(form.getState().accountSelection).toEqual(schedule.target.config.accountSelection);
+  form.setModel("codex", "new-model");
+  expect(form.getState().accountSelection).toBeUndefined();
+  form.setAccountSelection({ kind: "automatic" });
+  expect(form.getState().accountSelection).toEqual({ kind: "automatic" });
+  form.setHost("host-b");
+  expect(form.getState().accountSelection).toBeUndefined();
+});

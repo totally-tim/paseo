@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AccountSelectionSchema } from "../provider-accounts.js";
 import {
   ScheduleCadenceSchema,
   ScheduleRunSchema,
@@ -79,6 +80,7 @@ export const ScheduleRunOnceRequestSchema = z.object({
 
 const ScheduleUpdateNewAgentConfigSchema = z.object({
   provider: z.string().trim().min(1).optional(),
+  accountSelection: AccountSelectionSchema.nullable().optional(),
   model: z.string().trim().min(1).nullable().optional(),
   modeId: z.string().trim().min(1).nullable().optional(),
   thinkingOptionId: z.string().trim().min(1).nullable().optional(),

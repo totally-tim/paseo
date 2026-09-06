@@ -21,7 +21,8 @@ export type AgentRunController = Pick<
   | "replaceAgentRun"
   | "steerOrReplaceActiveTurn"
   | "streamAgent"
->;
+> &
+  Partial<Pick<AgentManager, "assertAgentCanAcceptPrompt">>;
 
 export interface StartAgentRunOptions {
   replaceRunning?: boolean;
@@ -78,6 +79,14 @@ async function startOrReplaceRun(
   return { iterator, replaced };
 }
 
+function assertPromptOwnership(
+  manager: AgentRunController,
+  agentId: string,
+  options?: StartAgentRunOptions,
+) {
+  manager.assertAgentCanAcceptPrompt?.(agentId, options?.runOptions?.continuationOperationId);
+}
+
 export async function startAgentRun(
   agentManager: AgentRunController,
   agentId: string,
@@ -85,6 +94,7 @@ export async function startAgentRun(
   logger: Logger,
   options?: StartAgentRunOptions,
 ): Promise<{ disposition: PromptDispatchDisposition }> {
+  assertPromptOwnership(agentManager, agentId, options);
   const snapshot = agentManager.getAgent(agentId);
   logger.trace(
     {
@@ -189,6 +199,8 @@ export interface SendPromptToAgentParams {
   prompt: AgentPromptInput;
   messageId?: string;
   activeTurnBehavior?: ActiveTurnBehavior;
+  /** Automatic dispatch must never interrupt a turn another caller started. */
+  replaceRunning?: boolean;
   runOptions?: AgentRunOptions;
   /** Optional mode to set on the agent before the run starts. */
   sessionMode?: string;
@@ -288,7 +300,7 @@ export async function sendPromptToAgent(
     : params.runOptions;
 
   return await startAgentRun(params.agentManager, params.agentId, params.prompt, params.logger, {
-    replaceRunning: true,
+    replaceRunning: params.replaceRunning ?? true,
     activeTurnBehavior: params.activeTurnBehavior,
     clearPendingPermissions: params.clearPendingPermissions,
     runOptions,

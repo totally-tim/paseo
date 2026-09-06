@@ -1,8 +1,12 @@
+import type { AgentContinuationPolicy } from "@getpaseo/protocol/agent-continuation";
+import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import type { AgentProvider } from "@getpaseo/protocol/agent-types";
 import type { JsonValue } from "@getpaseo/protocol/agent-types";
 import type { WorkspaceFileTabTarget } from "@/workspace/file-open";
 
 export interface WorkspaceDraftTabSetup {
+  accountSelection?: AccountSelection;
+  continuationPolicy?: AgentContinuationPolicy;
   provider: AgentProvider;
   cwd: string;
   modeId: string | null;

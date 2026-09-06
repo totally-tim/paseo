@@ -1,3 +1,17 @@
+import {
+  AgentContinuationPolicySchema,
+  AgentContinuationStatusSchema,
+} from "./agent-continuation.js";
+import {
+  ProviderAccountCatalogRequestSchema,
+  AccountSelectionSchema,
+  AccountPolicySchema,
+  AccountLoginSchema,
+  AccountProviderSchema,
+  ProviderAccountSchema,
+  ProviderAccountsListRequestSchema,
+  ProviderAccountsManageRequestSchema,
+} from "./provider-accounts.js";
 import { z } from "zod";
 import { TerminalActivitySchema } from "./terminal-activity.js";
 import { CLIENT_CAPS } from "./client-capabilities.js";
@@ -169,6 +183,8 @@ export const AgentProfileSchema = z
     /** An identity colour name shared with host badges. Unknown values draw unthemed. */
     color: z.string().optional(),
     provider: z.string(),
+    accountSelection: AccountSelectionSchema.optional(),
+    continuationPolicy: AgentContinuationPolicySchema.optional(),
     model: z.string().optional(),
     modeId: z.string().optional(),
     thinkingOptionId: z.string().optional(),
@@ -477,6 +493,8 @@ const ToolPolicySchema = z
 
 const AgentSessionConfigSchema = z.object({
   provider: AgentProviderSchema,
+  accountSelection: AccountSelectionSchema.optional(),
+  continuationPolicy: AgentContinuationPolicySchema.optional(),
   cwd: z.string(),
   modeId: z.string().optional(),
   model: z.string().optional(),
@@ -737,6 +755,9 @@ export const AgentTimelineItemPayloadSchema: z.ZodType<AgentTimelineItem, unknow
   }),
   z.object({
     type: z.literal("notification"),
+    code: z.string().optional(),
+    resetsAt: z.string().optional(),
+    capacityScope: z.enum(["account", "model"]).optional(),
     level: z.enum(["info", "warning", "error"]),
     message: z.string(),
   }),
@@ -849,6 +870,8 @@ const AgentActiveTurnPayloadSchema = z.object({
 });
 
 export const AgentSnapshotPayloadSchema = z.object({
+  continuation: AgentContinuationStatusSchema.optional(),
+  accountId: z.string().optional(),
   id: z.string(),
   provider: AgentProviderSchema,
   cwd: z.string(),
@@ -882,6 +905,7 @@ export const AgentSnapshotPayloadSchema = z.object({
 export type AgentSnapshotPayload = z.infer<typeof AgentSnapshotPayloadSchema>;
 
 export const AgentListItemPayloadSchema = z.object({
+  accountId: z.string().optional(),
   id: z.string(),
   shortId: z.string(),
   title: z.string().nullable(),
@@ -907,6 +931,7 @@ export type AgentListItemPayload = z.infer<typeof AgentListItemPayloadSchema>;
 export type AgentStreamEventPayload = z.infer<typeof AgentStreamEventPayloadSchema>;
 
 export const RecentProviderSessionDescriptorPayloadSchema = z.object({
+  accountId: z.string().optional(),
   providerId: z.string(),
   providerLabel: z.string(),
   providerHandleId: z.string(),
@@ -1242,6 +1267,85 @@ const ImageAttachmentSchema = z.object({
   mimeType: z.string(), // e.g., "image/jpeg", "image/png"
 });
 
+export const AgentQueuedMessageInputSchema = z.object({
+  id: z.string().min(1).max(200),
+  text: z.string().max(1000000),
+  images: z.array(ImageAttachmentSchema).max(32).optional(),
+  attachments: z.array(AgentAttachmentSchema).max(100).optional(),
+});
+export const AgentQueuedMessageSchema = AgentQueuedMessageInputSchema.extend({
+  revision: z.number().int().positive(),
+  status: z.enum(["queued", "dispatching", "attention"]),
+  createdAt: z.string(),
+  error: z.string().optional(),
+});
+export type AgentQueuedMessageInput = z.infer<typeof AgentQueuedMessageInputSchema>;
+export type AgentQueuedMessage = z.infer<typeof AgentQueuedMessageSchema>;
+export const AgentContinuationSnapshotSchema = z.object({
+  rootAgentId: z.string(),
+  agentId: z.string(),
+  continuation: AgentContinuationStatusSchema.nullable(),
+  queuedMessages: z.array(AgentQueuedMessageSchema),
+  /** When the inspected agent stopped owning the task; null while it is the current agent. */
+  retiredAt: z.string().nullable().optional(),
+});
+export type AgentContinuationSnapshot = z.infer<typeof AgentContinuationSnapshotSchema>;
+export const AgentContinuationInspectRequestSchema = z.object({
+  type: z.literal("agent.continuation.inspect.request"),
+  requestId: z.string(),
+  agentId: z.string(),
+});
+export const AgentContinuationCancelRequestSchema = z.object({
+  type: z.literal("agent.continuation.cancel.request"),
+  requestId: z.string(),
+  agentId: z.string(),
+});
+export const AgentQueueOperationSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("enqueue"), message: AgentQueuedMessageInputSchema }),
+  z.object({
+    kind: z.literal("edit"),
+    message: AgentQueuedMessageInputSchema,
+    revision: z.number().int().positive(),
+  }),
+  z.object({ kind: z.literal("cancel"), messageId: z.string() }),
+  z.object({ kind: z.literal("send_now"), messageId: z.string() }),
+]);
+export type AgentQueueOperation = z.infer<typeof AgentQueueOperationSchema>;
+export const AgentQueueManageRequestSchema = z.object({
+  type: z.literal("agent.queue.manage.request"),
+  requestId: z.string(),
+  agentId: z.string(),
+  operation: AgentQueueOperationSchema,
+});
+export const AgentContinuationInspectResponseSchema = z.object({
+  type: z.literal("agent.continuation.inspect.response"),
+  payload: z.object({
+    requestId: z.string(),
+    snapshot: AgentContinuationSnapshotSchema.nullable(),
+    error: z.string().nullable(),
+  }),
+});
+export const AgentContinuationCancelResponseSchema = z.object({
+  type: z.literal("agent.continuation.cancel.response"),
+  payload: z.object({
+    requestId: z.string(),
+    snapshot: AgentContinuationSnapshotSchema.nullable(),
+    error: z.string().nullable(),
+  }),
+});
+export const AgentQueueManageResponseSchema = z.object({
+  type: z.literal("agent.queue.manage.response"),
+  payload: z.object({
+    requestId: z.string(),
+    snapshot: AgentContinuationSnapshotSchema.nullable(),
+    error: z.string().nullable(),
+  }),
+});
+export const AgentContinuationChangedSchema = z.object({
+  type: z.literal("agent.continuation.changed"),
+  payload: z.object({ rootAgentId: z.string(), agentId: z.string() }),
+});
+
 export const ActiveTurnBehaviorSchema = z.enum(["interrupt", "steer"]);
 export type ActiveTurnBehavior = z.infer<typeof ActiveTurnBehaviorSchema>;
 
@@ -1381,6 +1485,7 @@ export const FetchAgentHistoryRequestMessageSchema = z.object({
 });
 
 export const FetchRecentProviderSessionsRequestMessageSchema = z.object({
+  accountId: z.string().optional(),
   type: z.literal("fetch_recent_provider_sessions_request"),
   requestId: z.string(),
   cwd: z.string().optional(),
@@ -1757,6 +1862,7 @@ export const ResumeAgentRequestMessageSchema = z.object({
 });
 
 export const ImportAgentRequestMessageSchema = z.object({
+  accountId: z.string().optional(),
   type: z.literal("import_agent_request"),
   provider: AgentProviderSchema.optional(),
   providerId: z.string().optional(),
@@ -1850,6 +1956,21 @@ export const AgentForkContextRequestMessageSchema = z.object({
   boundaryMessageId: z.string().optional(),
   requestId: z.string(),
 });
+
+export const HandoffAgentRequestMessageSchema = z.object({
+  type: z.literal("agent.handoff.start.request"),
+  sourceAgentId: z.string(),
+  provider: AgentProviderSchema,
+  accountSelection: AccountSelectionSchema.optional(),
+  continuationPolicy: AgentContinuationPolicySchema.optional(),
+  model: z.string().optional(),
+  modeId: z.string().optional(),
+  thinkingOptionId: z.string().optional(),
+  featureValues: z.record(z.string(), z.unknown()).optional(),
+  briefing: z.string().max(24000).optional(),
+  requestId: z.string(),
+});
+export type HandoffAgentRequestMessage = z.infer<typeof HandoffAgentRequestMessageSchema>;
 
 export const SetAgentModeRequestMessageSchema = z.object({
   type: z.literal("set_agent_mode_request"),
@@ -2805,6 +2926,8 @@ export const PingMessageSchema = z.object({
 });
 
 const ListCommandsDraftConfigSchema = z.object({
+  accountSelection: AccountSelectionSchema.optional(),
+  continuationPolicy: AgentContinuationPolicySchema.optional(),
   provider: AgentProviderSchema,
   cwd: z.string(),
   modeId: z.string().optional(),
@@ -3147,6 +3270,13 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ProviderSubagentTimelineRequestMessageSchema,
   SetAgentTimelineSubscriptionRequestMessageSchema,
   AgentForkContextRequestMessageSchema,
+  HandoffAgentRequestMessageSchema,
+  ProviderAccountCatalogRequestSchema,
+  ProviderAccountsListRequestSchema,
+  ProviderAccountsManageRequestSchema,
+  AgentContinuationInspectRequestSchema,
+  AgentContinuationCancelRequestSchema,
+  AgentQueueManageRequestSchema,
   SetAgentModeRequestMessageSchema,
   SetAgentModelRequestMessageSchema,
   SetAgentThinkingRequestMessageSchema,
@@ -3511,6 +3641,9 @@ export const ServerInfoStatusPayloadSchema = z
         daemonSelfUpdate: z.boolean().optional(),
         // COMPAT(agentForkContext): added in v0.1.102, remove gate after 2026-12-28.
         agentForkContext: z.boolean().optional(),
+        agentHandoff: z.boolean().optional(),
+        providerAccounts: z.boolean().optional(),
+        agentContinuation: z.boolean().optional(),
         // COMPAT(agentForkContextCursor): added in v0.1.108, remove gate after 2027-01-14.
         agentForkContextCursor: z.boolean().optional(),
         // COMPAT(providerSubagents): added in v0.1.107, remove gate after 2027-01-12.
@@ -4611,6 +4744,16 @@ export const AgentForkContextResponseMessageSchema = z.object({
     itemCount: z.number().int().nonnegative(),
     boundaryMessageId: z.string().nullable(),
     boundaryCursor: AgentTimelineCursorSchema.nullable().optional(),
+    error: z.string().nullable(),
+  }),
+});
+
+export const HandoffAgentResponseMessageSchema = z.object({
+  type: z.literal("agent.handoff.start.response"),
+  payload: z.object({
+    requestId: z.string(),
+    sourceAgentId: z.string(),
+    agent: AgentSnapshotPayloadSchema.nullable(),
     error: z.string().nullable(),
   }),
 });
@@ -5969,6 +6112,45 @@ export const ProviderUsageSchema = z.object({
   error: z.string().nullable().optional(),
 });
 
+export const ProviderAccountCatalogResponseSchema = z.object({
+  type: z.literal("provider.accounts.catalog.response"),
+  payload: z.object({
+    requestId: z.string(),
+    accountId: z.string().nullable(),
+    reason: z.string(),
+    entry: ProviderSnapshotEntrySchema.nullable(),
+    error: z.string().nullable(),
+  }),
+});
+export const ProviderAccountsListResponseSchema = z.object({
+  type: z.literal("provider.accounts.list.response"),
+  payload: z.object({
+    requestId: z.string(),
+    error: z.string().nullable(),
+    accounts: z.array(ProviderAccountSchema),
+    policy: AccountPolicySchema.nullable(),
+    usage: z.array(
+      z.object({ accountId: z.string(), usage: ProviderUsageSchema, stale: z.boolean() }),
+    ),
+    next: z.array(
+      z.object({
+        provider: AccountProviderSchema,
+        accountId: z.string().nullable(),
+        reason: z.string(),
+      }),
+    ),
+  }),
+});
+export const ProviderAccountsManageResponseSchema = z.object({
+  type: z.literal("provider.accounts.manage.response"),
+  payload: z.object({
+    requestId: z.string(),
+    error: z.string().nullable(),
+    account: ProviderAccountSchema.nullable(),
+    login: AccountLoginSchema.nullable(),
+  }),
+});
+
 export const ProviderUsageListResponseMessageSchema = z.object({
   type: z.literal("provider.usage.list.response"),
   payload: z.object({
@@ -6506,6 +6688,14 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   SetAgentTimelineSubscriptionResponseMessageSchema,
   AgentAttentionRequiredMessageSchema,
   AgentForkContextResponseMessageSchema,
+  HandoffAgentResponseMessageSchema,
+  ProviderAccountCatalogResponseSchema,
+  ProviderAccountsListResponseSchema,
+  ProviderAccountsManageResponseSchema,
+  AgentContinuationInspectResponseSchema,
+  AgentContinuationCancelResponseSchema,
+  AgentQueueManageResponseSchema,
+  AgentContinuationChangedSchema,
   CancelAgentResponseMessageSchema,
   ClearAgentAttentionResponseMessageSchema,
   WorkspaceCreateResponseSchema,

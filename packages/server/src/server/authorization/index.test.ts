@@ -69,6 +69,23 @@ describe("SessionAuthorization", () => {
     ).toBe(false);
   });
 
+  test("account metadata is readable but login challenges and mutations require daemon management", () => {
+    const reader = new SessionAuthorization(["daemon.read"]);
+    for (const type of [
+      "provider.accounts.list.request",
+      "provider.accounts.catalog.request",
+    ] as const)
+      expect(reader.allowsInbound(inboundMessage(type))).toBe(true);
+    expect(reader.allowsInbound(inboundMessage("provider.accounts.manage.request"))).toBe(false);
+    expect(reader.allowsOutbound(outboundMessage("provider.accounts.manage.response"))).toBe(false);
+    const manager = new SessionAuthorization(["daemon.manage"]);
+    expect(manager.allowsInbound(inboundMessage("provider.accounts.manage.request"))).toBe(true);
+    expect(manager.allowsOutbound(outboundMessage("provider.accounts.manage.response"))).toBe(true);
+    const execution = new SessionAuthorization(["hub.execute"]);
+    expect(execution.allowsInbound(inboundMessage("provider.accounts.list.request"))).toBe(false);
+    expect(execution.allowsInbound(inboundMessage("provider.accounts.manage.request"))).toBe(false);
+  });
+
   test("correlated authorization errors can always be emitted", () => {
     const authorization = new SessionAuthorization([]);
 
@@ -92,4 +109,18 @@ describe("SessionAuthorization", () => {
     expect(parseDaemonPermissions(["hub.execute", "hub.execute"])).toEqual(["hub.execute"]);
     expect(() => parseDaemonPermissions(["hub.execution.*"])).toThrow("Invalid daemon permission");
   });
+});
+
+test("a mutation response reaches the principal that was allowed to make the mutation", () => {
+  const writer = new SessionAuthorization(parseDaemonPermissions(["workspace.write"]));
+  for (const [request, response] of [
+    ["agent.handoff.start.request", "agent.handoff.start.response"],
+    ["agent.continuation.cancel.request", "agent.continuation.cancel.response"],
+    ["agent.queue.manage.request", "agent.queue.manage.response"],
+  ] as const) {
+    expect(writer.allowsInbound(inboundMessage(request))).toBe(true);
+    expect(writer.allowsOutbound(outboundMessage(response))).toBe(true);
+  }
+  // Inspection stays a read, and a writer without read authority does not get the stream.
+  expect(writer.allowsOutbound(outboundMessage("agent.continuation.inspect.response"))).toBe(false);
 });

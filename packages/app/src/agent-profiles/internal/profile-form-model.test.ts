@@ -476,3 +476,31 @@ describe("buildFeatureRequestKey", () => {
     );
   });
 });
+
+it("round trips a profile's fixed account and clears it when changing providers", () => {
+  const form = openWithCatalog({
+    mode: "edit",
+    profile: {
+      id: "p1",
+      name: "Work",
+      provider: "claude",
+      model: "claude-opus-5",
+      modeId: "plan",
+      thinkingOptionId: "think-hard",
+      featureValues: {},
+      accountSelection: { kind: "fixed", accountId: "a" },
+    },
+  });
+  expect(form.getState().submitValue).toMatchObject({
+    accountSelection: { kind: "fixed", accountId: "a" },
+  });
+  form.setAccountSelection({ kind: "automatic" });
+  expect(form.getState().submitValue).toMatchObject({
+    model: "claude-opus-5",
+    modeId: "plan",
+    thinkingOptionId: "think-hard",
+    accountSelection: { kind: "automatic" },
+  });
+  form.setProvider("codex", { label: "Codex" });
+  expect(form.getState().submitValue?.accountSelection).toBeUndefined();
+});

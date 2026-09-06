@@ -2,6 +2,22 @@ import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
 
 export const ko: TranslationResources = {
+  providerAccounts: en.providerAccounts,
+  agentHandoff: {
+    custom: "사용자 지정 설정",
+    action: "다른 에이전트로 계속…",
+    description:
+      "저장된 컨텍스트로 이 작업 공간에서 새 대화를 시작합니다. 현재 에이전트는 중지됩니다. 다른 제공업체를 선택하면 해당 컨텍스트가 전송됩니다.",
+    model: "제공업체 및 모델",
+    mode: "권한 모드",
+    defaultMode: "제공업체 기본값",
+    continue: "계속 작업 시작",
+    source: "이전 대화",
+    successor: "이어진 대화 열기",
+    stopped: "계속 작업 요청됨",
+    briefing: "추가 지침 (선택 사항)",
+    thinking: "추론: {{value}}",
+  },
   common: {
     back: "뒤로",
     loading: "불러오는 중...",

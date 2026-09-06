@@ -43,6 +43,7 @@ const providerSessionImportMutations = new WeakMap<
 >();
 
 export interface NormalizedImportAgentRequest {
+  accountId?: string;
   provider: AgentProvider;
   providerHandleId: string;
   cwd?: string;
@@ -63,7 +64,8 @@ export class ImportSessionsRequestError extends Error {
 
 export interface ListImportableProviderSessionsInput {
   request: FetchRecentProviderSessionsRequestMessage;
-  agentManager: Pick<AgentManager, "listAgents" | "listImportableSessions">;
+  agentManager: Pick<AgentManager, "listAgents" | "listImportableSessions"> &
+    Partial<Pick<AgentManager, "accounts">>;
   agentStorage: Pick<AgentStorage, "list">;
   providerSnapshotManager: Pick<ProviderSnapshotManager, "getProviderLabel">;
 }
@@ -108,6 +110,7 @@ export function normalizeImportAgentRequest(
   }
   return {
     provider: provider as AgentProvider,
+    accountId: msg.accountId,
     providerHandleId,
     cwd: msg.cwd,
     workspaceId: msg.workspaceId,
@@ -138,6 +141,7 @@ export async function listImportableProviderSessions(
     ...(query ? { scanLimit: IMPORT_SESSION_SEARCH_SCAN_LIMIT } : {}),
     providerFilter,
     cwd: request.cwd,
+    accountId: request.accountId,
   });
   let filteredAlreadyImportedCount = 0;
   const candidates: ManagedImportableProviderSession[] = [];
@@ -153,7 +157,9 @@ export async function listImportableProviderSessions(
       continue;
     }
     if (
-      importedHandles.has(toProviderSessionHandleKey(session.provider, session.providerHandleId))
+      importedHandles.has(
+        toProviderSessionHandleKey(session.provider, session.providerHandleId, session.accountId),
+      )
     ) {
       filteredAlreadyImportedCount += 1;
       continue;
@@ -166,7 +172,10 @@ export async function listImportableProviderSessions(
     .slice(0, limit)
     .map((descriptor) =>
       toRecentProviderSessionDescriptorPayload(descriptor, {
-        providerLabel: providerSnapshotManager.getProviderLabel(descriptor.provider),
+        providerLabel:
+          descriptor.accountId && agentManager.accounts
+            ? `${providerSnapshotManager.getProviderLabel(descriptor.provider)} · ${agentManager.accounts.store.get(descriptor.accountId).label}`
+            : providerSnapshotManager.getProviderLabel(descriptor.provider),
       }),
     );
 
@@ -204,11 +213,12 @@ async function importProviderSessionNow(
   cwd: string,
   workspaceId: string,
 ): Promise<ImportedProviderSession> {
-  const { provider, providerHandleId, labels } = input.request;
+  const { provider, providerHandleId, labels, accountId } = input.request;
 
   const matchingRecords = await input.agentStorage.listByProviderSession(
     provider,
     providerHandleId,
+    accountId,
   );
   const activeRecord = matchingRecords.find((record) => !record.archivedAt);
   if (activeRecord) {
@@ -250,6 +260,7 @@ async function importProviderSessionNow(
   const snapshot = await input.agentManager.importProviderSession({
     provider,
     providerHandleId,
+    accountId,
     cwd,
     workspaceId,
     labels,
@@ -292,6 +303,7 @@ async function resolveProviderSessionImportMutationKey(
     await input.agentStorage.listByProviderSession(
       input.request.provider,
       input.request.providerHandleId,
+      input.request.accountId,
     )
   ).at(0);
   return matchingRecord
@@ -299,6 +311,7 @@ async function resolveProviderSessionImportMutationKey(
     : `handle\0${toProviderSessionHandleKey(
         input.request.provider,
         input.request.providerHandleId,
+        input.request.accountId,
       )}`;
 }
 
@@ -353,31 +366,36 @@ async function collectImportedProviderSessions(
   const collect = (
     provider: AgentProvider | StoredAgentRecord["provider"] | string,
     persistence: AgentPersistenceHandle | null | undefined,
+    accountId?: string,
   ) => {
     if (!persistence || (providerFilter && !providerFilter.has(provider))) return;
-    sessions.add(toProviderSessionHandleKey(provider, persistence.sessionId));
-    collectProviderSessionHandleKeys(handles, provider, persistence);
+    sessions.add(toProviderSessionHandleKey(provider, persistence.sessionId, accountId));
+    collectProviderSessionHandleKeys(handles, provider, persistence, accountId);
   };
 
   for (const agent of agentManager.listAgents()) {
     if (storedRecordsById.get(agent.id)?.archivedAt) {
       continue;
     }
-    collect(agent.provider, agent.persistence);
+    collect(agent.provider, agent.persistence, agent.config.accountId);
   }
 
   for (const record of records) {
     if (record.archivedAt) {
       continue;
     }
-    collect(record.provider, record.persistence);
+    collect(record.provider, record.persistence, record.config?.accountId);
   }
 
   return { handles, count: sessions.size };
 }
 
-function toProviderSessionHandleKey(provider: string, providerHandleId: string): string {
-  return `${provider}\0${providerHandleId}`;
+function toProviderSessionHandleKey(
+  provider: string,
+  providerHandleId: string,
+  accountId?: string,
+): string {
+  return `${provider}\0${accountId ?? `default:${provider}`}\0${providerHandleId}`;
 }
 
 function isMetadataGenerationSession(input: { firstPromptPreview: string | null }): boolean {
@@ -390,13 +408,14 @@ function collectProviderSessionHandleKeys(
   target: Set<string>,
   provider: AgentProvider | StoredAgentRecord["provider"] | string,
   persistence: AgentPersistenceHandle | null | undefined,
+  accountId?: string,
 ): void {
   if (!persistence) {
     return;
   }
 
-  target.add(toProviderSessionHandleKey(provider, persistence.sessionId));
+  target.add(toProviderSessionHandleKey(provider, persistence.sessionId, accountId));
   if (persistence.nativeHandle) {
-    target.add(toProviderSessionHandleKey(provider, persistence.nativeHandle));
+    target.add(toProviderSessionHandleKey(provider, persistence.nativeHandle, accountId));
   }
 }

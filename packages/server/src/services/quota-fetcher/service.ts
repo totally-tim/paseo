@@ -1,3 +1,4 @@
+import type { NativeAccountUsageSource } from "./providers/native-account.js";
 import type { Logger } from "pino";
 import type { ProviderUsage } from "../../server/messages.js";
 import { createProviderUsageFetchers } from "./manifest.js";
@@ -5,6 +6,8 @@ import type { ProviderApiFetch, ProviderUsageFetcher } from "./provider.js";
 import { unavailableUsage } from "./usage.js";
 
 export interface ProviderUsageServiceOptions {
+  accounts?: NativeAccountUsageSource;
+  cacheKey?: () => string;
   logger: Logger;
   fetchers?: ProviderUsageFetcher[];
   fetch?: ProviderApiFetch;
@@ -20,6 +23,8 @@ export interface ProviderUsageListResult {
 const DEFAULT_PROVIDER_USAGE_CACHE_TTL_MS = 5 * 60 * 1000;
 
 export class ProviderUsageService {
+  private readonly cacheKey: () => string;
+  private lastCacheKey = "";
   private readonly logger: Logger;
   private readonly fetchers: ProviderUsageFetcher[];
   private readonly cacheTtlMs: number;
@@ -28,12 +33,14 @@ export class ProviderUsageService {
   private inFlight: Promise<ProviderUsageListResult> | null = null;
 
   constructor(options: ProviderUsageServiceOptions) {
+    this.cacheKey = options.cacheKey ?? (() => "");
     this.logger = options.logger.child({ module: "provider-usage-service" });
     this.fetchers =
       options.fetchers ??
       createProviderUsageFetchers({
         logger: this.logger,
         fetch: options.fetch,
+        accounts: options.accounts,
       });
     this.cacheTtlMs = options.cacheTtlMs ?? DEFAULT_PROVIDER_USAGE_CACHE_TTL_MS;
     this.now = options.now ?? Date.now;
@@ -41,6 +48,12 @@ export class ProviderUsageService {
 
   async listUsage(options?: { forceRefresh?: boolean }): Promise<ProviderUsageListResult> {
     const nowMs = this.now();
+    const key = this.cacheKey();
+    if (this.lastCacheKey !== key) {
+      this.cached = null;
+      this.inFlight = null;
+      this.lastCacheKey = key;
+    }
     if (
       !options?.forceRefresh &&
       this.cached &&
@@ -53,7 +66,7 @@ export class ProviderUsageService {
       return this.inFlight;
     }
 
-    const request = this.fetchFreshUsage(nowMs);
+    const request = this.fetchFreshUsage(nowMs, key);
     this.inFlight = request;
     try {
       return await request;
@@ -64,7 +77,7 @@ export class ProviderUsageService {
     }
   }
 
-  private async fetchFreshUsage(nowMs: number): Promise<ProviderUsageListResult> {
+  private async fetchFreshUsage(nowMs: number, key: string): Promise<ProviderUsageListResult> {
     const settled = await Promise.allSettled(this.fetchers.map((fetcher) => fetcher.fetchUsage()));
     const providers = settled.map((result, index) => {
       const fetcher = this.fetchers[index];
@@ -83,7 +96,7 @@ export class ProviderUsageService {
     });
 
     const result = { fetchedAt: new Date(nowMs).toISOString(), providers };
-    this.cached = { fetchedAtMs: nowMs, result };
+    if (this.cacheKey() === key) this.cached = { fetchedAtMs: nowMs, result };
     return result;
   }
 }

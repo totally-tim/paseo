@@ -20,22 +20,17 @@ import {
 import {
   cancelComposerAgent,
   dispatchComposerAgentMessage,
-  editQueuedComposerMessage,
   findForgeItemByOption,
   isAttachmentSelectedForForgeItem,
   openComposerAttachment,
   pickAndPersistImages,
-  queueComposerMessage,
   removeComposerAttachmentAtIndex,
-  sendQueuedComposerMessageNow,
   toggleForgeAttachment,
   toggleForgeAttachmentFromPicker,
   type MessageSubmissionWriter,
   type AttachmentPersister,
   type ComposerCancelClient,
   type ComposerSendClient,
-  type QueueWriter,
-  type QueuedComposerMessage,
 } from "./actions";
 
 const imageMetadata: AttachmentMetadata = {
@@ -273,19 +268,6 @@ function writeSubmission(fake: FakeStream, agentId: string, state: FakeSubmissio
   const submissions = submissionsByFakeStream.get(fake) ?? new Map();
   submissions.set(agentId, state.submissions);
   submissionsByFakeStream.set(fake, submissions);
-}
-
-function createFakeQueue(
-  initial: Map<string, QueuedComposerMessage[]> = new Map(),
-): QueueWriter & { state: Map<string, QueuedComposerMessage[]> } {
-  const fake: QueueWriter & { state: Map<string, QueuedComposerMessage[]> } = {
-    state: new Map(initial),
-    read: (agentId) => fake.state.get(agentId) ?? [],
-    write: (updater) => {
-      fake.state = updater(fake.state);
-    },
-  };
-  return fake;
 }
 
 const passthroughEncodeImages = async (images: AttachmentMetadata[]) =>
@@ -703,150 +685,6 @@ describe("dispatchComposerAgentMessage", () => {
         text: browserElement.attachment.formatted,
       },
     ]);
-  });
-});
-
-describe("queueComposerMessage", () => {
-  it("queues a trimmed message under the agent id and returns the new entry", () => {
-    const queue = createFakeQueue();
-    const result = queueComposerMessage({
-      agentId: "agent",
-      text: "  draft  ",
-      attachments: [],
-      queue,
-    });
-
-    expect(result.queued?.text).toBe("draft");
-    expect(queue.state.get("agent")).toEqual([
-      { id: result.queued?.id, text: "draft", attachments: [] },
-    ]);
-  });
-
-  it("does not queue an empty message with no attachments", () => {
-    const queue = createFakeQueue();
-    const result = queueComposerMessage({
-      agentId: "agent",
-      text: "   ",
-      attachments: [],
-      queue,
-    });
-    expect(result.queued).toBeNull();
-    expect(queue.state.get("agent")).toBeUndefined();
-  });
-
-  it("captures workspace review attachments at queue time alongside user attachments", () => {
-    const queue = createFakeQueue();
-    const review = reviewWorkspaceAttachment("Initial queued review.");
-    const image = imageWithId("img-queue");
-    queueComposerMessage({
-      agentId: "agent",
-      text: "queue this",
-      attachments: [{ kind: "image", metadata: image }, review],
-      queue,
-    });
-
-    expect(queue.state.get("agent")?.[0]?.attachments).toEqual([
-      { kind: "image", metadata: image },
-      review,
-    ]);
-  });
-});
-
-describe("editQueuedComposerMessage", () => {
-  it("returns null and leaves the queue untouched when the message id is missing", () => {
-    const queue = createFakeQueue(
-      new Map([["agent", [{ id: "other", text: "other", attachments: [] }]]]),
-    );
-    const result = editQueuedComposerMessage({ agentId: "agent", messageId: "missing", queue });
-    expect(result).toBeNull();
-    expect(queue.state.get("agent")).toHaveLength(1);
-  });
-
-  it("returns the text and only user attachments, removing the queued entry", () => {
-    const review = reviewWorkspaceAttachment("Queued snapshot.");
-    const image = imageWithId("img-queued-edit");
-    const queue = createFakeQueue(
-      new Map([
-        [
-          "agent",
-          [
-            {
-              id: "msg-1",
-              text: "queued draft",
-              attachments: [{ kind: "image", metadata: image }, review],
-            },
-          ],
-        ],
-      ]),
-    );
-
-    const result = editQueuedComposerMessage({ agentId: "agent", messageId: "msg-1", queue });
-    expect(result).toEqual({
-      text: "queued draft",
-      attachments: [{ kind: "image", metadata: image }],
-    });
-    expect(queue.state.get("agent")).toEqual([]);
-  });
-});
-
-describe("sendQueuedComposerMessageNow", () => {
-  it("returns missing without submitting when the message id is gone", async () => {
-    const queue = createFakeQueue();
-    const submitted: Array<{ text: string; attachments: ComposerAttachment[] }> = [];
-    const result = await sendQueuedComposerMessageNow({
-      agentId: "agent",
-      messageId: "msg-1",
-      queue,
-      submitMessage: async (input) => {
-        submitted.push(input);
-      },
-    });
-    expect(result).toEqual({ status: "missing" });
-    expect(submitted).toEqual([]);
-  });
-
-  it("removes the queued entry and submits its text + attachments", async () => {
-    const review = reviewWorkspaceAttachment("Queued for send.");
-    const queue = createFakeQueue(
-      new Map([["agent", [{ id: "msg-1", text: "send me", attachments: [review] }]]]),
-    );
-    const submitted: Array<{ text: string; attachments: ComposerAttachment[] }> = [];
-    const result = await sendQueuedComposerMessageNow({
-      agentId: "agent",
-      messageId: "msg-1",
-      queue,
-      submitMessage: async (input) => {
-        submitted.push(input);
-      },
-    });
-    expect(result).toEqual({ status: "submitted" });
-    expect(queue.state.get("agent")).toEqual([]);
-    expect(submitted).toEqual([{ text: "send me", attachments: [review] }]);
-  });
-
-  it("restores the queued entry to the front and surfaces the error message on failure", async () => {
-    const queue = createFakeQueue(
-      new Map([
-        [
-          "agent",
-          [
-            { id: "msg-1", text: "first", attachments: [] },
-            { id: "msg-2", text: "second", attachments: [] },
-          ],
-        ],
-      ]),
-    );
-    const result = await sendQueuedComposerMessageNow({
-      agentId: "agent",
-      messageId: "msg-1",
-      queue,
-      submitMessage: async () => {
-        throw new Error("network down");
-      },
-    });
-    expect(result).toEqual({ status: "failed", errorMessage: "network down" });
-    const state = queue.state.get("agent");
-    expect(state?.map((m) => m.id)).toEqual(["msg-1", "msg-2"]);
   });
 });
 

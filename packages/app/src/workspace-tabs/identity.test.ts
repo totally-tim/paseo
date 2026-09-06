@@ -196,3 +196,35 @@ describe("plugin panel tab identity", () => {
     expect(agent).toBe("plugin_agent_6_review_7_details_7_agent-1");
   });
 });
+
+describe("draft tab account selection", () => {
+  const setup = {
+    provider: "claude",
+    cwd: "/repo",
+    modeId: null,
+    model: null,
+    thinkingOptionId: null,
+    featureValues: {},
+    accountSelection: { kind: "fixed", accountId: "acct-1" },
+    continuationPolicy: { accountIds: ["acct-1", "acct-2"] },
+  };
+
+  it("keeps the account and continuation choice through normalization", () => {
+    expect(normalizeWorkspaceTabTarget({ kind: "draft", draftId: "d1", setup } as never)).toEqual({
+      kind: "draft",
+      draftId: "d1",
+      setup,
+    });
+  });
+
+  it("treats a different account selection as a different draft setup", () => {
+    const left = { kind: "draft", draftId: "d1", setup } as never;
+    const right = {
+      kind: "draft",
+      draftId: "d1",
+      setup: { ...setup, accountSelection: { kind: "fixed", accountId: "acct-2" } },
+    } as never;
+    expect(workspaceTabTargetsEqual(left, left)).toBe(true);
+    expect(workspaceTabTargetsEqual(left, right)).toBe(false);
+  });
+});

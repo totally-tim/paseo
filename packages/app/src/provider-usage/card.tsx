@@ -40,9 +40,11 @@ function footerText(usage: ProviderUsage): string | null {
 export function ProviderUsageCard({
   usage,
   compact = false,
+  showIdentity = true,
 }: {
   usage: ProviderUsage;
   compact?: boolean;
+  showIdentity?: boolean;
 }) {
   const status = statusText(usage);
   const footer = footerText(usage);
@@ -64,20 +66,30 @@ export function ProviderUsageCard({
 
   return (
     <View style={containerStyle}>
-      <View style={styles.header}>
-        <ThemedProviderUsageIcon iconKey={usage.providerId} size={14} uniProps={mutedIconColor} />
-        <Text style={styles.name} numberOfLines={1}>
-          {usage.displayName}
-        </Text>
-        {usage.planLabel ? <StatusBadge label={usage.planLabel} variant="muted" /> : null}
-        <View style={styles.headerSpacer} />
-        {status ? (
-          <View style={styles.statusRow}>
-            <View style={dotStyle} />
-            <Text style={styles.statusLabel}>{status}</Text>
-          </View>
-        ) : null}
-      </View>
+      {showIdentity || usage.planLabel || status ? (
+        <View style={styles.header}>
+          {showIdentity ? (
+            <>
+              <ThemedProviderUsageIcon
+                iconKey={usage.providerId}
+                size={14}
+                uniProps={mutedIconColor}
+              />
+              <Text style={styles.name} numberOfLines={1}>
+                {usage.displayName}
+              </Text>
+            </>
+          ) : null}
+          {usage.planLabel ? <StatusBadge label={usage.planLabel} variant="muted" /> : null}
+          <View style={styles.headerSpacer} />
+          {status ? (
+            <View style={styles.statusRow}>
+              <View style={dotStyle} />
+              <Text style={styles.statusLabel}>{status}</Text>
+            </View>
+          ) : null}
+        </View>
+      ) : null}
 
       {usage.error ? (
         <Text style={styles.error} numberOfLines={3}>

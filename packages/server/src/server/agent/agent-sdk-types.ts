@@ -1,3 +1,5 @@
+import type { AgentContinuationPolicy } from "@getpaseo/protocol/agent-continuation";
+import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import type {
   AgentProviderNotice,
   AgentTaskItem,
@@ -210,6 +212,8 @@ export type AgentPromptContentBlock =
 export type AgentPromptInput = string | AgentPromptContentBlock[];
 
 export interface AgentRunOptions {
+  /** Daemon-only recovery fence. Never accepted from a client payload. */
+  continuationOperationId?: string;
   outputSchema?: unknown;
   resumeFrom?: AgentPersistenceHandle;
   maxThinkingTokens?: number;
@@ -410,6 +414,9 @@ export type AgentTimelineItem =
   | { type: "error"; message: string }
   | {
       type: "notification";
+      code?: string;
+      resetsAt?: string;
+      capacityScope?: "account" | "model";
       level: "info" | "warning" | "error";
       message: string;
     }
@@ -598,6 +605,11 @@ export interface ImportedProviderSession {
 }
 
 export interface AgentSessionConfig {
+  accountSelection?: AccountSelection;
+  continuationPolicy?: AgentContinuationPolicy;
+  /** Resolved by the daemon before startup; immutable for this agent. */
+  accountId?: string;
+  accountSelectionReason?: string;
   provider: AgentProvider;
   cwd: string;
   /**

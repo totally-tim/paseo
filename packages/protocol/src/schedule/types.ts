@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AccountSelectionSchema, type AccountSelection } from "../provider-accounts.js";
 import { AgentProviderSchema } from "../provider-manifest.js";
 
 export const ScheduleStatusSchema = z.enum(["active", "paused", "completed"]);
@@ -26,6 +27,7 @@ export const ScheduleTargetSchema = z.discriminatedUnion("type", [
     type: z.literal("new-agent"),
     config: z.object({
       provider: AgentProviderSchema,
+      accountSelection: AccountSelectionSchema.optional(),
       cwd: z.string().trim().min(1),
       modeId: z.string().trim().min(1).optional(),
       model: z.string().trim().min(1).optional(),
@@ -90,6 +92,7 @@ export interface CreateScheduleInput {
 
 export interface UpdateScheduleNewAgentConfig {
   provider?: string;
+  accountSelection?: AccountSelection | null;
   model?: string | null;
   modeId?: string | null;
   thinkingOptionId?: string | null;

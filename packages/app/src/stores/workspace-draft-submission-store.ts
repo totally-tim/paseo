@@ -1,9 +1,13 @@
+import type { AgentContinuationPolicy } from "@getpaseo/protocol/agent-continuation";
+import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import { create } from "zustand";
 import type { ComposerAttachment } from "@/attachments/types";
 import type { AgentProvider } from "@getpaseo/protocol/agent-types";
 import type { WorkspaceDraftTabSetup } from "@/workspace-tabs/model";
 
 export interface PendingWorkspaceDraftSubmission {
+  accountSelection?: AccountSelection;
+  continuationPolicy?: AgentContinuationPolicy;
   serverId: string;
   workspaceId: string;
   draftId: string;

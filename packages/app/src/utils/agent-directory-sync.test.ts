@@ -271,10 +271,7 @@ describe("replaceFetchedAgentDirectory", () => {
     };
     store.setAgents(serverId, new Map([[agentId, agent]]));
     store.setAgentDetails(serverId, new Map([[agentId, agent]]));
-    store.setQueuedMessages(
-      serverId,
-      new Map([[agentId, [{ id: "queued", text: "next", attachments: [] }]]]),
-    );
+
     store.setAgentTimelineCursor(
       serverId,
       new Map([[agentId, { epoch: "epoch", startSeq: 1, endSeq: 2 }]]),
@@ -292,7 +289,6 @@ describe("replaceFetchedAgentDirectory", () => {
     expect({
       agents: session?.agents.has(agentId),
       details: session?.agentDetails.has(agentId),
-      queued: session?.queuedMessages.has(agentId),
       cursor: session?.agentTimelineCursor.has(agentId),
       permissions: session?.pendingPermissions.size,
       initializing: session?.initializingAgents.has(agentId),
@@ -300,7 +296,6 @@ describe("replaceFetchedAgentDirectory", () => {
     }).toEqual({
       agents: false,
       details: false,
-      queued: false,
       cursor: false,
       permissions: 0,
       initializing: false,

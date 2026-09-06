@@ -1,5 +1,8 @@
+import { AgentContinuationPolicySchema } from "@getpaseo/protocol/agent-continuation";
+import { AccountSelectionSchema } from "@getpaseo/protocol/provider-accounts";
 import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { Logger } from "pino";
 
@@ -9,9 +12,14 @@ import { toStoredAgentRecord } from "./agent-projections.js";
 import type { ManagedAgent } from "./agent-manager.js";
 import type { AgentSessionConfig } from "./agent-sdk-types.js";
 import { AgentOwnerSchema, daemonExecutionKey, type DaemonAgentOwner } from "./agent-owner.js";
+import { AgentHandoffStateSchema, type AgentHandoffState } from "./handoff-state.js";
 
 const SERIALIZABLE_CONFIG_SCHEMA = z
   .object({
+    accountId: z.string().optional(),
+    accountSelection: AccountSelectionSchema.optional(),
+    continuationPolicy: AgentContinuationPolicySchema.optional(),
+    accountSelectionReason: z.string().optional(),
     modeId: z.string().nullable().optional(),
     model: z.string().nullable().optional(),
     thinkingOptionId: z.string().nullable().optional(),
@@ -79,6 +87,10 @@ const STORED_AGENT_SCHEMA = z.object({
 
 export type SerializableAgentConfig = Pick<
   AgentSessionConfig,
+  | "accountId"
+  | "accountSelection"
+  | "continuationPolicy"
+  | "accountSelectionReason"
   | "modeId"
   | "model"
   | "thinkingOptionId"
@@ -105,6 +117,10 @@ export class AgentStorage {
   private loaded = false;
   private baseDir: string;
   private loadPromise: Promise<StoredAgentRecord[]> | null = null;
+  private handoffOperations = new Map<
+    string,
+    { input: unknown; promise: Promise<StoredAgentRecord> }
+  >();
   private logger: Logger;
 
   constructor(baseDir: string, logger: Logger) {
@@ -126,13 +142,75 @@ export class AgentStorage {
     return this.cache.get(agentId) ?? null;
   }
 
+  async getHandoff(agentId: string): Promise<AgentHandoffState | null> {
+    if (this.deleting.has(agentId) || !(await this.get(agentId))) return null;
+    try {
+      const raw = await fs.readFile(this.handoffPath(agentId), "utf8");
+      return AgentHandoffStateSchema.parse(JSON.parse(raw));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  runHandoff(
+    agentId: string,
+    input: unknown,
+    operation: () => Promise<StoredAgentRecord>,
+  ): Promise<StoredAgentRecord> {
+    if (this.deleting.has(agentId))
+      return Promise.reject(new Error("Source agent is being deleted"));
+    const existing = this.handoffOperations.get(agentId);
+    if (existing) {
+      return isDeepStrictEqual(existing.input, input)
+        ? existing.promise
+        : Promise.reject(
+            new Error(
+              "A continuation with different settings is already in progress. Open it before choosing another provider.",
+            ),
+          );
+    }
+    const pending = operation();
+    this.handoffOperations.set(agentId, { input, promise: pending });
+    const clear = () => this.handoffOperations.delete(agentId);
+    void pending.then(clear, clear);
+    return pending;
+  }
+
+  async saveHandoff(state: AgentHandoffState): Promise<void> {
+    if (this.deleting.has(state.sourceAgentId) || !(await this.get(state.sourceAgentId))) {
+      throw new Error("Source agent no longer exists");
+    }
+    const parsed = AgentHandoffStateSchema.parse(state);
+    const filePath = this.handoffPath(state.sourceAgentId);
+    await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    await writeJsonFileAtomic(this.getHandoffContextPath(state.sourceAgentId), {
+      sourceAgentId: state.sourceAgentId,
+      prompt: state.prompt,
+      rows: state.rows,
+    });
+    await writeJsonFileAtomic(filePath, parsed);
+  }
+
+  getHandoffContextPath(agentId: string): string {
+    return this.handoffPath(agentId).replace(/\.json$/, ".context.json");
+  }
+
+  private handoffPath(agentId: string): string {
+    if (!/^[a-zA-Z0-9_-]+$/.test(agentId)) throw new Error("Invalid handoff agent ID");
+    return path.join(`${this.baseDir}-handoffs`, `${agentId}.json`);
+  }
+
   async listByProviderSession(
     provider: string,
     providerHandleId: string,
+    accountId?: string,
   ): Promise<StoredAgentRecord[]> {
     await this.load();
     return Array.from(this.cache.values()).filter(
       (record) =>
+        (record.config?.accountId ?? `default:${provider}`) ===
+          (accountId ?? `default:${provider}`) &&
         record.persistence?.provider === provider &&
         (record.persistence.sessionId === providerHandleId ||
           record.persistence.nativeHandle === providerHandleId),
@@ -210,11 +288,34 @@ export class AgentStorage {
     this.deleting.add(agentId);
   }
 
+  /** Forget a prepared or started handoff so its source can start a fresh one. */
+  async clearHandoff(agentId: string, expectedSuccessorId?: string): Promise<void> {
+    await this.load();
+    if (expectedSuccessorId) {
+      const state = await this.getHandoff(agentId);
+      if (state && state.successorAgentId !== expectedSuccessorId) return;
+    }
+    for (const filePath of [this.handoffPath(agentId), this.getHandoffContextPath(agentId)]) {
+      try {
+        await fs.unlink(filePath);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code && code !== "ENOENT")
+          this.logger.warn({ err: error, agentId, filePath }, "Failed to clear handoff state");
+      }
+    }
+  }
+
   async remove(agentId: string): Promise<void> {
     await this.load();
     this.beginDelete(agentId);
+    await this.handoffOperations.get(agentId)?.promise.catch(() => undefined);
     await (this.pendingWrites.get(agentId) ?? Promise.resolve());
-    const paths = Array.from(this.pathsById.get(agentId) ?? []);
+    const paths = [
+      ...(this.pathsById.get(agentId) ?? []),
+      this.handoffPath(agentId),
+      this.getHandoffContextPath(agentId),
+    ];
     await Promise.all(
       paths.map(async (filePath) => {
         try {

@@ -1,3 +1,9 @@
+import { AgentContinuationService } from "./agent-continuation/service.js";
+import { AgentContinuationStore } from "./agent-continuation/store.js";
+import { AccountProviderSchema } from "@getpaseo/protocol/provider-accounts";
+import { ProviderAccountStore } from "./provider-accounts/account-store.js";
+import { ProviderAccountService } from "./provider-accounts/account-service.js";
+import { createAccountBackend } from "./provider-accounts/provider-backends.js";
 import express from "express";
 import { createServer as createHTTPServer, type IncomingMessage, type ServerResponse } from "http";
 import { constants, existsSync, unlinkSync } from "fs";
@@ -472,6 +478,8 @@ export interface PaseoDaemon {
 }
 
 export interface PaseoDaemonDependencies {
+  accountBackend?: ConstructorParameters<typeof ProviderAccountService>[1];
+  accountClient?: NonNullable<ConstructorParameters<typeof AgentManager>[0]["createAccountClient"]>;
   hubRelationshipRemote?: HubRelationshipRemote;
   hubRelationshipClock?: HubRelationshipClock;
   hubRelationshipRetryPolicy?: HubRelationshipRetryPolicy;
@@ -909,7 +917,28 @@ export async function createPaseoDaemon(
     if (git) configureGitProcessPolicy(git);
   });
   const initialAgentManagerState = providerSnapshotManager.getAgentManagerProviderState();
+  const providerAccounts = new ProviderAccountService(
+    new ProviderAccountStore(config.paseoHome),
+    (account, context) =>
+      dependencies.accountBackend
+        ? dependencies.accountBackend(account, context)
+        : createAccountBackend({
+            account,
+            context,
+            runtimeSettings: providerSnapshotManager.getAccountRuntimeSettings(account.provider),
+            logger,
+            managedProcesses,
+          }),
+  );
+  await providerAccounts.initialize();
+  providerAccounts.inspectHostAccounts();
   const agentManager = new AgentManager({
+    accounts: providerAccounts,
+    createAccountClient: (provider, context) =>
+      (
+        dependencies.accountClient ??
+        providerSnapshotManager.createAccountClient.bind(providerSnapshotManager)
+      )(provider, context),
     clients: initialAgentManagerState.clients,
     providerDefinitions: initialAgentManagerState.providerDefinitions,
     registry: agentStorage,
@@ -930,6 +959,25 @@ export async function createPaseoDaemon(
   const unsubscribePluginProviders =
     pluginRuntime.subscribeProviderRegistrations(syncPluginProviders);
 
+  providerSnapshotManager.setAccountCatalogReader(async (input) => {
+    const accountProvider = AccountProviderSchema.safeParse(input.provider);
+    if (!accountProvider.success) return null;
+    const selection =
+      input.parent?.provider === input.provider && input.parent.config.accountId
+        ? { kind: "fixed" as const, accountId: input.parent.config.accountId }
+        : input.accountSelection;
+    const choice = providerAccounts.preview(accountProvider.data, selection, input.model);
+    if (choice.accountId?.startsWith("default:")) return null;
+    const result = await agentManager.getAccountCatalog({
+      provider: accountProvider.data,
+      selection,
+      model: input.model,
+      cwd: input.cwd ?? undefined,
+    });
+    if (!result.entry) throw new Error(result.error ?? result.reason);
+    return result.entry;
+  });
+
   const detachAgentStoragePersistence = attachAgentStoragePersistence(
     logger,
     agentManager,
@@ -948,7 +996,21 @@ export async function createPaseoDaemon(
   });
   await workspaceLabelService.initialize();
   logger.info({ elapsed: elapsed() }, "Workspace registries bootstrapped");
+  const continuations = new AgentContinuationService({
+    agentManager,
+    agentStorage,
+    providerSnapshotManager,
+    accounts: providerAccounts,
+    store: new AgentContinuationStore(config.paseoHome),
+    logger,
+    getWorkspace: (id) => workspaceRegistry.get(id),
+  });
+  agentManager.continuations = continuations;
+  await continuations.initialize();
   const teardownArchivedWorkspaceRuntime = (workspaceId: string): void => {
+    void continuations.cancelWorkspace(workspaceId).catch(() => {
+      logger.error({ workspaceId }, "Could not persist cancellation for archived workspace");
+    });
     scriptRuntimeStore.removeForWorkspace(workspaceId);
     releaseWorkspaceServicePortPlan(workspaceId);
   };
@@ -1706,6 +1768,7 @@ export async function createPaseoDaemon(
               pluginRuntime,
               orchestrationSkills,
               workspaceLabelService,
+              continuations,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
             await pluginRuntime.start();
@@ -1755,6 +1818,8 @@ export async function createPaseoDaemon(
       unsubscribePluginProviders();
       await pluginRuntime.stopAllPlugins().catch(() => undefined);
       await serviceProxy.stopStandalone().catch(() => undefined);
+      await continuations.close().catch(() => undefined);
+      await providerAccounts.close().catch(() => undefined);
       await agentProviderRuntime.shutdown().catch(() => undefined);
       if (mainStarted) {
         httpServer.closeAllConnections();
@@ -1773,8 +1838,11 @@ export async function createPaseoDaemon(
     // Freeze both ingress and registration before taking the agent closure snapshot.
     wsServer?.prepareForShutdown();
     agentManager.prepareForShutdown();
+    await continuations.close();
+    await providerAccounts.close();
     await closeAllAgents(logger, agentManager);
     await agentManager.flushForShutdown().catch(() => undefined);
+    await agentManager.closeAccountClients();
     detachAgentStoragePersistence();
     await agentStorage.flush().catch(() => undefined);
     await agentProviderRuntime.shutdown();

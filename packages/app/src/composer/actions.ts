@@ -16,13 +16,6 @@ import {
 import { createUserMessage, generateMessageId, type UserMessageItem } from "@/types/stream";
 import type { MessageSubmissionRejectionOutcome } from "@/composer/submission/model";
 import type { PickedImageAttachmentInput } from "@/hooks/image-attachment-picker";
-import { i18n } from "@/i18n/i18next";
-
-export interface QueuedComposerMessage {
-  id: string;
-  text: string;
-  attachments: ComposerAttachment[];
-}
 
 export interface AttachmentPersister {
   persistFromBlob: (input: {
@@ -76,13 +69,6 @@ export interface MessageSubmissionWriter {
   begin: (agentId: string, message: UserMessageItem) => void;
   accept: (agentId: string, clientMessageId: string) => void;
   reject: (agentId: string, clientMessageId: string) => MessageSubmissionRejectionOutcome;
-}
-
-export interface QueueWriter {
-  read: (agentId: string) => QueuedComposerMessage[];
-  write: (
-    updater: (prev: Map<string, QueuedComposerMessage[]>) => Map<string, QueuedComposerMessage[]>,
-  ) => void;
 }
 
 export async function pickAndPersistImages(input: {
@@ -212,110 +198,6 @@ export async function dispatchComposerAgentMessage(
   } catch (error) {
     input.submission.reject(input.agentId, clientMessageId);
     throw error;
-  }
-}
-
-export interface QueueComposerMessageInput {
-  agentId: string;
-  text: string;
-  attachments: ComposerAttachment[];
-  queue: QueueWriter;
-}
-
-export interface QueueComposerMessageResult {
-  queued: QueuedComposerMessage | null;
-}
-
-export function queueComposerMessage(input: QueueComposerMessageInput): QueueComposerMessageResult {
-  const trimmed = input.text.trim();
-  if (!trimmed && input.attachments.length === 0) {
-    return { queued: null };
-  }
-  const item: QueuedComposerMessage = {
-    id: generateMessageId(),
-    text: trimmed,
-    attachments: input.attachments,
-  };
-  input.queue.write((prev) => {
-    const next = new Map(prev);
-    next.set(input.agentId, [...(prev.get(input.agentId) ?? []), item]);
-    return next;
-  });
-  return { queued: item };
-}
-
-export interface EditQueuedComposerMessageInput {
-  agentId: string;
-  messageId: string;
-  queue: QueueWriter;
-}
-
-export interface EditQueuedComposerMessageResult {
-  text: string;
-  attachments: UserComposerAttachment[];
-}
-
-export function editQueuedComposerMessage(
-  input: EditQueuedComposerMessageInput,
-): EditQueuedComposerMessageResult | null {
-  const item = input.queue.read(input.agentId).find((q) => q.id === input.messageId);
-  if (!item) return null;
-  input.queue.write((prev) => {
-    const next = new Map(prev);
-    next.set(
-      input.agentId,
-      (prev.get(input.agentId) ?? []).filter((q) => q.id !== input.messageId),
-    );
-    return next;
-  });
-  return {
-    text: item.text,
-    attachments: userAttachmentsOnly(item.attachments),
-  };
-}
-
-export interface SendQueuedComposerMessageNowInput {
-  agentId: string;
-  messageId: string;
-  queue: QueueWriter;
-  submitMessage: (input: { text: string; attachments: ComposerAttachment[] }) => Promise<void>;
-  failedToSendMessage?: string;
-}
-
-export type SendQueuedComposerMessageNowResult =
-  | { status: "missing" }
-  | { status: "submitted" }
-  | { status: "failed"; errorMessage: string };
-
-export async function sendQueuedComposerMessageNow(
-  input: SendQueuedComposerMessageNowInput,
-): Promise<SendQueuedComposerMessageNowResult> {
-  const item = input.queue.read(input.agentId).find((q) => q.id === input.messageId);
-  if (!item) return { status: "missing" };
-  input.queue.write((prev) => {
-    const next = new Map(prev);
-    next.set(
-      input.agentId,
-      (prev.get(input.agentId) ?? []).filter((q) => q.id !== input.messageId),
-    );
-    return next;
-  });
-  try {
-    await input.submitMessage({ text: item.text, attachments: item.attachments });
-    return { status: "submitted" };
-  } catch (error) {
-    input.queue.write((prev) => {
-      const next = new Map(prev);
-      next.set(input.agentId, [item, ...(prev.get(input.agentId) ?? [])]);
-      return next;
-    });
-    return {
-      status: "failed",
-      errorMessage:
-        error instanceof Error
-          ? error.message
-          : (input.failedToSendMessage ?? i18n.t("composer.errors.failedToSend")),
-    };
   }
 }
 

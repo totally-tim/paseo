@@ -1,4 +1,5 @@
 import type { Logger } from "pino";
+import { HANDOFF_TO_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 
 import type { AgentProvider } from "./agent-sdk-types.js";
 import type { AgentManager, ManagedAgent } from "./agent-manager.js";
@@ -95,6 +96,8 @@ export async function ensureAgentLoaded(
     if (!record) {
       throw new Error(`Agent not found: ${agentId}`);
     }
+    const successor = record.labels[HANDOFF_TO_AGENT_ID_LABEL];
+    if (successor) throw new Error(`This agent continued in ${successor}. Send new work there.`);
 
     const validProviders = deps.validProviders ?? deps.agentManager.getRegisteredProviderIds();
     if (!isStoredAgentProviderAvailable(record, validProviders)) {

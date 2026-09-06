@@ -42,7 +42,6 @@ function createOwner(storage: TimelineReplicaStorage): ViewedTimelineOwner {
     serverId: SERVER_ID,
     replica,
     replaceDemandedAgentIds: () => undefined,
-    drainQueuedAgentMessage: () => undefined,
     ports: {
       initialDeliveryMode: "legacy",
       setSubscription: async () => undefined,

@@ -866,6 +866,59 @@ describe("ScheduleService", () => {
     });
   });
 
+  test("scheduled account selection reaches creation and provider changes clear incompatible pins", async () => {
+    const createAgent = vi
+      .fn<ScheduleServiceOptions["createAgent"]>()
+      .mockRejectedValue(new Error("stop after inspecting creation"));
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      createAgent,
+      now: () => now,
+    });
+    const schedule = await service.create({
+      prompt: "Check project",
+      cadence: { type: "every", everyMs: 60000 },
+      target: {
+        type: "new-agent",
+        config: {
+          provider: "claude",
+          cwd: tempDir,
+          accountSelection: { kind: "fixed", accountId: "account-a" },
+        },
+      },
+    });
+    await expect(
+      (service as unknown as ScheduleServiceInternals).executeSchedule(schedule, "account-run"),
+    ).rejects.toThrow("stop after inspecting creation");
+    expect(createAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          accountSelection: { kind: "fixed", accountId: "account-a" },
+        }),
+        unattended: true,
+      }),
+    );
+    const renamed = await service.update({ id: schedule.id, name: "Renamed" });
+    expect(renamed.target).toMatchObject({
+      config: { accountSelection: { kind: "fixed", accountId: "account-a" } },
+    });
+    const changed = await service.update({
+      id: schedule.id,
+      newAgentConfig: { provider: "codex" },
+    });
+    if (changed.target.type !== "new-agent") throw new Error("Expected new-agent schedule");
+    expect(changed.target.config.accountSelection).toBeUndefined();
+    const automatic = await service.update({
+      id: schedule.id,
+      newAgentConfig: { accountSelection: { kind: "automatic" } },
+    });
+    expect(automatic.target).toMatchObject({ config: { accountSelection: { kind: "automatic" } } });
+  });
+
   test("scheduled new-agent slash prompts run as normal foreground prompts", async () => {
     const createdInputs: Parameters<ScheduleServiceOptions["createAgent"]>[0][] = [];
     const runPrompts: AgentPromptInput[] = [];

@@ -1,3 +1,9 @@
+import type { AgentContinuationService } from "../agent-continuation/service.js";
+import { AccountCatalog } from "../provider-accounts/account-catalog.js";
+import pLimit from "p-limit";
+import type { ProviderAccountService, AccountLease } from "../provider-accounts/account-service.js";
+import type { ProviderAccountContext } from "./provider-account-context.js";
+import { buildSerializableConfig } from "./agent-projections.js";
 import { randomUUID } from "node:crypto";
 import { basename, resolve } from "node:path";
 import { stat } from "node:fs/promises";
@@ -11,6 +17,8 @@ import {
   isDelegatedAgent,
   isOpenAgentTabLabel,
   PARENT_AGENT_ID_LABEL,
+  HANDOFF_TO_AGENT_ID_LABEL,
+  HANDOFF_FROM_AGENT_ID_LABEL,
 } from "@getpaseo/protocol/agent-labels";
 import type { Logger } from "pino";
 import type { ProviderOptions, ToolPolicy } from "@getpaseo/protocol/agent-types";
@@ -120,7 +128,7 @@ export class AgentManagerShuttingDownError extends Error {
 }
 
 export class AgentRunCancellationError extends Error {
-  constructor(agentId: string, action: "reload" | "replace" | "rewind" | "stop") {
+  constructor(agentId: string, action: "reload" | "replace" | "rewind" | "stop" | "handoff") {
     super(
       `Cannot ${action} agent ${agentId} because its active run cancellation was not acknowledged`,
     );
@@ -162,6 +170,10 @@ function buildStoredAgentConfig(record: StoredAgentRecord): AgentSessionConfig {
   if (!record.config) {
     return config;
   }
+  if (record.config.accountId) config.accountId = record.config.accountId;
+  if (record.config.accountSelection) config.accountSelection = record.config.accountSelection;
+  if (record.config.continuationPolicy)
+    config.continuationPolicy = record.config.continuationPolicy;
   if (record.config.modeId != null) config.modeId = record.config.modeId;
   if (record.config.model != null) config.model = record.config.model;
   if (record.config.thinkingOptionId != null) {
@@ -218,6 +230,7 @@ interface HydrateTimelineOptions {
 }
 
 export type ImportablePersistedAgentQueryOptions = ListImportableSessionsOptions & {
+  accountId?: string;
   /**
    * When set, only providers in this set are scanned, in addition to the
    * built-in importable allowlist + enabled + non-derived rules.
@@ -226,6 +239,7 @@ export type ImportablePersistedAgentQueryOptions = ListImportableSessionsOptions
 };
 
 export interface ManagedImportableProviderSession extends ImportableProviderSession {
+  accountId?: string;
   provider: AgentProvider;
 }
 
@@ -275,6 +289,7 @@ type ProviderEnabledMap = Partial<Record<AgentProvider, ProviderEnabledFlag>>;
 type ProviderClientMap = Partial<Record<AgentProvider, AgentClient>>;
 
 export interface CreateAgentOptions {
+  unattended?: boolean;
   labels?: Record<string, string>;
   initialPrompt?: string;
   env?: Record<string, string>;
@@ -286,6 +301,8 @@ export interface CreateAgentOptions {
 }
 
 export interface AgentManagerOptions {
+  accounts?: ProviderAccountService;
+  createAccountClient?: (provider: string, context: ProviderAccountContext) => AgentClient;
   clients?: ProviderClientMap;
   providerDefinitions?: ProviderEnabledMap;
   idFactory?: () => string;
@@ -685,6 +702,20 @@ function detachedAgentLabelPatch(labels: Record<string, string>): AgentLabelPatc
 }
 
 export class AgentManager {
+  continuations?: AgentContinuationService;
+
+  async cancelContinuation(agentId: string): Promise<void> {
+    await this.continuations?.cancelExisting(agentId);
+  }
+
+  readonly accounts?: ProviderAccountService;
+  private readonly createAccountClient?: AgentManagerOptions["createAccountClient"];
+  private readonly accountCatalog = new AccountCatalog();
+  private readonly registrationIds = new Set<string>();
+  private readonly accountReadLimit = pLimit(2);
+  private readonly accountClients = new Map<string, AgentClient>();
+  private readonly accountLeases = new Map<string, AccountLease>();
+
   private readonly clients = new Map<AgentProvider, AgentClient>();
   private readonly providerEnabled = new Map<AgentProvider, boolean>();
   private readonly providerDefinitions = new Map<AgentProvider, ProviderEnabledFlag>();
@@ -724,6 +755,10 @@ export class AgentManager {
   private acceptingAgentRegistrations = true;
 
   constructor(options: AgentManagerOptions) {
+    this.accounts = options.accounts;
+    this.observeAccountChanges();
+    this.createAccountClient = options.createAccountClient;
+
     this.idFactory = options?.idFactory ?? (() => randomUUID());
     this.registry = options?.registry;
     this.durableTimelineStore = options?.durableTimelineStore;
@@ -947,45 +982,60 @@ export class AgentManager {
   async listImportableSessions(
     options?: ImportablePersistedAgentQueryOptions,
   ): Promise<ManagedImportableSessionsResult> {
-    const providerEntries = Array.from(this.clients.entries()).filter(
-      ([provider, client]) =>
+    const contexts: Array<{ provider: string; accountId?: string; client: AgentClient }> =
+      options?.accountId && this.accounts
+        ? [
+            {
+              provider: this.accounts.store.get(options.accountId).provider,
+              accountId: options.accountId,
+              client: this.requireClient(
+                this.accounts.store.get(options.accountId).provider,
+                options.accountId,
+              ),
+            },
+          ]
+        : this.importableAccountClients();
+    const providerEntries = contexts.filter(
+      ({ provider, client }) =>
         client.capabilities.supportsSessionListing &&
         !!client.listImportableSessions &&
         this.isProviderImportable(provider, options?.providerFilter),
     );
     const providerResults = await Promise.all(
-      providerEntries.map(async ([provider, client]) => {
-        try {
-          const sessions = await withTimeout(
-            client.listImportableSessions!({
-              limit: options?.limit,
-              query: options?.query,
-              scanLimit: options?.scanLimit,
-              cwd: options?.cwd,
-            }),
-            IMPORTABLE_SESSION_LIST_TIMEOUT_MS,
-            `Timed out listing importable sessions for provider '${provider}' after ${IMPORTABLE_SESSION_LIST_TIMEOUT_MS}ms`,
-          );
-          return {
-            sessions: sessions
-              .filter((session) => matchesImportableSessionQuery(session, options?.query))
-              .map((session) => Object.assign(session, { provider })),
-            error: null,
-          };
-        } catch (error) {
-          this.logger.warn(
-            { err: error, provider },
-            "Failed to list importable sessions for provider",
-          );
-          return {
-            sessions: [],
-            error: {
-              provider,
-              message: error instanceof Error ? error.message : String(error),
-            },
-          };
-        }
-      }),
+      providerEntries.map(({ provider, client, accountId }) =>
+        this.accountReadLimit(async () => {
+          try {
+            const sessions = await withTimeout(
+              client.listImportableSessions!({
+                limit: options?.limit,
+                query: options?.query,
+                scanLimit: options?.scanLimit,
+                cwd: options?.cwd,
+              }),
+              IMPORTABLE_SESSION_LIST_TIMEOUT_MS,
+              `Timed out listing importable sessions for provider '${provider}' after ${IMPORTABLE_SESSION_LIST_TIMEOUT_MS}ms`,
+            );
+            return {
+              sessions: sessions
+                .filter((session) => matchesImportableSessionQuery(session, options?.query))
+                .map((session) => Object.assign(session, { provider, accountId })),
+              error: null,
+            };
+          } catch (error) {
+            this.logger.warn(
+              { err: error, provider },
+              "Failed to list importable sessions for provider",
+            );
+            return {
+              sessions: [],
+              error: {
+                provider,
+                message: error instanceof Error ? error.message : String(error),
+              },
+            };
+          }
+        }),
+      ),
     );
     const sessions = providerResults.flatMap((result) => result.sessions);
 
@@ -996,6 +1046,24 @@ export class AgentManager {
         .slice(0, limit),
       providerErrors: providerResults.flatMap((result) => (result.error ? [result.error] : [])),
     };
+  }
+
+  private importableAccountClients(): Array<{
+    provider: string;
+    accountId?: string;
+    client: AgentClient;
+  }> {
+    const contexts: Array<{ provider: string; accountId?: string; client: AgentClient }> =
+      Array.from(this.clients, ([provider, client]) => ({ provider, client }));
+    for (const account of this.accounts?.list() ?? []) {
+      if (account.ownership === "managed" && !account.removedAt && account.authState === "ready")
+        contexts.push({
+          provider: account.provider,
+          accountId: account.id,
+          client: this.requireClient(account.provider, account.id),
+        });
+    }
+    return contexts;
   }
 
   private isProviderImportable(
@@ -1045,9 +1113,41 @@ export class AgentManager {
     }
   }
 
-  async listDraftCommands(config: AgentSessionConfig): Promise<AgentSlashCommand[]> {
+  listDraftCommands(config: AgentSessionConfig): Promise<AgentSlashCommand[]> {
+    return this.withDraftAccount(config, (resolved) => this.listDraftCommandsInternal(resolved));
+  }
+
+  listDraftFeatures(config: AgentSessionConfig): Promise<AgentFeature[]> {
+    return this.withDraftAccount(config, (resolved) => this.listDraftFeaturesInternal(resolved));
+  }
+
+  private async withDraftAccount<T>(
+    config: AgentSessionConfig,
+    read: (resolved: AgentSessionConfig) => Promise<T>,
+  ): Promise<T> {
+    if (!this.accounts || (config.provider !== "claude" && config.provider !== "codex"))
+      return read(config);
+    const choice = config.accountId
+      ? { accountId: config.accountId, reason: "Pinned account" }
+      : this.accounts.preview(config.provider, config.accountSelection, config.model);
+    if (!choice.accountId) throw new Error(choice.reason);
+    const lease = await this.accounts.reserve({
+      provider: config.provider,
+      pinnedAccountId: choice.accountId,
+      unattended: false,
+    });
+    try {
+      return await read({ ...config, accountId: choice.accountId });
+    } finally {
+      lease?.release();
+    }
+  }
+
+  private async listDraftCommandsInternal(
+    config: AgentSessionConfig,
+  ): Promise<AgentSlashCommand[]> {
     const normalizedConfig = await this.normalizeConfig(config, { resolveDefaultModel: false });
-    const client = this.requireClient(normalizedConfig.provider);
+    const client = this.requireClient(normalizedConfig.provider, normalizedConfig.accountId);
     if (!normalizedConfig.model) {
       return [];
     }
@@ -1082,9 +1182,9 @@ export class AgentManager {
     }
   }
 
-  async listDraftFeatures(config: AgentSessionConfig): Promise<AgentFeature[]> {
+  private async listDraftFeaturesInternal(config: AgentSessionConfig): Promise<AgentFeature[]> {
     const normalizedConfig = await this.normalizeConfig(config, { resolveDefaultModel: false });
-    const client = this.requireClient(normalizedConfig.provider);
+    const client = this.requireClient(normalizedConfig.provider, normalizedConfig.accountId);
     if (!normalizedConfig.model && !client.listFeatures) {
       return [];
     }
@@ -1136,6 +1236,96 @@ export class AgentManager {
     return this.timelineStore.getRows(id);
   }
 
+  async readHandoffTimeline(id: string): Promise<AgentTimelineRow[]> {
+    validateAgentId(id, "readHandoffTimeline");
+    if (this.durableTimelineStore) return this.durableTimelineStore.getCommittedRows(id);
+    if (this.timelineStore.has(id)) return this.timelineStore.getRows(id);
+    return (await this.registry?.getHandoff(id))?.rows ?? [];
+  }
+
+  async fetchSavedTimeline(
+    id: string,
+    options?: AgentTimelineFetchOptions,
+  ): Promise<AgentTimelineFetchResult> {
+    validateAgentId(id, "fetchSavedTimeline");
+    if (this.durableTimelineStore) return this.durableTimelineStore.fetchCommitted(id, options);
+    if (this.timelineStore.has(id)) return this.timelineStore.fetch(id, options);
+    const saved = await this.registry?.getHandoff(id);
+    this.timelineStore.initialize(id, { rows: saved?.rows });
+    return this.timelineStore.fetch(id, options);
+  }
+
+  private async assertAgentNotHandedOff(id: string): Promise<void> {
+    const record = await this.registry?.get(id);
+    const successor = record?.labels[HANDOFF_TO_AGENT_ID_LABEL];
+    if (successor) throw new Error(`This agent continued in ${successor}. Send new work there.`);
+  }
+
+  /** Release a predecessor whose successor is being deleted, so its task can run again. */
+  async releaseHandoffLink(successorAgentId: string): Promise<void> {
+    const registry = this.registry;
+    const successor = await registry?.get(successorAgentId);
+    const sourceId = successor?.labels[HANDOFF_FROM_AGENT_ID_LABEL];
+    if (!registry || !sourceId) return;
+    // Take the same lock handoff creation uses, and re-check inside it: by the time this runs
+    // the source may already have started a different successor that must keep its link.
+    await registry
+      .runHandoff(sourceId, { release: successorAgentId }, async () => {
+        const source = await registry.get(sourceId);
+        if (source?.labels[HANDOFF_TO_AGENT_ID_LABEL] === successorAgentId) {
+          await this.writeLabels(sourceId, { [HANDOFF_TO_AGENT_ID_LABEL]: null });
+          await registry.clearHandoff(sourceId, successorAgentId);
+        }
+        return source as StoredAgentRecord;
+      })
+      .catch(() => undefined);
+  }
+
+  async stopForHandoff(agentId: string, successorAgentId: string): Promise<void> {
+    await this.runLifecycleMutation(agentId, async () => {
+      const record = await this.requireRegistry().get(agentId);
+      if (!record || record.internal) throw new Error(`Agent not found: ${agentId}`);
+      if (record.archivedAt) throw new Error("Restore the source agent before continuing its work");
+      const existingTarget = record.labels[HANDOFF_TO_AGENT_ID_LABEL];
+      if (existingTarget && existingTarget !== successorAgentId) {
+        throw new Error(`Agent already continued in ${existingTarget}`);
+      }
+      // The label goes on before shutdown on purpose: a source whose provider did not
+      // acknowledge the stop must not accept new prompts while its turn may still be running.
+      // Retrying the handoff clears it once shutdown succeeds.
+      await this.writeLabels(agentId, { [HANDOFF_TO_AGENT_ID_LABEL]: successorAgentId });
+      await this.closeContinuationRuntime(agentId);
+    });
+  }
+
+  async suspendForContinuation(agentId: string): Promise<void> {
+    await this.runLifecycleMutation(agentId, () => this.closeContinuationRuntime(agentId));
+  }
+
+  private async closeContinuationRuntime(agentId: string): Promise<void> {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    await this.cancelAgentRunBefore(agentId, "handoff");
+    const closed = await this.waitWithTimeout({
+      operation: agent.session.close(),
+      timeoutMs: this.rescueTimeouts.reloadSessionCloseMs,
+    });
+    if (closed !== "completed") throw new Error("Source agent did not acknowledge shutdown");
+    await this.drainSessionEvents(agentId);
+    this.accountLeases.get(agentId)?.release();
+    this.accountLeases.delete(agentId);
+    this.cancelRunningProviderSubagents(agentId);
+    const snapshot = this.prepareAgentForClosure(agent, "continuation paused the provider");
+    await this.persistSnapshot(snapshot);
+    this.emitClosedAgent(snapshot, { persist: false });
+  }
+
+  assertAgentCanAcceptPrompt(agentId: string, continuationOperationId?: string): void {
+    this.continuations?.assertPromptAllowed(agentId, continuationOperationId);
+    const successor = this.getAgent(agentId)?.labels[HANDOFF_TO_AGENT_ID_LABEL];
+    if (successor) throw new Error(`This agent continued in ${successor}. Send new work there.`);
+  }
+
   fetchTimeline(id: string, options?: AgentTimelineFetchOptions): AgentTimelineFetchResult {
     this.requireAgent(id);
     return this.timelineStore.fetch(id, options);
@@ -1174,12 +1364,125 @@ export class AgentManager {
     return this.providerSubagents.fetchTimeline(parentAgentId, subagentId, options);
   }
 
-  createAgent(
+  async createAgent(
     config: AgentSessionConfig,
     agentId: string | undefined,
     options: CreateAgentOptions,
   ): Promise<ManagedAgent> {
-    return this.trackAgentRegistrationOperation(this.createAgentInternal(config, agentId, options));
+    const id = validateAgentId(agentId ?? this.idFactory(), "createAgent");
+    return this.registerOnce(id, () => this.createAgentWithAccount(config, id, options));
+  }
+
+  private validateContinuationConfig(
+    config: AgentSessionConfig,
+    options: CreateAgentOptions,
+  ): AgentSessionConfig {
+    if (config.continuationPolicy) {
+      if (
+        !this.accounts ||
+        !["claude", "codex"].includes(config.provider) ||
+        options.owner ||
+        config.internal ||
+        options.labels?.[PARENT_AGENT_ID_LABEL] ||
+        options.labels?.["paseo.schedule-id"]
+      )
+        throw new Error(
+          "Automatic continuation is available only for ordinary Claude and Codex agents.",
+        );
+      const ids = [...new Set(config.continuationPolicy.accountIds)];
+      if (
+        !ids.length ||
+        ids.some(
+          (id) =>
+            !this.accounts!.list().some(
+              (account) =>
+                account.id === id && account.provider === config.provider && !account.removedAt,
+            ),
+        )
+      )
+        throw new Error("Choose existing accounts from this provider for automatic continuation.");
+      config = { ...config, continuationPolicy: { accountIds: ids } };
+    }
+    return config;
+  }
+
+  private async createAgentWithAccount(
+    config: AgentSessionConfig,
+    agentId: string | undefined,
+    options: CreateAgentOptions,
+  ): Promise<ManagedAgent> {
+    this.assertAcceptingAgentRegistrations();
+    config = this.validateContinuationConfig(config, options);
+    if (!this.accounts) return this.createAgentInternal(config, agentId, options);
+    const id = validateAgentId(agentId ?? this.idFactory(), "createAgent");
+    const existing = await this.registry?.get(id);
+    const parentId = options.labels?.[PARENT_AGENT_ID_LABEL];
+    const pinnedAccountId = await this.resolveCreationAccount(config, existing, parentId);
+    const lease = await this.accounts.reserve({
+      provider: config.provider,
+      model: config.model,
+      selection: config.accountSelection,
+      pinnedAccountId,
+      unattended: options.unattended ?? Boolean(options.owner || parentId || config.internal),
+    });
+    if (!lease) return this.createAgentInternal(config, id, options);
+    const pinnedConfig = {
+      ...config,
+      accountId: lease.accountId,
+      accountSelectionReason: lease.reason,
+    };
+    try {
+      const now = new Date().toISOString();
+      await this.registry?.upsert({
+        ...existing,
+        id,
+        provider: config.provider,
+        cwd: config.cwd,
+        workspaceId: options.workspaceId,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+        labels: options.labels ?? existing?.labels ?? {},
+        config: buildSerializableConfig(pinnedConfig),
+        lastStatus: "initializing",
+        owner: options.owner,
+      });
+      this.accountLeases.set(id, lease);
+      return await this.createAgentInternal(pinnedConfig, id, options);
+    } catch (error) {
+      lease.release();
+      this.accountLeases.delete(id);
+      const record = await this.registry?.get(id);
+      if (record)
+        await this.registry?.upsert({
+          ...record,
+          lastStatus: "error",
+          lastError:
+            "Account-pinned agent startup failed. Retry this agent to keep the same account.",
+        });
+      throw error;
+    }
+  }
+
+  private async resolveCreationAccount(
+    config: AgentSessionConfig,
+    existing: StoredAgentRecord | null | undefined,
+    parentId: string | undefined,
+  ): Promise<string | undefined> {
+    if (existing) return existing.config?.accountId ?? this.legacyAccountId(existing.provider);
+    const parent = parentId ? await this.registry?.get(parentId) : null;
+    if (parent?.provider !== config.provider) return config.accountId;
+    const accountId = parent.config?.accountId ?? this.legacyAccountId(parent.provider);
+    if (
+      config.accountSelection?.kind === "fixed" &&
+      config.accountSelection.accountId !== accountId
+    ) {
+      throw new Error("Same-provider subagents must use their parent's account.");
+    }
+    return accountId;
+  }
+
+  private legacyAccountId(provider: string): string | undefined {
+    return provider === "claude" || provider === "codex" ? `default:${provider}` : undefined;
   }
 
   private async createAgentInternal(
@@ -1189,6 +1492,7 @@ export class AgentManager {
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
     const resolvedAgentId = validateAgentId(agentId ?? this.idFactory(), "createAgent");
+    await this.assertAgentNotHandedOff(resolvedAgentId);
     await this.deleteAgentState(resolvedAgentId);
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
       config,
@@ -1198,6 +1502,7 @@ export class AgentManager {
     this.requireEnabledProvider(storedConfig.provider);
     const client = await this.requireAvailableClient({
       provider: storedConfig.provider,
+      accountId: storedConfig.accountId,
     });
     this.paseoToolPolicies.set(resolvedAgentId, paseoToolPolicy);
     const launchContext = await this.buildLaunchContext(
@@ -1210,6 +1515,12 @@ export class AgentManager {
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const createOptions = this.buildCreateSessionOptions(options);
     const session = await client.createSession(providerLaunchConfig, launchContext, createOptions);
+    try {
+      await this.assertAgentNotHandedOff(resolvedAgentId);
+    } catch (error) {
+      await session.close();
+      throw error;
+    }
     await this.requireExternalMcpSupport(session, storedConfig);
     return this.registerSession(session, storedConfig, resolvedAgentId, {
       labels: options.labels,
@@ -1244,9 +1555,50 @@ export class AgentManager {
     },
     resumeOptions?: AgentResumeSessionOptions,
   ): Promise<ManagedAgent> {
-    return this.trackAgentRegistrationOperation(
-      this.resumeAgentFromPersistenceInternal(handle, overrides, agentId, options, resumeOptions),
+    const id = validateAgentId(agentId ?? this.idFactory(), "resumeAgentFromPersistence");
+    return this.registerOnce(id, () =>
+      this.resumeWithAccount(handle, overrides, id, options, resumeOptions),
     );
+  }
+
+  private async resumeWithAccount(
+    handle: AgentPersistenceHandle,
+    overrides: Partial<AgentSessionConfig> | undefined,
+    agentId: string | undefined,
+    options: Parameters<AgentManager["resumeAgentFromPersistence"]>[3],
+    resumeOptions: AgentResumeSessionOptions | undefined,
+  ): Promise<ManagedAgent> {
+    if (!this.accounts)
+      return this.resumeAgentFromPersistenceInternal(
+        handle,
+        overrides,
+        agentId,
+        options,
+        resumeOptions,
+      );
+    const id = validateAgentId(agentId ?? this.idFactory(), "resumeAgentFromPersistence");
+    const record = await this.registry?.get(id);
+    const accountId =
+      record?.config?.accountId ?? overrides?.accountId ?? this.legacyAccountId(handle.provider);
+    const lease = await this.accounts.reserve({
+      provider: handle.provider,
+      pinnedAccountId: accountId,
+      unattended: false,
+    });
+    if (lease) this.accountLeases.set(id, lease);
+    try {
+      return await this.resumeAgentFromPersistenceInternal(
+        handle,
+        { ...overrides, accountId: lease?.accountId },
+        id,
+        options,
+        resumeOptions,
+      );
+    } catch (error) {
+      lease?.release();
+      this.accountLeases.delete(id);
+      throw error;
+    }
   }
 
   private async resumeAgentFromPersistenceInternal(
@@ -1269,6 +1621,7 @@ export class AgentManager {
       "resumeAgentFromPersistence",
     );
     const metadata = (handle.metadata ?? {}) as Partial<AgentSessionConfig>;
+    await this.assertAgentNotHandedOff(resolvedAgentId);
     const mergedConfig = {
       ...metadata,
       ...overrides,
@@ -1279,7 +1632,7 @@ export class AgentManager {
       resolvedAgentId,
     );
 
-    const client = this.requireClient(handle.provider);
+    const client = this.requireClient(handle.provider, storedConfig.accountId);
     const available = await client.isAvailable();
     if (!available) {
       throw new Error(
@@ -1300,6 +1653,12 @@ export class AgentManager {
       launchContext,
       resumeOptions,
     );
+    try {
+      await this.assertAgentNotHandedOff(resolvedAgentId);
+    } catch (error) {
+      await session.close();
+      throw error;
+    }
     await this.requireExternalMcpSupport(session, storedConfig);
     return this.registerSession(session, storedConfig, resolvedAgentId, {
       ...options,
@@ -1309,26 +1668,57 @@ export class AgentManager {
 
   importProviderSession(input: {
     provider: AgentProvider;
+    accountId?: string;
     providerHandleId: string;
     cwd: string;
     workspaceId: string;
     labels?: Record<string, string>;
   }): Promise<ManagedAgent> {
-    return this.trackAgentRegistrationOperation(this.importProviderSessionInternal(input));
+    return this.trackAgentRegistrationOperation(this.importWithAccount(input));
   }
 
-  private async importProviderSessionInternal(input: {
-    provider: AgentProvider;
-    providerHandleId: string;
-    cwd: string;
-    workspaceId: string;
-    labels?: Record<string, string>;
-  }): Promise<ManagedAgent> {
+  private async importWithAccount(
+    input: Parameters<AgentManager["importProviderSession"]>[0],
+  ): Promise<ManagedAgent> {
+    const id = validateAgentId(this.idFactory(), "importProviderSession");
+    const accountId = input.accountId ?? this.legacyAccountId(input.provider);
+    const lease = await this.accounts?.reserve({
+      provider: input.provider,
+      pinnedAccountId: accountId,
+      unattended: false,
+    });
+    if (lease) this.accountLeases.set(id, lease);
+    try {
+      return await this.importProviderSessionInternal(
+        { ...input, accountId: lease?.accountId },
+        id,
+      );
+    } catch (error) {
+      lease?.release();
+      this.accountLeases.delete(id);
+      const record = await this.registry?.get(id);
+      if (record)
+        await this.registry?.upsert({
+          ...record,
+          lastStatus: "error",
+          lastError:
+            "Import startup failed. Retry this agent to keep its original account and session.",
+        });
+      throw error;
+    }
+  }
+
+  private async importProviderSessionInternal(
+    input: Parameters<AgentManager["importProviderSession"]>[0],
+    resolvedAgentId: string,
+  ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
-    const resolvedAgentId = validateAgentId(this.idFactory(), "importProviderSession");
     this.requireEnabledProvider(input.provider);
 
-    const client = await this.requireAvailableClient({ provider: input.provider });
+    const client = await this.requireAvailableClient({
+      provider: input.provider,
+      accountId: input.accountId,
+    });
     if (!client.importSession) {
       throw new Error(`Provider '${input.provider}' does not support importing sessions`);
     }
@@ -1336,6 +1726,7 @@ export class AgentManager {
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
       {
         provider: input.provider,
+        accountId: input.accountId,
         cwd: input.cwd,
       },
       resolvedAgentId,
@@ -1348,6 +1739,19 @@ export class AgentManager {
       paseoToolPolicy,
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
+    const now = new Date().toISOString();
+    await this.registry?.upsert({
+      id: resolvedAgentId,
+      provider: input.provider,
+      cwd: input.cwd,
+      workspaceId: input.workspaceId,
+      createdAt: now,
+      updatedAt: now,
+      labels: input.labels ?? {},
+      config: buildSerializableConfig(storedConfig),
+      persistence: { provider: input.provider, sessionId: input.providerHandleId },
+      lastStatus: "initializing",
+    });
     const imported = await client.importSession(
       {
         providerHandleId: input.providerHandleId,
@@ -1358,7 +1762,7 @@ export class AgentManager {
     let handedToRegistration = false;
     try {
       const importedConfig = await this.normalizeConfig(
-        stripInternalPaseoMcpServer(imported.config),
+        stripInternalPaseoMcpServer({ ...imported.config, accountId: input.accountId }),
       );
       const timelineRows = buildImportedTimelineRows(imported.timeline);
       const initialTitle = resolveImportedAgentTitle(importedConfig, timelineRows);
@@ -1420,7 +1824,9 @@ export class AgentManager {
     const preservedAttention = existing.attention;
     const handle = existing.persistence;
     const provider = handle?.provider ?? existing.provider;
-    const client = this.requireClient(provider);
+    if (overrides?.accountId && overrides.accountId !== existing.config.accountId)
+      throw new Error("Use Continue with to change an agent's account.");
+    const client = this.requireClient(provider, existing.config.accountId);
     const refreshConfig = {
       ...existing.config,
       ...overrides,
@@ -1609,6 +2015,10 @@ export class AgentManager {
       "agent.manager.close.complete",
     );
 
+    // The live agent is already removed, so keeping its reservation would strand the account:
+    // close finds nothing to retry, resume refuses, and logout demands closing a missing agent.
+    this.accountLeases.get(agentId)?.release();
+    this.accountLeases.delete(agentId);
     if (closeError !== undefined) {
       throw closeError;
     }
@@ -1632,6 +2042,7 @@ export class AgentManager {
   }
 
   async archiveAgent(agentId: string): Promise<{ archivedAt: string }> {
+    await this.cancelContinuation(agentId);
     return this.runLifecycleMutation(agentId, () => this.archiveAgentUnlocked(agentId));
   }
 
@@ -1711,7 +2122,12 @@ export class AgentManager {
 
     await registry.upsert(archivedRecord);
 
-    await this.syncNativeArchiveState(record.provider, record.persistence, "archive");
+    await this.syncNativeArchiveState(
+      record.provider,
+      record.persistence,
+      "archive",
+      record.config?.accountId,
+    );
 
     if (this.agents.has(record.id)) {
       this.notifyAgentState(record.id);
@@ -1875,8 +2291,21 @@ export class AgentManager {
   async setLabels(agentId: string, labels: Record<string, string>): Promise<void> {
     await this.runLifecycleMutation(agentId, async () => {
       const agent = this.requireAgent(agentId);
+      this.assertHandoffLinkUnchanged(agent.labels, labels);
       await this.writeLabels(agent.id, labels);
     });
+  }
+
+  private assertHandoffLinkUnchanged(
+    current: Record<string, string>,
+    patch: Record<string, string>,
+  ): void {
+    for (const label of [HANDOFF_FROM_AGENT_ID_LABEL, HANDOFF_TO_AGENT_ID_LABEL]) {
+      const value = patch[label];
+      if (value !== undefined && value !== current[label]) {
+        throw new Error("Continuation links are managed by Paseo");
+      }
+    }
   }
 
   private async writeLabels(agentId: string, patch: AgentLabelPatch): Promise<WriteLabelsResult> {
@@ -1982,6 +2411,7 @@ export class AgentManager {
   }
 
   async archiveSnapshot(agentId: string, archivedAt: string): Promise<StoredAgentRecord> {
+    await this.cancelContinuation(agentId);
     const registry = this.requireRegistry();
     const liveAgent = this.getAgent(agentId);
     if (liveAgent) {
@@ -1998,7 +2428,12 @@ export class AgentManager {
     const nextRecord = buildArchivedAgentRecord(record, { archivedAt });
     await registry.upsert(nextRecord);
 
-    await this.syncNativeArchiveState(record.provider, record.persistence, "archive");
+    await this.syncNativeArchiveState(
+      record.provider,
+      record.persistence,
+      "archive",
+      record.config?.accountId,
+    );
 
     if (this.agents.has(agentId)) {
       this.notifyAgentState(agentId);
@@ -2025,7 +2460,12 @@ export class AgentManager {
       return false;
     }
 
-    await this.syncNativeArchiveState(record.provider, record.persistence, "restore");
+    await this.syncNativeArchiveState(
+      record.provider,
+      record.persistence,
+      "restore",
+      record.config?.accountId,
+    );
 
     await registry.upsert({
       ...record,
@@ -2075,6 +2515,10 @@ export class AgentManager {
       labels?: Record<string, string>;
     },
   ): Promise<void> {
+    if (updates.labels) {
+      const record = await this.requireRegistry().get(agentId);
+      this.assertHandoffLinkUnchanged(record?.labels ?? {}, updates.labels);
+    }
     const liveAgent = this.getAgent(agentId);
     if (liveAgent) {
       if (updates.title) {
@@ -2237,6 +2681,7 @@ export class AgentManager {
   }): Promise<string> {
     const { agent, agentId, pendingRun, prompt, options } = params;
     try {
+      this.assertAgentCanAcceptPrompt(agentId, options?.continuationOperationId);
       const result = await agent.session.startTurn(prompt, options);
       if (pendingRun.settled) {
         throw new Error(`Agent ${agentId} run was canceled before its turn started`);
@@ -2265,6 +2710,7 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
   ): AsyncGenerator<AgentStreamEvent> {
+    this.assertAgentCanAcceptPrompt(agentId, options?.continuationOperationId);
     const existingAgent = this.requireSessionAgent(agentId);
     this.logger.trace(
       {
@@ -2801,6 +3247,7 @@ export class AgentManager {
   }
 
   async cancelAgentRun(agentId: string): Promise<AgentRunCancellationResult> {
+    await this.cancelContinuation(agentId);
     return this.runForegroundMutation(agentId, () => this.cancelAgentRunNow(agentId));
   }
 
@@ -2871,9 +3318,9 @@ export class AgentManager {
 
   private async cancelAgentRunBefore(
     agentId: string,
-    action: "reload" | "replace" | "rewind",
+    action: "reload" | "replace" | "rewind" | "handoff",
   ): Promise<void> {
-    const result = await this.cancelAgentRun(agentId);
+    const result = await this.runForegroundMutation(agentId, () => this.cancelAgentRunNow(agentId));
     if (result.status === "refused") {
       throw new AgentRunCancellationError(agentId, action);
     }
@@ -3273,6 +3720,7 @@ export class AgentManager {
       });
 
       this.assertAcceptingAgentRegistrations();
+      await this.assertAgentNotHandedOff(resolvedAgentId);
       this.agents.set(resolvedAgentId, managed);
       registered = true;
       // Initialize previousStatus to track transitions
@@ -3635,15 +4083,14 @@ export class AgentManager {
     config: AgentSessionConfig,
     fallbackTitle: string | null,
   ): Promise<string | null> {
+    // Account-pinned creation and imports persist a record before the session registers,
+    // so a record without a title still takes the initial one.
     const existing = await this.registry?.get(agentId);
-    if (existing) {
-      return existing.title ?? null;
-    }
     const explicitTitle =
       typeof config.title === "string" && config.title.trim().length > 0
         ? config.title.trim()
         : null;
-    return explicitTitle ?? fallbackTitle;
+    return existing?.title ?? explicitTitle ?? fallbackTitle;
   }
 
   private async persistSnapshot(
@@ -4162,6 +4609,7 @@ export class AgentManager {
       return;
     }
 
+    await this.recordReportedAccountCapacity(agent, event.item);
     this.recordAndDispatchTimelineItem(agent.id, event.item, event.provider, event.turnId);
     if (event.item.type === "user_message") {
       agent.lastUserMessageAt = new Date();
@@ -4169,6 +4617,31 @@ export class AgentManager {
     }
     flags.shouldDispatchEvent = false;
     flags.shouldNotifyWaiters = true;
+  }
+
+  private async recordReportedAccountCapacity(
+    agent: ManagedAgent,
+    item: AgentTimelineItem,
+  ): Promise<void> {
+    if (
+      item.type !== "notification" ||
+      item.code !== "provider_capacity" ||
+      !agent.config.accountId
+    )
+      return;
+    try {
+      await this.accounts?.reportCapacity(
+        agent.config.accountId,
+        item.capacityScope === "model" ? agent.config.model : undefined,
+        item.resetsAt,
+      );
+    } catch {
+      // A metadata write failure must not discard the provider's timeline or partial work.
+      this.logger.warn(
+        { accountId: agent.config.accountId },
+        "Could not save provider capacity status",
+      );
+    }
   }
 
   private onStreamTurnCompleted(params: {
@@ -4651,6 +5124,39 @@ export class AgentManager {
     });
   }
 
+  private registerOnce(id: string, start: () => Promise<ManagedAgent>): Promise<ManagedAgent> {
+    if (this.registrationIds.has(id) || this.accountLeases.has(id))
+      return Promise.reject(new Error("This agent already has a runtime or startup in progress."));
+    this.registrationIds.add(id);
+    return this.trackAgentRegistrationOperation(
+      start().finally(() => this.registrationIds.delete(id)),
+    );
+  }
+
+  private observeAccountChanges(): void {
+    this.accounts?.onChange((account) => {
+      if (account.authState === "ready" || this.accounts?.hasRuntime(account.id)) return;
+      const client = this.accountClients.get(account.id);
+      this.accountClients.delete(account.id);
+      if (client?.shutdown) this.trackBackgroundTask(client.shutdown().catch(() => undefined));
+    });
+  }
+
+  getAccountCatalog(input: Parameters<AccountCatalog["read"]>[0]) {
+    if (!this.accounts) throw new Error("Native accounts are unavailable.");
+    this.requireEnabledProvider(input.provider);
+    return this.accountCatalog.read(input, this.accounts, (provider, accountId) =>
+      this.requireClient(provider, accountId),
+    );
+  }
+
+  async closeAccountClients(): Promise<void> {
+    await Promise.allSettled(
+      [...this.accountClients.values()].map((client) => client.shutdown?.()),
+    );
+    this.accountClients.clear();
+  }
+
   private trackAgentRegistrationOperation<T>(result: Promise<T>): Promise<T> {
     const settled = result.then(
       () => undefined,
@@ -4862,7 +5368,7 @@ export class AgentManager {
   }
 
   private async resolveDefaultModelId(config: AgentSessionConfig): Promise<string | undefined> {
-    const client = this.clients.get(config.provider);
+    const client = this.findClient(config.provider, config.accountId);
     if (!client) {
       return undefined;
     }
@@ -4951,8 +5457,11 @@ export class AgentManager {
     return launchContext.paseoTools ? stripInternalPaseoMcpServer(launchConfig) : launchConfig;
   }
 
-  private async requireAvailableClient(options: { provider: AgentProvider }): Promise<AgentClient> {
-    const client = this.clients.get(options.provider);
+  private async requireAvailableClient(options: {
+    provider: AgentProvider;
+    accountId?: string;
+  }): Promise<AgentClient> {
+    const client = this.findClient(options.provider, options.accountId);
     if (!client) {
       const configuredProviders = this.getConfiguredProviderIds();
       throw new Error(
@@ -4992,21 +5501,42 @@ export class AgentManager {
     return Array.from(new Set([...this.providerEnabled.keys(), ...this.clients.keys()]));
   }
 
-  private requireClient(provider: AgentProvider): AgentClient {
-    const client = this.clients.get(provider);
+  private requireClient(provider: AgentProvider, accountId?: string): AgentClient {
+    const client = this.findClient(provider, accountId);
     if (!client) {
       throw new Error(`No client registered for provider '${provider}'`);
     }
     return client;
   }
 
+  private findClient(provider: AgentProvider, accountId?: string): AgentClient | undefined {
+    if (accountId && this.accounts) {
+      const account = this.accounts.store.get(accountId);
+      if (account.provider !== provider) throw new Error("Account and provider do not match");
+      const context = this.accounts.store.context(accountId);
+      if (context) {
+        const key = accountId;
+        const cached = this.accountClients.get(key);
+        if (cached) return cached;
+        if (!this.createAccountClient) throw new Error("Account runtime factory is unavailable");
+        const client = this.createAccountClient(provider, context);
+        this.accountClients.set(key, client);
+        return client;
+      }
+    }
+    return this.clients.get(provider);
+  }
+
   private async syncNativeArchiveState(
     provider: AgentProvider,
     persistence: AgentPersistenceHandle | null | undefined,
     state: "archive" | "restore",
+    accountId?: string,
   ): Promise<void> {
     if (!persistence) return;
-    const client = this.clients.get(provider);
+    // A disabled or unloaded provider has no client. Archiving still has to finish, or the
+    // record says archived while every connected client still shows the agent live.
+    const client = this.findClient(provider, accountId);
     const sync =
       state === "archive" ? client?.archiveNativeSession : client?.unarchiveNativeSession;
     if (!sync) return;

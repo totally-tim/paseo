@@ -107,6 +107,7 @@ test("interruptAgentIfRunning rejects when graceful cancellation is refused", as
     agentManager: {
       getAgent: vi.fn(() => ({ id: agentId, provider: "codex", lifecycle: "running" })),
       hasInFlightRun: vi.fn(() => true),
+      cancelContinuation: vi.fn(async () => undefined),
       cancelAgentRun: vi.fn(async () => ({ status: "refused" as const })),
     },
   });
@@ -128,6 +129,7 @@ test("cancel_agent_request reports refusal only through its response", async () 
     agentManager: {
       getAgent,
       hasInFlightRun: vi.fn(() => true),
+      cancelContinuation: vi.fn(async () => undefined),
       cancelAgentRun: vi.fn(async () => ({ status: "refused" as const })),
     },
   });
@@ -160,6 +162,7 @@ test("legacy cancel_agent_request reports refusal through the activity log", asy
     agentManager: {
       getAgent: vi.fn(() => ({ id: agentId, provider: "codex", lifecycle: "running" })),
       hasInFlightRun: vi.fn(() => true),
+      cancelContinuation: vi.fn(async () => undefined),
       cancelAgentRun: vi.fn(async () => ({ status: "refused" as const })),
     },
   });

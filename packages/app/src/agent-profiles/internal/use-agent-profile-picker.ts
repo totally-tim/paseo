@@ -15,6 +15,8 @@ import {
 } from "./materialize-profile";
 import { buildAgentProfileTags } from "./profile-summary";
 import { useAgentProfiles } from "./use-agent-profiles";
+import { useProviderAccounts } from "@/provider-accounts/use-provider-accounts";
+import { accountUsageSummary, selectedAccount } from "@/provider-accounts/selection-summary";
 
 /** The draft composer owns profile application as one state transition. */
 export interface DraftAgentProfileControls {
@@ -37,6 +39,7 @@ export interface AgentProfilePickerRow {
   name: string;
   /** "Claude Code · Opus 5 · Plan · Think hard" */
   summary: string;
+  accountSummary?: string;
 }
 
 export interface AgentProfilePicker {
@@ -68,6 +71,12 @@ export function useAgentProfilePicker(
   const { serverId, availableProviders, target } = input;
   const { t } = useTranslation();
   const { profiles, isSupported } = useAgentProfiles(serverId);
+  const accounts = useProviderAccounts(serverId ?? "");
+  const runtimeAccountId = useSessionStore((state) =>
+    target.kind === "agent"
+      ? state.sessions[serverId ?? ""]?.agents.get(target.agentId)?.accountId
+      : undefined,
+  );
   // Profiles are host config, so their labels read from the host-wide catalog
   // rather than a workspace's. That is also the key the settings section uses,
   // so every composer on a host shares one query instead of adding its own.
@@ -94,18 +103,36 @@ export function useAgentProfilePicker(
 
   const rows = useMemo<AgentProfilePickerRow[]>(
     () =>
-      applicableProfiles.map((profile) => ({
-        id: profile.id,
-        provider: profile.provider,
-        modelId: profile.model?.trim() ?? "",
-        icon: profile.icon ?? "",
-        color: profile.color ?? "",
-        name: profile.name,
-        summary: buildAgentProfileTags({ profile, entries, formatFeatureCount })
-          .map((tag) => tag.label)
-          .join(" · "),
-      })),
-    [applicableProfiles, entries, formatFeatureCount],
+      applicableProfiles.map((profile) => {
+        const account =
+          target.kind === "agent"
+            ? accounts.data?.accounts.find((entry) => entry.id === runtimeAccountId)
+            : selectedAccount(accounts.data, profile.provider, profile.accountSelection);
+        const usage = accounts.data?.usage.find((entry) => entry.accountId === account?.id);
+        return {
+          id: profile.id,
+          provider: profile.provider,
+          modelId: profile.model?.trim() ?? "",
+          icon: profile.icon ?? "",
+          color: profile.color ?? "",
+          name: profile.name,
+          summary: buildAgentProfileTags({ profile, entries, formatFeatureCount })
+            .map((tag) => tag.label)
+            .join(" · "),
+          accountSummary: account
+            ? `${account.label} · ${accountUsageSummary(usage?.usage) ?? t("providerAccounts.usageUnavailable")}${usage?.stale ? ` · ${t("providerAccounts.lastReported")}` : ""}`
+            : undefined,
+        };
+      }),
+    [
+      applicableProfiles,
+      entries,
+      formatFeatureCount,
+      accounts.data,
+      target.kind,
+      runtimeAccountId,
+      t,
+    ],
   );
 
   const persistSelection = useCallback(

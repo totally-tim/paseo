@@ -11,6 +11,7 @@ import type { AgentProviderNotice } from "./agent-sdk-types.js";
 export type LifecycleAgentSnapshot = Pick<ManagedAgent, "id" | "cwd" | "lifecycle">;
 
 export interface LifecycleAgentManager {
+  cancelContinuation?(agentId: string): Promise<void>;
   getAgent(agentId: string): LifecycleAgentSnapshot | null;
   hasInFlightRun(agentId: string): boolean;
   cancelAgentRun(agentId: string): Promise<AgentRunCancellationResult>;
@@ -60,6 +61,7 @@ async function requestAgentRunCancellation(
   agentId: string,
 ): Promise<RequestedAgentRunCancellation> {
   const { agentManager, logger } = dependencies;
+  await agentManager.cancelContinuation?.(agentId);
   const agent = agentManager.getAgent(agentId);
   if (!agent) {
     logger.trace({ agentId }, "cancelAgentRunCommand: agent not found");

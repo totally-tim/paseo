@@ -1924,6 +1924,7 @@ test("close_items_request archives agents and kills terminals in one batch", asy
       pushNotifications: asPushNotifications(),
       paseoHome: "/tmp/paseo-test",
       agentManager: asAgentManager({
+        cancelContinuation: vi.fn(async () => undefined),
         subscribe: () => () => {},
         listAgents: () => [],
         getAgent: (agentId: string) => (agentId === "agent-1" ? { id: agentId } : null),
@@ -2092,6 +2093,7 @@ test("close_items_request archives stored agents that are not currently loaded",
       pushNotifications: asPushNotifications(),
       paseoHome: "/tmp/paseo-test",
       agentManager: asAgentManager({
+        cancelContinuation: vi.fn(async () => undefined),
         subscribe: () => () => {},
         listAgents: () => [],
         getAgent: (agentId: string) => (agentId === "agent-live" ? { id: agentId } : null),
@@ -2251,6 +2253,7 @@ test("close_items_request continues after an archive failure", async () => {
       pushNotifications: asPushNotifications(),
       paseoHome: "/tmp/paseo-test",
       agentManager: asAgentManager({
+        cancelContinuation: vi.fn(async () => undefined),
         subscribe: () => () => {},
         listAgents: () => [],
         getAgent: (agentId: string) =>
@@ -3080,6 +3083,7 @@ test("fetch_recent_provider_sessions_request lists importable provider sessions 
   session.agentManager.listAgents = () => [
     {
       provider: "codex",
+      config: { provider: "codex", cwd: "/tmp/recent" },
       persistence: {
         provider: "codex",
         sessionId: "live-session",
@@ -3274,6 +3278,7 @@ test("fetch_recent_provider_sessions_request reports filteredAlreadyImportedCoun
   session.agentManager.listAgents = () => [
     {
       provider: "codex",
+      config: { provider: "codex", cwd: "/tmp/recent" },
       persistence: {
         provider: "codex",
         sessionId: "live-session",

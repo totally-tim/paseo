@@ -1,4 +1,7 @@
+import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import { EventEmitter } from "node:events";
+import type { ProviderAccountContext } from "./provider-account-context.js";
+import type { ProviderRuntimeSettings } from "./provider-launch-config.js";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -139,6 +142,8 @@ interface ProviderSnapshotProviderOptions {
 }
 
 export interface ResolveProviderCreateConfigOptions {
+  accountSelection?: AccountSelection;
+  model?: string;
   cwd?: string | null;
   provider: AgentProvider;
   requestedMode: string | undefined;
@@ -309,6 +314,17 @@ export class ProviderSnapshotManager {
     return this.providerRegistry[provider]?.label ?? provider;
   }
 
+  createAccountClient(provider: AgentProvider, context: ProviderAccountContext): AgentClient {
+    const definition = this.requireProvider(provider);
+    if (provider !== context.provider) throw new Error("Account and provider do not match");
+    return definition.createClient(this.logger, context);
+  }
+
+  getAccountRuntimeSettings(provider: AgentProvider): ProviderRuntimeSettings | undefined {
+    // Account helpers exist for providers the registry may not carry; they still launch.
+    return this.providerRegistry[provider]?.runtimeSettings;
+  }
+
   getAgentManagerProviderState(): AgentManagerProviderState {
     const providerDefinitions: AgentManagerProviderState["providerDefinitions"] = {};
     const clients: AgentManagerProviderState["clients"] = {};
@@ -467,14 +483,26 @@ export class ProviderSnapshotManager {
     }
   }
 
+  private accountCatalogReader?: (
+    input: ResolveProviderCreateConfigOptions,
+  ) => Promise<ProviderSnapshotEntry | null>;
+
+  setAccountCatalogReader(
+    reader: (input: ResolveProviderCreateConfigOptions) => Promise<ProviderSnapshotEntry | null>,
+  ): void {
+    this.accountCatalogReader = reader;
+  }
+
   async resolveCreateConfig(
     input: ResolveProviderCreateConfigOptions,
   ): Promise<ResolvedProviderCreateConfig> {
-    const entry = await this.getReadyProvider({
-      cwd: input.cwd,
-      provider: input.provider,
-      wait: true,
-    });
+    const entry =
+      (await this.accountCatalogReader?.(input)) ??
+      (await this.getReadyProvider({
+        cwd: input.cwd,
+        provider: input.provider,
+        wait: true,
+      }));
     const definition = this.requireProvider(input.provider);
     const parent = input.parent ? this.resolveParent(input.parent) : null;
     return definition.resolveCreateConfig({

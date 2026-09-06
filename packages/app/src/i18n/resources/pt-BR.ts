@@ -2,6 +2,22 @@ import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
 
 export const ptBR: TranslationResources = {
+  providerAccounts: en.providerAccounts,
+  agentHandoff: {
+    custom: "Configuração personalizada",
+    action: "Continuar com…",
+    description:
+      "Inicie uma nova conversa neste espaço com o contexto salvo. O agente atual será interrompido. Ao escolher outro provedor, esse contexto será enviado a ele.",
+    model: "Provedor e modelo",
+    mode: "Modo de permissões",
+    defaultMode: "Padrão do provedor",
+    continue: "Iniciar continuação",
+    source: "Conversa anterior",
+    successor: "Abrir continuação",
+    stopped: "Continuação solicitada",
+    briefing: "Instruções adicionais (opcional)",
+    thinking: "Raciocínio: {{value}}",
+  },
   common: {
     back: "Voltar",
     loading: "Carregando...",

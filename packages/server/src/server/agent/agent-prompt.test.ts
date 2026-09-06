@@ -81,12 +81,14 @@ function createFinishNotificationScenario(
   Reflect.set(childAgent, "id", "child-agent");
   Reflect.set(childAgent, "lifecycle", "idle");
   Reflect.set(childAgent, "config", { title: "Child Agent" });
+  Reflect.set(childAgent, "labels", {});
   Reflect.set(childAgent, "pendingPermissions", new Map());
 
   const callerAgent: ManagedAgent = Object.create(null);
   Reflect.set(callerAgent, "id", "caller-agent");
   Reflect.set(callerAgent, "lifecycle", "idle");
   Reflect.set(callerAgent, "config", { title: "Caller Agent" });
+  Reflect.set(callerAgent, "labels", {});
 
   const agentManager: AgentManager = Object.create(AgentManager.prototype);
   Reflect.set(agentManager, "getAgent", (agentId: string) => {
@@ -458,12 +460,14 @@ it("does not notify archived callers", async () => {
   Reflect.set(childAgent, "id", "child-agent");
   Reflect.set(childAgent, "lifecycle", "idle");
   Reflect.set(childAgent, "config", { title: "Child Agent" });
+  Reflect.set(childAgent, "labels", {});
   Reflect.set(childAgent, "pendingPermissions", new Map());
 
   const callerAgent: ManagedAgent = Object.create(null);
   Reflect.set(callerAgent, "id", "caller-agent");
   Reflect.set(callerAgent, "lifecycle", "idle");
   Reflect.set(callerAgent, "config", { title: "Caller Agent" });
+  Reflect.set(callerAgent, "labels", {});
 
   const streamAgentSpy = vi.fn(() => (async function* noop() {})());
   const replaceAgentRunSpy = vi.fn(() => (async function* noop() {})());

@@ -2,6 +2,22 @@ import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
 
 export const ar: TranslationResources = {
+  providerAccounts: en.providerAccounts,
+  agentHandoff: {
+    custom: "إعدادات مخصصة",
+    action: "المتابعة باستخدام…",
+    description:
+      "ابدأ محادثة جديدة في مساحة العمل هذه بالسياق المحفوظ. سيتوقف الوكيل الحالي. اختيار مزود آخر يرسل السياق إليه.",
+    model: "المزود والنموذج",
+    mode: "وضع الأذونات",
+    defaultMode: "الإعداد الافتراضي للمزود",
+    continue: "بدء المتابعة",
+    source: "المحادثة السابقة",
+    successor: "فتح المتابعة",
+    stopped: "تم طلب المتابعة",
+    briefing: "تعليمات إضافية (اختياري)",
+    thinking: "التفكير: {{value}}",
+  },
   common: {
     back: "خلف",
     loading: "تحميل...",

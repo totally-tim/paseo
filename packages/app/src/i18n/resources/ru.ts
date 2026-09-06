@@ -2,6 +2,22 @@ import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
 
 export const ru: TranslationResources = {
+  providerAccounts: en.providerAccounts,
+  agentHandoff: {
+    custom: "Свои настройки",
+    action: "Продолжить с…",
+    description:
+      "Начните новый разговор в этом рабочем пространстве с сохраненным контекстом. Текущий агент остановится. При выборе другого провайдера контекст будет передан ему.",
+    model: "Провайдер и модель",
+    mode: "Режим разрешений",
+    defaultMode: "По умолчанию провайдера",
+    continue: "Начать продолжение",
+    source: "Предыдущий разговор",
+    successor: "Открыть продолжение",
+    stopped: "Продолжение запрошено",
+    briefing: "Дополнительные инструкции (необязательно)",
+    thinking: "Рассуждение: {{value}}",
+  },
   common: {
     back: "Назад",
     loading: "Загрузка...",

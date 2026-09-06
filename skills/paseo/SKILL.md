@@ -77,6 +77,7 @@ There is no `profile` parameter on `create_agent`. Materialize the selected prof
 - copy `modeId` to `settings.modeId`
 - copy `thinkingOptionId` to `settings.thinkingOptionId`
 - copy `featureValues` to `settings.features`
+- copy `accountSelection` to `settings.accountSelection`
 
 Omit absent values. Do not remember a selected profile or infer drift later; a profile is only launch configuration.
 
@@ -84,15 +85,17 @@ If no profile fits, or no profiles are configured, use the provider discovery to
 
 **`list_providers`** — compact provider availability and modes.
 
-**`list_models`** — full model list for one provider. Use only when you need model IDs or thinking options; the list can be large.
+**`list_provider_accounts`** — stable account IDs, labels, and login states. Use the ID for a fixed selection. Manage login and removal in Settings. Same-provider subagents inherit their parent's resolved account.
 
-**`inspect_provider`** — compact provider capability and feature inspection. Required: `provider`; pass `cwd` when you are not in an agent-scoped session. Optional: `settings` with draft `model`, `modeId`, `thinkingOptionId`, and `features`.
+**`list_models`** — full model list for one provider and optional `accountSelection` and `cwd`. Use only when you need model IDs or thinking options; the list can be large.
+
+**`inspect_provider`** — compact provider capability and feature inspection. Required: `provider`; pass `cwd` when you are not in an agent-scoped session. Optional: `settings` with draft `model`, `modeId`, `thinkingOptionId`, `features`, and `accountSelection`.
 
 Only set feature IDs returned by `inspect_provider`. For Codex fast mode, look for `fast_mode` and pass `settings: { features: { "fast_mode": true } }` to `create_agent` or `update_agent`.
 
 ## Schedules and heartbeats
 
-**`create_schedule`** — starts a new agent on a cron cadence. Required: `prompt`, `cron`, `provider`. Optional: `timezone`, `name`, `cwd`, `maxRuns`, `expiresIn`. Use when the recurring work should live in fresh agents.
+**`create_schedule`** — starts a new agent on a cron cadence. Required: `prompt`, `cron`, `provider`. Optional: `timezone`, `name`, `cwd`, `maxRuns`, `expiresIn`, `accountSelection`. Use when the recurring work should live in fresh agents.
 
 **`create_heartbeat`** — sends you a prompt on a cron cadence. Required: `prompt`, `cron`. Optional: `timezone`, `name`, `maxRuns`, `expiresIn`. Use for reminders, PR/build babysitting, and status checks that should return to this conversation.
 
