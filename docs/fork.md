@@ -59,7 +59,7 @@ Name the branch after what you merged, so a later reader can tell a tag sync fro
 git fetch upstream --tags
 git fetch origin
 git switch -c sync/upstream-main-2026-09-06 origin/main   # or sync/v0.7.5 for a tag
-git merge upstream/main                            # or the tag
+git merge upstream/main                                   # or the tag
 # resolve, then run typecheck, lint, and the tests for the files you touched
 git push -u origin sync/upstream-main-2026-09-06
 gh pr create -R totally-tim/paseo --base main
