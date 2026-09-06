@@ -20,6 +20,8 @@ const CAPABILITIES = [
 interface ProviderHarnessOptions {
   capabilities?: ProviderConnection["capabilities"];
   completeTurn?: boolean;
+  rootParentSessionId?: string;
+  childRestoration?: "parent" | "core";
 }
 
 function createProviderHarness(options: ProviderHarnessOptions = {}) {
@@ -54,6 +56,7 @@ function createProviderHarness(options: ProviderHarnessOptions = {}) {
           type: "session.opened",
           requestId: input.requestId,
           sessionId: input.sessionId,
+          parentSessionId: options.rootParentSessionId,
           capabilities,
           restoration: "core",
           persistence: { version: 1, data: { token: "root" } },
@@ -84,7 +87,7 @@ function createProviderHarness(options: ProviderHarnessOptions = {}) {
           sessionId: "child-1",
           parentSessionId: input.sessionId,
           capabilities: [],
-          restoration: "parent",
+          restoration: options.childRestoration ?? "parent",
           title: "Plugin child",
           cwd: input.config.cwd,
         });
@@ -199,6 +202,23 @@ function eventsOfType(events: AgentStreamEvent[], type: AgentStreamEvent["type"]
 }
 
 describe("PluginAgentClientRegistry", () => {
+  test("opens an independently restored session whose provider parent is not open", async () => {
+    const harness = createProviderHarness({ rootParentSessionId: "unopened-provider-parent" });
+    const registry = new PluginAgentClientRegistry(createTestLogger());
+    registry.replace([harness.registration]);
+    const client = registry.clients()[harness.registration.id]!;
+    const session = await client.createSession({ provider: "plugin-direct", cwd: "/workspace" });
+    try {
+      expect(session.describePersistence()).not.toBeNull();
+      await expect(
+        session.run("hello", { clientMessageId: "restored-message" }),
+      ).resolves.toBeDefined();
+    } finally {
+      await session.close();
+      await registry.shutdown();
+    }
+  });
+
   test("gates persistence operations on negotiated provider capabilities", async () => {
     const harness = createProviderHarness({ capabilities: ["session.persistence"] });
     const registry = new PluginAgentClientRegistry(createTestLogger());
@@ -258,10 +278,15 @@ describe("PluginAgentClientRegistry", () => {
     expect(eventsOfType(events, "turn_failed")).toHaveLength(1);
   });
 
-  test.each(["before", "after"])(
-    "restores the same provider child when closing the parent %s replacement opens",
-    async (closeOrder) => {
-      const harness = createProviderHarness();
+  test.each([
+    { closeOrder: "before", childRestoration: "parent" as const },
+    { closeOrder: "after", childRestoration: "parent" as const },
+    { closeOrder: "before", childRestoration: "core" as const },
+    { closeOrder: "after", childRestoration: "core" as const },
+  ])(
+    "restores a $childRestoration child when closing the parent $closeOrder replacement opens",
+    async ({ closeOrder, childRestoration }) => {
+      const harness = createProviderHarness({ childRestoration });
       const registry = new PluginAgentClientRegistry(createTestLogger());
       registry.replace([harness.registration]);
       const client = registry.clients()[harness.registration.id]!;
@@ -296,6 +321,9 @@ describe("PluginAgentClientRegistry", () => {
           if (closeOrder === "before") await previous.close();
           session = await client.resumeSession(persistence, { cwd: "/workspace" });
           if (closeOrder === "after") await previous.close();
+          expect(harness.inputs).not.toContainEqual(
+            expect.objectContaining({ type: "session.close", sessionId: "child-1" }),
+          );
           const events: AgentStreamEvent[] = [];
           const unsubscribe = session.subscribe((event) => events.push(event));
           harness.emit({

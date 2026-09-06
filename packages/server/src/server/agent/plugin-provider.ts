@@ -408,12 +408,12 @@ class ProviderRuntime {
 
   private acceptProviderChild(event: ProviderEvent): boolean {
     if (event.type !== "session.opened" || !event.parentSessionId) return false;
+    const existing = this.providerSessions.get(event.sessionId);
+    // A core-opened session can retain a provider parent that Paseo has not opened.
+    if (existing && existing.parentId === undefined) return false;
     const parent = this.providerSessions.get(event.parentSessionId);
     if (!parent) return true;
-    const existing = this.providerSessions.get(event.sessionId);
-    if (existing && (existing.restoration === "core" || existing.parentId === parent.id)) {
-      return false;
-    }
+    if (existing?.parentId === parent.id) return false;
     // Reload opens the replacement before closing its predecessor. A replayed child belongs
     // to the newly announced parent, even while the previous runtime still owns its old copy.
     const sessionId = randomUUID();
@@ -629,7 +629,7 @@ class ProviderRuntimeSession {
 
   async close(): Promise<void> {
     if (this.restoration === "parent") {
-      this.runtime.removeSession(this.id, this.providerSessionId);
+      this.detach();
       return;
     }
     try {
@@ -639,8 +639,12 @@ class ProviderRuntimeSession {
         sessionId: this.providerSessionId,
       });
     } finally {
-      this.runtime.removeSession(this.id, this.providerSessionId);
+      this.detach();
     }
+  }
+
+  detach(): void {
+    this.runtime.removeSession(this.id, this.providerSessionId);
   }
 
   beginOpen(requestId: string): Promise<void> {
@@ -1193,9 +1197,9 @@ class PluginAgentSession implements AgentSession {
     this.unsubscribe = null;
     for (const child of this.children.values()) {
       child.unsubscribe();
-      // Parent-owned children have no independent close RPC. Release their runtime registrations
-      // so a later parent resume can replay the same provider IDs into a new session.
-      await child.session.close();
+      // Release the parent's observation of each child. Independently restorable children
+      // have their own lifetime; closing this parent must not send their close RPC.
+      child.session.detach();
     }
     this.children.clear();
     this.listeners.clear();
