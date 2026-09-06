@@ -192,15 +192,17 @@ class ProviderRuntime {
     const ready = session.beginOpen(requestId);
     this.sessionRequests.set(requestId, input.sessionId);
     try {
-      await connection.send({
-        type: "session.open",
-        requestId,
-        sessionId: input.sessionId,
-        config: input.config,
-        persistence: input.persistence,
-        history: input.history,
-      });
-      await ready;
+      await Promise.all([
+        ready,
+        connection.send({
+          type: "session.open",
+          requestId,
+          sessionId: input.sessionId,
+          config: input.config,
+          persistence: input.persistence,
+          history: input.history,
+        }),
+      ]);
       return session;
     } catch (error) {
       this.sessionRequests.delete(requestId);
@@ -275,8 +277,10 @@ class ProviderRuntime {
     };
     signal?.addEventListener("abort", abort, { once: true });
     try {
-      await connection.send(input);
-      return await pending.promise;
+      // Teardown can reject the response while send is still waiting on plugin I/O.
+      // Observe both promises together so the caller receives that rejection immediately.
+      const [response] = await Promise.all([pending.promise, connection.send(input)]);
+      return response;
     } catch (error) {
       this.requests.delete(input.requestId);
       throw error;
@@ -287,7 +291,16 @@ class ProviderRuntime {
 
   removeSession(sessionId: string, providerSessionId: string): void {
     this.sessions.delete(sessionId);
-    this.providerSessions.delete(providerSessionId);
+    // A replacement parent can replay this provider ID before its predecessor closes.
+    if (this.providerSessions.get(providerSessionId)?.id === sessionId) {
+      this.providerSessions.delete(providerSessionId);
+      // A rejected replacement leaves the original session alive. Restore its child routing.
+      for (const surviving of this.sessions.values()) {
+        if (surviving.providerId === providerSessionId) {
+          this.providerSessions.set(providerSessionId, surviving);
+        }
+      }
+    }
   }
 
   private getConnection(): Promise<ProviderConnection> {
@@ -398,11 +411,15 @@ class ProviderRuntime {
   }
 
   private acceptProviderChild(event: ProviderEvent): boolean {
-    if (event.type !== "session.opened" || this.providerSessions.has(event.sessionId)) return false;
-    const parent = event.parentSessionId
-      ? this.providerSessions.get(event.parentSessionId)
-      : undefined;
+    if (event.type !== "session.opened" || !event.parentSessionId) return false;
+    const existing = this.providerSessions.get(event.sessionId);
+    // A core-opened session can retain a provider parent that Paseo has not opened.
+    if (existing && existing.parentId === undefined) return false;
+    const parent = this.providerSessions.get(event.parentSessionId);
     if (!parent) return true;
+    if (existing?.parentId === parent.id) return false;
+    // Reload opens the replacement before closing its predecessor. A replayed child belongs
+    // to the newly announced parent, even while the previous runtime still owns its old copy.
     const sessionId = randomUUID();
     const session = new ProviderRuntimeSession(
       this,
@@ -410,6 +427,7 @@ class ProviderRuntime {
       sessionId,
       event.sessionId,
       event.restoration,
+      parent.id,
     );
     this.sessions.set(sessionId, session);
     this.providerSessions.set(event.sessionId, session);
@@ -536,6 +554,7 @@ class ProviderRuntimeSession {
     readonly id: string,
     private readonly providerSessionId: string,
     readonly restoration: "core" | "parent",
+    readonly parentId?: string,
   ) {}
 
   get providerId(): string {
@@ -562,12 +581,15 @@ class ProviderRuntimeSession {
     const pending = deferred<Extract<ProviderEvent, { type: "session.prompt_result" }>>();
     this.prompts.set(prompt.clientMessageId, pending);
     try {
-      await this.connection.send({
-        type: "session.prompt",
-        sessionId: this.providerSessionId,
-        prompt,
-      });
-      return (await pending.promise).result;
+      const [response] = await Promise.all([
+        pending.promise,
+        this.connection.send({
+          type: "session.prompt",
+          sessionId: this.providerSessionId,
+          prompt,
+        }),
+      ]);
+      return response.result;
     } finally {
       this.prompts.delete(prompt.clientMessageId);
     }
@@ -614,7 +636,7 @@ class ProviderRuntimeSession {
 
   async close(): Promise<void> {
     if (this.restoration === "parent") {
-      this.runtime.removeSession(this.id, this.providerSessionId);
+      this.detach();
       return;
     }
     try {
@@ -624,8 +646,12 @@ class ProviderRuntimeSession {
         sessionId: this.providerSessionId,
       });
     } finally {
-      this.runtime.removeSession(this.id, this.providerSessionId);
+      this.detach();
     }
+  }
+
+  detach(): void {
+    this.runtime.removeSession(this.id, this.providerSessionId);
   }
 
   beginOpen(requestId: string): Promise<void> {
@@ -972,7 +998,9 @@ class PluginAgentClient implements AgentClient {
       history: input.history,
     });
     const session = new PluginAgentSession(this.provider, bridge, () => {
-      this.rootsBySession.delete(bridge.id);
+      for (const [ownedSessionId, owner] of this.rootsBySession) {
+        if (owner === session) this.rootsBySession.delete(ownedSessionId);
+      }
     });
     this.rootsBySession.set(bridge.id, session);
     this.attachPendingChildren();
@@ -1021,7 +1049,10 @@ class PluginAgentSession implements AgentSession {
   private readonly permissionResponses = new Map<string, AgentPermissionResponse>();
   private readonly revertTokens = new Map<string, ProviderTimelineItem["revertToken"]>();
   private readonly timelineSnapshots = new Map<string, ProviderTimelineItem>();
-  private readonly childUnsubscribes = new Map<string, () => void>();
+  private readonly children = new Map<
+    string,
+    { session: ProviderRuntimeSession; unsubscribe: () => void }
+  >();
   private readonly childSnapshots = new Map<string, Map<string, ProviderTimelineItem>>();
   private unsubscribe: (() => void) | null = null;
   private currentTurnId: string | null = null;
@@ -1171,8 +1202,13 @@ class PluginAgentSession implements AgentSession {
     this.closed = true;
     this.unsubscribe?.();
     this.unsubscribe = null;
-    for (const unsubscribe of this.childUnsubscribes.values()) unsubscribe();
-    this.childUnsubscribes.clear();
+    for (const child of this.children.values()) {
+      child.unsubscribe();
+      // Release the parent's observation of each child. Independently restorable children
+      // have their own lifetime; closing this parent must not send their close RPC.
+      child.session.detach();
+    }
+    this.children.clear();
     this.listeners.clear();
     this.onClose();
     await this.bridge.close();
@@ -1245,10 +1281,10 @@ class PluginAgentSession implements AgentSession {
     const snapshots = new Map<string, ProviderTimelineItem>();
     this.childSnapshots.set(childId, snapshots);
     for (const event of child.history) this.acceptChildEvent(childId, event, snapshots);
-    this.childUnsubscribes.set(
-      child.id,
-      child.onEvent((event) => this.acceptChildEvent(childId, event, snapshots)),
-    );
+    this.children.set(child.id, {
+      session: child,
+      unsubscribe: child.onEvent((event) => this.acceptChildEvent(childId, event, snapshots)),
+    });
   }
 
   private accept(event: ProviderEvent, live: boolean): void {
