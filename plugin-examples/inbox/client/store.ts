@@ -307,7 +307,7 @@ export function createInboxStore(paseo: PaseoApi, storage?: PluginClientStorage)
         return Promise.resolve(false);
       return run(
         key,
-        () => paseo.agents.ref(agentId).respondToPermission(requestId, response),
+        () => paseo.agents.ref(agentId).respondToPermission({ requestId, response }),
         true,
       );
     },

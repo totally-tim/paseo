@@ -1,5 +1,4 @@
 import type {
-  AgentPermissionResolvedMessage,
   AgentSnapshotPayload,
   CreateAgentRequestMessage,
   FetchWorkspacesRequestMessage,
@@ -25,6 +24,22 @@ import type {
   WorkspaceCreateRequest,
 } from "@getpaseo/protocol/messages";
 import { DaemonClient } from "./daemon-client.js";
+import {
+  createTerminalActions,
+  type PaseoTerminalActions,
+  type PaseoWorkspaceTerminalActions,
+} from "./terminals/index.js";
+export type {
+  PaseoTerminal,
+  PaseoTerminalActions,
+  PaseoTerminalHandle,
+  PaseoTerminalCreateOptions,
+  PaseoTerminalListOptions,
+  PaseoTerminalListResult,
+  PaseoTerminalCaptureOptions,
+  PaseoTerminalCaptureResult,
+  PaseoWorkspaceTerminalActions,
+} from "./terminals/index.js";
 import type { AgentPermissionResponse, PluginTimelineItem } from "@getpaseo/protocol/agent-types";
 import type {
   FetchAgentsEntry,
@@ -141,6 +156,7 @@ export interface PaseoWorkspaceHandle {
   readonly agents: {
     create(options: PaseoWorkspaceAgentCreateOptions): Promise<PaseoAgentHandle>;
   };
+  readonly terminals: PaseoWorkspaceTerminalActions;
   current(): PaseoWorkspace | null;
   refresh(options?: { requestId?: string }): Promise<PaseoWorkspace | null>;
   setTitle(title: string | null, requestId?: string): Promise<{ title: string | null }>;
@@ -250,7 +266,10 @@ export type PaseoAgentUpdate = Extract<SessionOutboundMessage, { type: "agent_up
 
 export type PaseoAgentPermissionResponse = AgentPermissionResponse;
 
-export type PaseoAgentPermissionResolved = AgentPermissionResolvedMessage["payload"];
+export interface PaseoAgentRespondToPermissionOptions {
+  requestId: string;
+  response: PaseoAgentPermissionResponse;
+}
 
 export type PaseoAgentStream = Extract<SessionOutboundMessage, { type: "agent_stream" }>["payload"];
 
@@ -311,14 +330,11 @@ export interface PaseoAgentHandle {
   archive(): Promise<{ archivedAt: string }>;
   detach(): Promise<void>;
   /**
-   * Answers one of `pendingPermissions`. Resolves with the daemon's resolution
-   * and rejects when the request is gone, so a request already answered from
-   * another client does not fail silently.
+   * Answers one of `pendingPermissions`. Waits for the daemon's resolution, so
+   * this rejects when the request is already gone rather than resolving on a
+   * request another client answered first.
    */
-  respondToPermission(
-    requestId: string,
-    response: PaseoAgentPermissionResponse,
-  ): Promise<PaseoAgentPermissionResolved>;
+  respondToPermission(options: PaseoAgentRespondToPermissionOptions): Promise<void>;
   /** Clears `requiresAttention` without sending a prompt or opening the agent. */
   clearAttention(): Promise<void>;
   subscribe(handler: (update: PaseoAgentUpdate) => void): () => void;
@@ -416,6 +432,7 @@ export interface PaseoConfigActions {
 }
 
 export interface PaseoApi {
+  readonly terminals: PaseoTerminalActions;
   readonly workspaces: PaseoWorkspaceActions;
   readonly projects: PaseoProjectActions;
   readonly agents: PaseoAgentActions;
@@ -471,9 +488,17 @@ export function createPaseoApi(daemonClient: DaemonClient): PaseoApi {
     });
     return createAgentHandle(agent);
   };
-  const createWorkspaceHandle = createWorkspaceHandleFactory(daemonClient, createAgent);
+  const terminals = createTerminalActions(daemonClient, async (workspaceId) => {
+    const workspace = await createWorkspaceHandle(workspaceId).refresh();
+    if (!workspace?.workspaceDirectory) {
+      throw new Error(`Workspace ${workspaceId} is not active or has no available directory`);
+    }
+    return workspace.workspaceDirectory;
+  });
+  const createWorkspaceHandle = createWorkspaceHandleFactory(daemonClient, createAgent, terminals);
 
   return {
+    terminals,
     projects: {
       list: (options) => daemonClient.listProjects(options),
     },
@@ -539,6 +564,7 @@ type CreateAgent = (
 function createWorkspaceHandleFactory(
   daemonClient: DaemonClient,
   createAgent: CreateAgent,
+  terminals: PaseoTerminalActions,
 ): WorkspaceHandleFactory {
   return (workspace) => {
     const id = typeof workspace === "string" ? workspace : workspace.id;
@@ -589,6 +615,10 @@ function createWorkspaceHandleFactory(
             { workspaceId: id, cwd: snapshot.workspaceDirectory },
           );
         },
+      },
+      terminals: {
+        create: (options) => terminals.create({ ...options, workspaceId: id }),
+        list: (options) => terminals.list({ ...options, workspaceId: id }),
       },
       current: () => current,
       refresh,
@@ -717,8 +747,9 @@ function createAgentHandleFactory(daemonClient: DaemonClient): AgentHandleFactor
       detach: async () => {
         await daemonClient.detachAgent(id);
       },
-      respondToPermission: (requestId, response) =>
-        daemonClient.respondToPermissionAndWait(id, requestId, response),
+      respondToPermission: async ({ requestId, response }) => {
+        await daemonClient.respondToPermissionAndWait(id, requestId, response);
+      },
       clearAttention: async () => {
         await daemonClient.clearAgentAttention(id);
       },

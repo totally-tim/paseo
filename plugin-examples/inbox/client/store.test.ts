@@ -135,6 +135,11 @@ describe("inbox recovery and review", () => {
     expect(store.getSnapshot().lanes.needsYou[0].subject.id).toBe("child");
     expect(await store.respond("a", "p", { behavior: "allow" })).toBe(false);
     expect(respondToPermission).toHaveBeenCalledTimes(1);
+    // The SDK handle takes one options object, not positional arguments.
+    expect(respondToPermission).toHaveBeenCalledWith({
+      requestId: "p",
+      response: { behavior: "allow" },
+    });
     store.dispose();
   });
 
