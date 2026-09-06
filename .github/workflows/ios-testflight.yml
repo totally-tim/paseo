@@ -9,6 +9,9 @@ on:
   push:
     tags:
       - "v*"
+      # Platform-prefixed tag ships iOS without cutting a desktop release,
+      # mirroring desktop-macos-v*.
+      - "ios-v*"
   workflow_dispatch:
     inputs:
       tag:
