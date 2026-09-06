@@ -67,7 +67,7 @@ function resolveSecretFile(params) {
 const variants = {
   production: {
     name: "Paseo",
-    packageId: "sh.paseo",
+    packageId: "dev.svpg.paseo",
     googleServicesFile: resolveSecretFile({
       envKey: "GOOGLE_SERVICES_FILE_PROD",
       fallbackRelativePath: "./.secrets/google-services.prod.json",
@@ -79,7 +79,7 @@ const variants = {
   },
   development: {
     name: "Paseo Debug",
-    packageId: "sh.paseo.debug",
+    packageId: "dev.svpg.paseo.debug",
     googleServicesFile: resolveSecretFile({
       envKey: "GOOGLE_SERVICES_FILE_DEBUG",
       fallbackRelativePath: "./.secrets/google-services.debug.json",
@@ -188,9 +188,9 @@ export default {
       profileBuild: isProfileBuild,
       router: {},
       eas: {
-        projectId: "0e7f65ce-0367-46c8-a238-2b65963d235a",
+        projectId: "7557063f-d304-4413-a4dd-06a8e7ba3f53",
       },
     },
-    owner: "getpaseo",
+    owner: "totally-tims-team",
   },
 };
