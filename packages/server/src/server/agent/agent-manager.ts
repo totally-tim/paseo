@@ -1927,6 +1927,11 @@ export class AgentManager {
       });
     } catch (error) {
       if (closedExisting) {
+        // The original runtime is already gone, so holding its account lease strands
+        // the agent: registerOnce refuses a reopen while a lease exists, and close has
+        // nothing left to retry.
+        this.accountLeases.get(agentId)?.release();
+        this.accountLeases.delete(agentId);
         this.emitClosedAgent(closedExisting, { persist: false });
       } else if (this.agents.get(agentId) === existing) {
         existing.lifecycle = "error";
