@@ -1,5 +1,4 @@
 import type {
-  AgentPermissionResolvedMessage,
   AgentSnapshotPayload,
   CreateAgentRequestMessage,
   FetchWorkspacesRequestMessage,
@@ -267,7 +266,10 @@ export type PaseoAgentUpdate = Extract<SessionOutboundMessage, { type: "agent_up
 
 export type PaseoAgentPermissionResponse = AgentPermissionResponse;
 
-export type PaseoAgentPermissionResolved = AgentPermissionResolvedMessage["payload"];
+export interface PaseoAgentRespondToPermissionOptions {
+  requestId: string;
+  response: PaseoAgentPermissionResponse;
+}
 
 export type PaseoAgentStream = Extract<SessionOutboundMessage, { type: "agent_stream" }>["payload"];
 
@@ -328,14 +330,11 @@ export interface PaseoAgentHandle {
   archive(): Promise<{ archivedAt: string }>;
   detach(): Promise<void>;
   /**
-   * Answers one of `pendingPermissions`. Resolves with the daemon's resolution
-   * and rejects when the request is gone, so a request already answered from
-   * another client does not fail silently.
+   * Answers one of `pendingPermissions`. Waits for the daemon's resolution, so
+   * this rejects when the request is already gone rather than resolving on a
+   * request another client answered first.
    */
-  respondToPermission(
-    requestId: string,
-    response: PaseoAgentPermissionResponse,
-  ): Promise<PaseoAgentPermissionResolved>;
+  respondToPermission(options: PaseoAgentRespondToPermissionOptions): Promise<void>;
   /** Clears `requiresAttention` without sending a prompt or opening the agent. */
   clearAttention(): Promise<void>;
   subscribe(handler: (update: PaseoAgentUpdate) => void): () => void;
@@ -748,8 +747,9 @@ function createAgentHandleFactory(daemonClient: DaemonClient): AgentHandleFactor
       detach: async () => {
         await daemonClient.detachAgent(id);
       },
-      respondToPermission: (requestId, response) =>
-        daemonClient.respondToPermissionAndWait(id, requestId, response),
+      respondToPermission: async ({ requestId, response }) => {
+        await daemonClient.respondToPermissionAndWait(id, requestId, response);
+      },
       clearAttention: async () => {
         await daemonClient.clearAgentAttention(id);
       },

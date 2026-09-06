@@ -19,7 +19,7 @@ sync PR and remove its line here.
 | Native Claude and Codex account management                       | `packages/app/src/provider-accounts`, `packages/server/src/server/provider-accounts`, `packages/protocol`, `docs/provider-accounts.md`       | Owns provider logins, quota readings and per-agent account selection inside Paseo                                        |
 | Automatic account continuation and a durable instruction queue   | `packages/app/src/agent-handoff`, `packages/server/src/server/agent-continuation`, `packages/protocol`                                       | Replaces the client-side queued-message store with a server-owned queue that survives a reload                           |
 | Native agent handoff with saved presets                          | `packages/app/src/agent-handoff`, `packages/server/src/server/agent`, `packages/protocol`                                                    | Moves a conversation to another provider and keeps the source read-only                                                  |
-| Positional `respondToPermission` on the SDK agent handle         | `packages/client/src/index.ts`, `public-docs/sdk/reference.md`                                                                               | Resolves with the daemon's resolution instead of `void`; the Kanban plugin depends on it                                 |
+| SDK `respondToPermission` waits for the daemon's resolution      | `packages/client/src/index.ts`                                                                                                               | Upstream's signature and docs, implemented with `respondToPermissionAndWait` so an already-answered request rejects      |
 | Plugin child restoration across parent replacement               | `packages/server/src/server/agent/plugin-provider.ts`                                                                                        | Retains child routing when parent runtimes overlap during reopen                                                         |
 | Fork identity: feed owner, drift check, this doc, the fork skill | `packages/desktop/electron-builder.yml`, `.github/workflows/fork-upstream-drift.yml`, `scripts/fork/`, `docs/fork.md`, `.agents/skills/fork` | Only meaningful on the fork                                                                                              |
 
@@ -47,18 +47,25 @@ project groups, and every one of them is a line you resolve by hand on each sync
 
 ## Syncing upstream
 
-Merge upstream's latest release tag into `main` about once a week. Tags are tested states,
-`upstream/main` between tags is not. Upstream cuts a release every one to three days, so
-waiting longer than a week means a larger merge, not a rarer one.
+Merge `upstream/main` into `main` when the nightly drift check goes red, or weekly, whichever
+comes first. Prefer a release tag when one is available and recent: tags are tested states and
+`upstream/main` between them is not. Do not wait past a red drift check for a tag. Upstream
+rewrites the same files the fork carries, so a delayed merge grows the conflict against work you
+are still landing rather than shrinking it.
+
+Name the branch after what you merged, so a later reader can tell a tag sync from a tip sync.
 
 ```bash
 git fetch upstream --tags
-git switch -c sync/v0.7.5 main
-git merge v0.7.5
+git switch -c sync/upstream-main-2026-09-06 origin/main   # or sync/v0.7.5 for a tag
+git merge upstream/main                            # or the tag
 # resolve, then run typecheck, lint, and the tests for the files you touched
-git push -u origin sync/v0.7.5
-gh pr create --base main
+git push -u origin sync/upstream-main-2026-09-06
+gh pr create -R totally-tim/paseo --base main
 ```
+
+The branch is cut from `origin/main` above rather than the local `main` on purpose. `main` is
+checked out in the primary worktree and is routinely dozens of commits stale there.
 
 Merge conflicts that recur across syncs replay themselves once `rerere` is on. Set it once per
 clone, with the three-way conflict style so you can see what the base looked like:

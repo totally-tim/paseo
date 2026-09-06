@@ -789,9 +789,9 @@ test("agent handles answer permissions and clear attention through the existing 
   const { client, ws } = await connectClient();
   const agent = client.agents.ref("agent_sdk");
 
-  const respondPromise = agent.respondToPermission("perm_1", {
-    behavior: "allow",
-    updatedInput: { answers: { Approach: "Peek modal" } },
+  const respondPromise = agent.respondToPermission({
+    requestId: "perm_1",
+    response: { behavior: "allow", updatedInput: { answers: { Approach: "Peek modal" } } },
   });
   const respondRequest = parseSentSessionMessage(ws.sent.at(-1));
   expect(respondRequest).toMatchObject({
@@ -799,6 +799,15 @@ test("agent handles answer permissions and clear attention through the existing 
     agentId: "agent_sdk",
     requestId: "perm_1",
   });
+  // The handle waits for the daemon's resolution. A fire-and-forget send would
+  // settle here, and a request another client already answered would look like
+  // a success instead of rejecting.
+  // Microtasks drain before timers, so a fire-and-forget send would win this race.
+  const settlement = await Promise.race([
+    respondPromise.then(() => "settled" as const),
+    new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 0)),
+  ]);
+  expect(settlement).toBe("pending");
   ws.message(
     sessionMessage({
       type: "agent_permission_resolved",
@@ -809,11 +818,7 @@ test("agent handles answer permissions and clear attention through the existing 
       },
     }),
   );
-  await expect(respondPromise).resolves.toEqual({
-    agentId: "agent_sdk",
-    requestId: "perm_1",
-    resolution: { behavior: "allow" },
-  });
+  await expect(respondPromise).resolves.toBeUndefined();
 
   const clearPromise = agent.clearAttention();
   const clearRequest = parseSentSessionMessage(ws.sent.at(-1));

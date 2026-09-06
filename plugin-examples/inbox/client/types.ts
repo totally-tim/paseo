@@ -7,7 +7,7 @@ export type Workspace = NonNullable<
   ReturnType<ReturnType<PaseoApi["workspaces"]["ref"]>["current"]>
 >;
 export type PermissionRequest = Agent["pendingPermissions"][number];
-export type PermissionResponse = Parameters<AgentHandle["respondToPermission"]>[1];
+export type PermissionResponse = Parameters<AgentHandle["respondToPermission"]>[0]["response"];
 export type TimelineEntry = Awaited<
   ReturnType<AgentHandle["timeline"]["refetch"]>
 >["entries"][number];
