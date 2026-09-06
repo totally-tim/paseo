@@ -22,6 +22,8 @@ interface ProviderHarnessOptions {
   completeTurn?: boolean;
   rootParentSessionId?: string;
   childRestoration?: "parent" | "core";
+  holdInput?: ProviderInput["type"];
+  sendGate?: Promise<void>;
 }
 
 function createProviderHarness(options: ProviderHarnessOptions = {}) {
@@ -36,6 +38,7 @@ function createProviderHarness(options: ProviderHarnessOptions = {}) {
     capabilities,
     async send(input) {
       inputs.push(input);
+      if (input.type === options.holdInput) await options.sendGate;
       if (input.type === "catalog") {
         emit({
           type: "catalog",
@@ -202,6 +205,37 @@ function eventsOfType(events: AgentStreamEvent[], type: AgentStreamEvent["type"]
 }
 
 describe("PluginAgentClientRegistry", () => {
+  test.each(["catalog", "session.open", "session.prompt"] as const)(
+    "rejects %s promptly when the provider closes during send",
+    async (holdInput) => {
+      const gate = Promise.withResolvers<void>();
+      const harness = createProviderHarness({ holdInput, sendGate: gate.promise });
+      const registry = new PluginAgentClientRegistry(createTestLogger());
+      registry.replace([harness.registration]);
+      const client = registry.clients()[harness.registration.id]!;
+      const config = { provider: "plugin-direct", cwd: "/workspace" };
+      const session = holdInput === "session.prompt" ? await client.createSession(config) : null;
+      let request: Promise<unknown>;
+      if (holdInput === "catalog") request = client.fetchCatalog!({ scope: "global" });
+      else if (session) request = session.run("hello", { clientMessageId: "blocked-send" });
+      else request = client.createSession(config);
+      const outcome = request.then(
+        () => "unexpected success",
+        (error: Error) => error.message,
+      );
+      const isHeldInput = (input: ProviderInput) => input.type === holdInput;
+      try {
+        await expect.poll(() => harness.inputs.some(isHeldInput)).toBe(true);
+        registry.replace([]);
+        await expect(outcome).resolves.toMatch(/Provider.*closed/);
+      } finally {
+        gate.resolve();
+        await outcome;
+        await registry.shutdown();
+      }
+    },
+  );
+
   test("opens an independently restored session whose provider parent is not open", async () => {
     const harness = createProviderHarness({ rootParentSessionId: "unopened-provider-parent" });
     const registry = new PluginAgentClientRegistry(createTestLogger());

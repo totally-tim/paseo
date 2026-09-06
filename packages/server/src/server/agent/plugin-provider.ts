@@ -192,15 +192,17 @@ class ProviderRuntime {
     const ready = session.beginOpen(requestId);
     this.sessionRequests.set(requestId, input.sessionId);
     try {
-      await connection.send({
-        type: "session.open",
-        requestId,
-        sessionId: input.sessionId,
-        config: input.config,
-        persistence: input.persistence,
-        history: input.history,
-      });
-      await ready;
+      await Promise.all([
+        ready,
+        connection.send({
+          type: "session.open",
+          requestId,
+          sessionId: input.sessionId,
+          config: input.config,
+          persistence: input.persistence,
+          history: input.history,
+        }),
+      ]);
       return session;
     } catch (error) {
       this.sessionRequests.delete(requestId);
@@ -275,8 +277,10 @@ class ProviderRuntime {
     };
     signal?.addEventListener("abort", abort, { once: true });
     try {
-      await connection.send(input);
-      return await pending.promise;
+      // Teardown can reject the response while send is still waiting on plugin I/O.
+      // Observe both promises together so the caller receives that rejection immediately.
+      const [response] = await Promise.all([pending.promise, connection.send(input)]);
+      return response;
     } catch (error) {
       this.requests.delete(input.requestId);
       throw error;
@@ -577,12 +581,15 @@ class ProviderRuntimeSession {
     const pending = deferred<Extract<ProviderEvent, { type: "session.prompt_result" }>>();
     this.prompts.set(prompt.clientMessageId, pending);
     try {
-      await this.connection.send({
-        type: "session.prompt",
-        sessionId: this.providerSessionId,
-        prompt,
-      });
-      return (await pending.promise).result;
+      const [response] = await Promise.all([
+        pending.promise,
+        this.connection.send({
+          type: "session.prompt",
+          sessionId: this.providerSessionId,
+          prompt,
+        }),
+      ]);
+      return response.result;
     } finally {
       this.prompts.delete(prompt.clientMessageId);
     }
