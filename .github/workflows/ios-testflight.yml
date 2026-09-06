@@ -145,9 +145,13 @@ jobs:
         working-directory: packages/app/ios
         run: |
           set -euo pipefail
-          WORKSPACE="$(ls -d *.xcworkspace | head -1)"
-          SCHEME="$(xcodebuild -workspace "$WORKSPACE" -list -json \
-            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).workspace.schemes.find(x=>!/Pods|Tests/.test(x))))')"
+          WORKSPACE="$(ls -d ./*.xcworkspace | head -1)"
+          # Read the scheme from the project, not the workspace: after pod install
+          # the workspace also lists every pod's scheme, and the first of those
+          # (EXApplication) archived a dependency with no app in it.
+          PROJECT="$(ls -d ./*.xcodeproj | head -1)"
+          SCHEME="$(xcodebuild -project "$PROJECT" -list -json \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const x=JSON.parse(s).project.schemes.filter(n=>!/Tests|Pods/.test(n));if(x.length!==1)throw new Error("expected exactly one app scheme, got "+JSON.stringify(x));console.log(x[0])})')"
           echo "workspace=$WORKSPACE" >> "$GITHUB_OUTPUT"
           echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
           echo "Building workspace $WORKSPACE, scheme $SCHEME"
