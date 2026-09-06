@@ -43,13 +43,25 @@ env:
 
 jobs:
   build:
-    runs-on: macos-15
+    # Apple requires the iOS 26 SDK or later for App Store uploads, which needs
+    # Xcode 26. macos-15 ships an Xcode that builds against the iOS 18.5 SDK.
+    runs-on: macos-26
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ env.CHECKOUT_REF }}
+
+      - name: Select the newest Xcode
+        run: |
+          set -euo pipefail
+          ls -d /Applications/Xcode*.app
+          NEWEST="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$NEWEST/Contents/Developer"
+          xcodebuild -version
+          echo "iOS SDKs available:"
+          xcodebuild -showsdks | grep -i ios
 
       - name: Resolve release metadata
         shell: bash
