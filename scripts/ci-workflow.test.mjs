@@ -273,6 +273,7 @@ test("the fork only keeps owned GitHub and EAS automation", () => {
     "desktop-rollout.yml",
     "e2e.yml",
     "fork-upstream-drift.yml",
+    "ios-testflight.yml",
     "release-notes-sync.yml",
   ]);
 
