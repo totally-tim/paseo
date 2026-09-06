@@ -1008,6 +1008,8 @@ export const ar: TranslationResources = {
     unlabelled: "بلا تسمية",
     create: "إنشاء تسمية",
     createConfirm: "إنشاء",
+    addToGroupConfirm: "إضافة إلى المجموعة",
+    groupedMembers: "في مجموعات أخرى",
     creating: "جارٍ الإنشاء…",
     name: "اسم التسمية",
     updateHostUse: "حدّث هذا المضيف لاستخدام التسميات.",

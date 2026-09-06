@@ -159,7 +159,7 @@ function RequestMetrics({ lastRequest }: Pick<ContextWindowMeterProps, "lastRequ
           {t("contextWindow.output", { tokens: output.toLocaleString() })}
         </Text>
       ) : null}
-      {reasoning !== null && output !== null && reasoning <= output ? (
+      {reasoning !== null && (output === null || reasoning <= output) ? (
         <Text style={styles.tooltipDetail}>
           {t("contextWindow.reasoning", { tokens: reasoning.toLocaleString() })}
         </Text>

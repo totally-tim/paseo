@@ -4192,7 +4192,12 @@ export class AgentManager {
     );
     if (terminalDisposition === "stale") return;
     if (event.usage) {
-      agent.lastUsage = { ...agent.lastUsage, ...event.usage };
+      agent.lastUsage = {
+        ...agent.lastUsage,
+        ...event.usage,
+        // Request measurements are one snapshot, even when completion only reports totals.
+        lastRequest: event.usage.lastRequest,
+      };
     }
     // If no usage on turn_completed, keep lastUsage as-is so context window
     // data accumulated during streaming isn't lost when the provider omits

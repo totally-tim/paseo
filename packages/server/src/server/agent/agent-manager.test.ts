@@ -6075,111 +6075,124 @@ test("replaceAgentRun stays running when a stale old terminal arrives before the
   unsubscribe();
 });
 
-test("applies live autonomous events and preserves usage omitted from completion", async () => {
-  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-live-events-"));
-  const storagePath = join(workdir, "agents");
-  const storage = new AgentStorage(storagePath, logger);
-  let capturedSession: TestAgentSession | null = null;
+test.each([
+  { completionUsage: undefined, expectedRequest: { inputTokens: 10, cachedInputTokens: 5 } },
+  { completionUsage: { inputTokens: 20 }, expectedRequest: undefined },
+  {
+    completionUsage: { inputTokens: 20, lastRequest: { inputTokens: 20 } },
+    expectedRequest: { inputTokens: 20 },
+  },
+])(
+  "keeps autonomous request usage atomic at completion: %j",
+  async ({ completionUsage, expectedRequest }) => {
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-live-events-"));
+    const storagePath = join(workdir, "agents");
+    const storage = new AgentStorage(storagePath, logger);
+    let capturedSession: TestAgentSession | null = null;
 
-  class LiveEventClient extends TestAgentClient {
-    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
-      capturedSession = new TestAgentSession(config);
-      return capturedSession;
-    }
-  }
-
-  const manager = new AgentManager({
-    clients: {
-      codex: new LiveEventClient(),
-    },
-    registry: storage,
-    logger,
-    idFactory: () => "00000000-0000-4000-8000-000000000125",
-  });
-
-  const snapshot = await manager.createAgent(
-    {
-      provider: "codex",
-      cwd: workdir,
-    },
-    undefined,
-    { workspaceId: undefined },
-  );
-
-  const lifecycleUpdates: string[] = [];
-  let sawRunningState = false;
-  let resolveSettled!: () => void;
-  const settled = new Promise<void>((resolve) => {
-    resolveSettled = resolve;
-  });
-  manager.subscribe(
-    (event) => {
-      if (event.type === "agent_state" && event.agent.id === snapshot.id) {
-        lifecycleUpdates.push(event.agent.lifecycle);
-        if (event.agent.lifecycle === "running") {
-          sawRunningState = true;
-        }
-        if (sawRunningState && event.agent.lifecycle === "idle") {
-          resolveSettled();
-        }
+    class LiveEventClient extends TestAgentClient {
+      override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+        capturedSession = new TestAgentSession(config);
+        return capturedSession;
       }
-    },
-    { agentId: snapshot.id, replayState: false },
-  );
+    }
 
-  // Push autonomous events through the session's subscribe() callbacks
-  const autonomousTurnId = "autonomous-turn-1";
-  capturedSession!.pushEvent({
-    type: "turn_started",
-    provider: "codex",
-    turnId: autonomousTurnId,
-  });
-  await vi.waitFor(() => {
-    const running = manager.getAgent(snapshot.id);
-    expect(running?.lifecycle).toBe("running");
-    expect(running ? toAgentPayload(running).activeTurn : null).toEqual({
-      turnId: autonomousTurnId,
-      startedAt: expect.any(String),
+    const manager = new AgentManager({
+      clients: {
+        codex: new LiveEventClient(),
+      },
+      registry: storage,
+      logger,
+      idFactory: () => "00000000-0000-4000-8000-000000000125",
     });
-  });
-  capturedSession!.pushEvent({
-    type: "usage_updated",
-    provider: "codex",
-    usage: {
-      inputTokens: 10,
+
+    const snapshot = await manager.createAgent(
+      {
+        provider: "codex",
+        cwd: workdir,
+      },
+      undefined,
+      { workspaceId: undefined },
+    );
+
+    const lifecycleUpdates: string[] = [];
+    let sawRunningState = false;
+    let resolveSettled!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      resolveSettled = resolve;
+    });
+    manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === snapshot.id) {
+          lifecycleUpdates.push(event.agent.lifecycle);
+          if (event.agent.lifecycle === "running") {
+            sawRunningState = true;
+          }
+          if (sawRunningState && event.agent.lifecycle === "idle") {
+            resolveSettled();
+          }
+        }
+      },
+      { agentId: snapshot.id, replayState: false },
+    );
+
+    // Push autonomous events through the session's subscribe() callbacks
+    const autonomousTurnId = "autonomous-turn-1";
+    capturedSession!.pushEvent({
+      type: "turn_started",
+      provider: "codex",
+      turnId: autonomousTurnId,
+    });
+    await vi.waitFor(() => {
+      const running = manager.getAgent(snapshot.id);
+      expect(running?.lifecycle).toBe("running");
+      expect(running ? toAgentPayload(running).activeTurn : null).toEqual({
+        turnId: autonomousTurnId,
+        startedAt: expect.any(String),
+      });
+    });
+    capturedSession!.pushEvent({
+      type: "usage_updated",
+      provider: "codex",
+      usage: {
+        inputTokens: 10,
+        lastRequest: { inputTokens: 10, cachedInputTokens: 5 },
+        contextWindowMaxTokens: 200_000,
+        contextWindowUsedTokens: 175,
+      },
+      turnId: autonomousTurnId,
+    });
+    capturedSession!.pushEvent({
+      type: "timeline",
+      provider: "codex",
+      item: { type: "assistant_message", text: "AUTONOMOUS_PUMP_MESSAGE" },
+      turnId: autonomousTurnId,
+    });
+    capturedSession!.pushEvent({
+      type: "turn_completed",
+      provider: "codex",
+      usage: completionUsage,
+      turnId: autonomousTurnId,
+    });
+    await settled;
+
+    const updated = manager.getAgent(snapshot.id);
+    expect(updated?.lifecycle).toBe("idle");
+    expect(updated ? toAgentPayload(updated).activeTurn : null).toBeNull();
+    expect(updated?.lastUsage).toEqual({
+      inputTokens: completionUsage?.inputTokens ?? 10,
+      lastRequest: expectedRequest,
       contextWindowMaxTokens: 200_000,
       contextWindowUsedTokens: 175,
-    },
-    turnId: autonomousTurnId,
-  });
-  capturedSession!.pushEvent({
-    type: "timeline",
-    provider: "codex",
-    item: { type: "assistant_message", text: "AUTONOMOUS_PUMP_MESSAGE" },
-    turnId: autonomousTurnId,
-  });
-  capturedSession!.pushEvent({
-    type: "turn_completed",
-    provider: "codex",
-    turnId: autonomousTurnId,
-  });
-  await settled;
-
-  const updated = manager.getAgent(snapshot.id);
-  expect(updated?.lifecycle).toBe("idle");
-  expect(updated ? toAgentPayload(updated).activeTurn : null).toBeNull();
-  expect(updated?.lastUsage).toEqual({
-    inputTokens: 10,
-    contextWindowMaxTokens: 200_000,
-    contextWindowUsedTokens: 175,
-  });
-  expect(manager.getTimeline(snapshot.id)).toContainEqual({
-    type: "assistant_message",
-    text: "AUTONOMOUS_PUMP_MESSAGE",
-  });
-  expect(lifecycleUpdates).toContain("running");
-  expect(lifecycleUpdates).toContain("idle");
-});
+    });
+    expect(manager.getTimeline(snapshot.id)).toContainEqual({
+      type: "assistant_message",
+      text: "AUTONOMOUS_PUMP_MESSAGE",
+    });
+    expect(lifecycleUpdates).toContain("running");
+    expect(lifecycleUpdates).toContain("idle");
+  },
+);
 
 test("ignores stale autonomous terminals without lowering the active turn lifecycle", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-stale-autonomous-terminal-"));

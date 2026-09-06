@@ -1030,6 +1030,8 @@ export const ptBR: TranslationResources = {
     unlabelled: "Sem etiqueta",
     create: "Criar etiqueta",
     createConfirm: "Criar",
+    addToGroupConfirm: "Adicionar ao grupo",
+    groupedMembers: "Em outros grupos",
     creating: "Criando…",
     name: "Nome da etiqueta",
     updateHostUse: "Atualize este host para usar etiquetas.",

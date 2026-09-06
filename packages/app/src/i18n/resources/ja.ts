@@ -1019,6 +1019,8 @@ export const ja: TranslationResources = {
     unlabelled: "ラベルなし",
     create: "ラベルを作成",
     createConfirm: "作成",
+    addToGroupConfirm: "グループに追加",
+    groupedMembers: "他のグループ内",
     creating: "作成中…",
     name: "ラベル名",
     updateHostUse: "ラベルを使用するにはホストを更新してください。",

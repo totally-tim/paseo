@@ -1038,6 +1038,8 @@ export const fr: TranslationResources = {
     unlabelled: "Sans étiquette",
     create: "Créer une étiquette",
     createConfirm: "Créer",
+    addToGroupConfirm: "Ajouter au groupe",
+    groupedMembers: "Dans d'autres groupes",
     creating: "Création…",
     name: "Nom de l’étiquette",
     updateHostUse: "Mettez à jour cet hôte pour utiliser les étiquettes.",

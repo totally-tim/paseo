@@ -31,8 +31,25 @@ const measuredRequest = {
   durationMs: 10800,
 };
 const inputOnlyRequest = { inputTokens: 300 };
+const reasoningOnlyRequest = { reasoningTokens: 400 };
 
 describe("context cache reporting", () => {
+  it("shows reasoning when total output is unreported", async () => {
+    const view = render(
+      <ContextWindowMeter
+        maxTokens={131072}
+        usedTokens={6500}
+        lastRequest={reasoningOnlyRequest}
+      />,
+    );
+    fireEvent.keyDown(window, { key: "Tab" });
+    fireEvent.focus(view.getByTestId("context-window-meter"));
+    expect((await view.findByText("Of which thinking: 400 tokens")).textContent).toBe(
+      "Of which thinking: 400 tokens",
+    );
+    expect(view.queryByText(/Observed output:/)).toBeNull();
+    view.unmount();
+  });
   it.each([
     [{ cachedInputTokens: 6080 }, "Cached: 6,080 tokens"],
     [{ cachedInputTokens: 0 }, "Cached: 0 tokens"],

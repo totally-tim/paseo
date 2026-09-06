@@ -1023,6 +1023,8 @@ export const ru: TranslationResources = {
     unlabelled: "Без метки",
     create: "Создать метку",
     createConfirm: "Создать",
+    addToGroupConfirm: "Добавить в группу",
+    groupedMembers: "В других группах",
     creating: "Создание…",
     name: "Название метки",
     updateHostUse: "Обновите этот хост, чтобы использовать метки.",

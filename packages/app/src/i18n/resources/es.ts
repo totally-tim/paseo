@@ -1039,6 +1039,8 @@ export const es: TranslationResources = {
     unlabelled: "Sin etiqueta",
     create: "Crear etiqueta",
     createConfirm: "Crear",
+    addToGroupConfirm: "Añadir al grupo",
+    groupedMembers: "En otros grupos",
     creating: "Creando…",
     name: "Nombre de la etiqueta",
     updateHostUse: "Actualiza este host para usar etiquetas.",

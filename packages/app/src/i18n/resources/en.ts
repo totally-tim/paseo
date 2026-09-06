@@ -1017,6 +1017,8 @@ export const en = {
     unlabelled: "Unlabelled",
     create: "Create label",
     createConfirm: "Create",
+    addToGroupConfirm: "Add to group",
+    groupedMembers: "In other groups",
     creating: "Creating…",
     name: "Label name",
     updateHostUse: "Update this host to use labels.",

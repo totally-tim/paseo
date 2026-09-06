@@ -110,6 +110,10 @@ tokens, and output includes reasoning when the provider reports it. An absent me
 unknown; it does not inherit a value from the previous request. Session totals and the active
 context size cannot supply missing request measurements.
 
+Omit measurements that are not finite and nonnegative. Plugin usage events must satisfy the
+provider schema, just like other provider events. When a completion supplies usage, its request
+measurements replace the previous snapshot. A completion without usage preserves streaming usage.
+
 The context tooltip derives its cache percentage from that request's input and cached counts.
 Its output rate uses client-observed request and first-delta timing, so it includes transport
 effects and approximates batched deltas. Do not label it engine decode speed or prefill timing.

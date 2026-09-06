@@ -1000,6 +1000,8 @@ export const zhCN: TranslationResources = {
     unlabelled: "无标签",
     create: "新建标签",
     createConfirm: "创建",
+    addToGroupConfirm: "添加到分组",
+    groupedMembers: "在其他分组中",
     creating: "创建中…",
     name: "标签名称",
     updateHostUse: "请更新此主机以使用标签。",

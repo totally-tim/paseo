@@ -1015,6 +1015,8 @@ export const ko: TranslationResources = {
     unlabelled: "레이블 없음",
     create: "레이블 만들기",
     createConfirm: "만들기",
+    addToGroupConfirm: "그룹에 추가",
+    groupedMembers: "다른 그룹에 있음",
     creating: "만드는 중…",
     name: "레이블 이름",
     updateHostUse: "레이블을 사용하려면 호스트를 업데이트하세요.",
