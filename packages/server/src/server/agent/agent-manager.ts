@@ -1875,11 +1875,13 @@ export class AgentManager {
     const preservedLastUsage = existing.lastUsage;
     const preservedLastError = existing.lastError;
     const preservedAttention = existing.attention;
+    // Snapshot the tool policy before planning, so the finally-block restore is
+    // never confused by anything the launch context resolves.
+    const hadPreviousPaseoToolPolicy = this.paseoToolPolicies.has(agentId);
+    const previousPaseoToolPolicy = this.paseoToolPolicies.get(agentId);
     const plan = await this.planAgentReload(agentId, existing, overrides);
     const { handle, client, storedConfig, providerLaunchConfig, launchContext, paseoToolPolicy } =
       plan;
-    const hadPreviousPaseoToolPolicy = this.paseoToolPolicies.has(agentId);
-    const previousPaseoToolPolicy = this.paseoToolPolicies.get(agentId);
 
     let session: AgentSession | undefined;
     let closedExisting: ManagedAgentClosed | undefined;
