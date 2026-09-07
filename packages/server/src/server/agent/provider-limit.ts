@@ -8,7 +8,19 @@ export function claudeLimitNotification(info: {
   rateLimitType?: string;
   overageStatus?: string;
   isUsingOverage?: boolean;
+  errorCode?: string;
 }): LimitNotification | null {
+  // Exhausted usage credits refuse requests while the time window itself can read
+  // "allowed", and no resetsAt applies — credits are purchased, not scheduled.
+  if (info.errorCode === "credits_required")
+    return {
+      type: "notification",
+      level: "warning",
+      code: "provider_capacity",
+      capacityScope: "account",
+      message:
+        "Claude is out of usage credits. Use Continue with to choose another account or provider with saved context.",
+    };
   if (info.status !== "rejected") return null;
   // A rejected subscription window with permitted overage still serves the request.
   // Only a rejected overage, or no overage at all, ends the account's capacity.
