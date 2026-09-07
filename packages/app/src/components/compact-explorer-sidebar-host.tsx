@@ -21,6 +21,7 @@ import {
   resolveCompactExplorerSidebarHostModel,
   type CompactExplorerSidebarHostModel,
 } from "@/components/compact-explorer-sidebar-host-state";
+import { AppearanceStyleBoundary } from "@/components/appearance-style-boundary";
 
 interface CompactExplorerOpenGestureSurfaceProps {
   children: ReactNode;
@@ -177,6 +178,11 @@ export function CompactExplorerSidebarHost({
       </DiffDocumentWorkspaceCacheProvider>
     ) : null;
 
+  let themedExplorer = explorer;
+  if (isWeb) {
+    themedExplorer = <AppearanceStyleBoundary>{explorer}</AppearanceStyleBoundary>;
+  }
+
   // The routed child keeps the same ancestors when desktop, dock, and overlay
   // presentations change. Reparenting it remounts the root navigator.
   return (
@@ -186,7 +192,7 @@ export function CompactExplorerSidebarHost({
     >
       <View style={styles.row} onLayout={handleContainerLayout}>
         <View style={styles.fill}>{children}</View>
-        {explorer}
+        {themedExplorer}
       </View>
     </CompactExplorerOpenGestureSurface>
   );

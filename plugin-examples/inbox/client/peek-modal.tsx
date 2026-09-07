@@ -1,5 +1,7 @@
-import type { PluginSurfaceProps, PluginTheme } from "@getpaseo/plugin";
-import { Modal } from "@getpaseo/plugin/react-native";
+import type { PluginTheme } from "@getpaseo/plugin";
+import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
+
+import { Modal } from "@getpaseo/plugin/client/react-native";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";

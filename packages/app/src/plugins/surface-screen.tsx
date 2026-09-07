@@ -1,7 +1,8 @@
 import { router, useLocalSearchParams } from "expo-router";
 import { useIsMobilePanelActive } from "@/mobile-panels/provider";
 import { useIsFocused } from "@react-navigation/native";
-import type { PluginSurfaceProps, PluginTheme } from "@getpaseo/plugin";
+import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
+import type { PluginTheme } from "@getpaseo/plugin";
 import { ChevronDown, X } from "lucide-react-native";
 import { useCallback, useMemo, useRef, useState, type ComponentType } from "react";
 import { Platform, Pressable, Text, View } from "react-native";

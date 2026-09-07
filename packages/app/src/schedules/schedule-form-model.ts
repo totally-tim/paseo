@@ -341,19 +341,16 @@ function isSelectedModelValidForProviders(input: {
 
 function normalizeInitialValues(input: {
   snapshot: ScheduleFormSnapshot;
-  selectedServerId: string | null;
 }): FormInitialValues | undefined {
   const config = newAgentConfig(input.snapshot.schedule);
   if (!config) {
     return undefined;
   }
   return {
-    serverId: input.selectedServerId,
     provider: config.provider,
     model: config.model ?? null,
     modeId: config.modeId ?? null,
     thinkingOptionId: config.thinkingOptionId ?? null,
-    workingDir: config.cwd,
   };
 }
 
@@ -715,26 +712,22 @@ function buildInitialState(snapshot: ScheduleFormSnapshot): ScheduleFormState {
 
 function toFormState(state: ScheduleFormState): FormState {
   return {
-    serverId: state.selectedServerId,
     provider: state.selectedProvider,
     accountSelection: state.accountSelection,
     modeId: state.selectedMode,
     model: state.selectedModel,
     thinkingOptionId: state.selectedThinkingOptionId,
-    workingDir: state.workingDir,
   };
 }
 
 function applyResolvedFormState(state: ScheduleFormState, form: FormState): ScheduleFormState {
   return {
     ...state,
-    selectedServerId: form.serverId,
     selectedProvider: form.provider,
     accountSelection: form.accountSelection,
     selectedMode: form.modeId,
     selectedModel: form.model,
     selectedThinkingOptionId: form.thinkingOptionId,
-    workingDir: form.workingDir,
   };
 }
 
@@ -852,7 +845,6 @@ export function openScheduleForm(snapshot: ScheduleFormSnapshot): ScheduleFormMo
   const listeners = new Set<() => void>();
   const initialValues = normalizeInitialValues({
     snapshot,
-    selectedServerId: resolveInitialServerId(snapshot),
   });
   let closed = false;
   let hosts = snapshot.hosts;
@@ -1024,11 +1016,6 @@ export function openScheduleForm(snapshot: ScheduleFormSnapshot): ScheduleFormMo
       if (closed || state.selectedServerId === serverId) {
         return;
       }
-      userModified = {
-        ...userModified,
-        serverId: true,
-        workingDir: true,
-      };
       publish(
         clearProviderSelection({
           ...state,
@@ -1053,7 +1040,6 @@ export function openScheduleForm(snapshot: ScheduleFormSnapshot): ScheduleFormMo
       if (!providerScopeChanged && state.selectedProjectOptionId === target.optionId) {
         return;
       }
-      userModified = { ...userModified, serverId: true, workingDir: true };
       const nextState = {
         ...state,
         selectedServerId: target.serverId,

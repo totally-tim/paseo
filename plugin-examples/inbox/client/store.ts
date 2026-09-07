@@ -1,4 +1,5 @@
-import type { PluginClientStorage } from "@getpaseo/plugin";
+import type { PluginClientStorage } from "@getpaseo/plugin/client";
+
 import { ALL_PROJECTS, type InboxFilters, parseFilters } from "./filters";
 import { type Lanes, projectLanes } from "./lanes";
 import type { Agent, PaseoApi, PermissionResponse, Workspace } from "./types";

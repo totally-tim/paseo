@@ -1,4 +1,5 @@
-import type { PluginClientContext } from "@getpaseo/plugin";
+import type { PluginClientContext } from "@getpaseo/plugin/client";
+
 import { InboxSurface, InboxWorkspacePanel } from "./client/board";
 import { createInboxStore, setInboxStore } from "./client/store";
 import { boardLanes } from "./client/review";

@@ -1,4 +1,4 @@
-import type { usePaseo } from "@getpaseo/plugin";
+import type { usePaseo } from "@getpaseo/plugin/client";
 
 export type PaseoApi = ReturnType<typeof usePaseo>;
 export type AgentHandle = ReturnType<PaseoApi["agents"]["ref"]>;
