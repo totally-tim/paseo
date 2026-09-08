@@ -588,7 +588,9 @@ its original device order separately from its shared-order cache until and after
 
 Ordering is host-local. A combined sidebar merges host sequences by server ID, keeping the first
 occurrence of shared group and project keys. Cross-host placement is not a separate preference.
-A multi-host change can partially succeed; failures remain visible for the affected hosts.
+A multi-host change can partially succeed. Retry or discard the retained change before rearranging
+that host again. Retry preserves newer changes to other ordering fields and refuses to overwrite
+a conflicting order from another device.
 Filters, collapsed sections, and pane layouts remain device-owned.
 
 ### Keying convention: directory-backed vs workspace-owned

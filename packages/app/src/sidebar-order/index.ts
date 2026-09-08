@@ -27,6 +27,7 @@ export interface HostOrderState {
   snapshot: SidebarOrderSnapshot | null;
   pending: boolean;
   error: string | null;
+  failedWrite?: { change: SidebarOrderChange; baseKeys: string[] };
 }
 export const useSidebarOrderSync = create<{ hosts: Record<string, HostOrderState> }>(() => ({
   hosts: {},
@@ -122,6 +123,32 @@ function accept(serverId: string, snapshot: SidebarOrderSnapshot): void {
   publish(serverId, { snapshot });
   publishProjection();
 }
+function keysForChange(snapshot: SidebarOrderSnapshot, change: SidebarOrderChange): string[] {
+  switch (change.kind) {
+    case "groups":
+      return snapshot.order.projectGroupOrder;
+    case "projects":
+      return snapshot.order.projectOrder;
+    case "pins":
+      return snapshot.order.pinnedWorkspaceOrder;
+    case "workspaces":
+      return snapshot.order.workspaceOrderByProject[change.projectId] ?? [];
+  }
+}
+
+function needsRetry(
+  snapshot: SidebarOrderSnapshot,
+  failedWrite: NonNullable<HostOrderState["failedWrite"]>,
+): boolean {
+  const keys = keysForChange(snapshot, failedWrite.change);
+  if (equal(keys, failedWrite.change.keys)) return false;
+  if (!equal(keys, failedWrite.baseKeys))
+    throw new Error(
+      "Ordering changed on another device. Discard this failed change and reorder again.",
+    );
+  return true;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error
     ? error.message
@@ -239,7 +266,12 @@ export const sidebarOrderSync = {
       if (!result.accepted || !result.snapshot)
         throw new Error(result.error ?? "Could not load sidebar ordering.");
       accept(serverId, result.snapshot);
-      publish(serverId, { status: "online", error: null });
+      publish(serverId, {
+        status: "online",
+        error: useSidebarOrderSync.getState().hosts[serverId]?.failedWrite
+          ? useSidebarOrderSync.getState().hosts[serverId].error
+          : null,
+      });
     } catch (error) {
       if (connections.get(serverId) === connection)
         publish(serverId, { status: "loading", error: errorMessage(error) });
@@ -252,6 +284,8 @@ export const sidebarOrderSync = {
       if (host?.status !== "online" || !connections.has(id))
         return "Connect to the host and reload sidebar ordering before rearranging.";
       if (host.pending) return "Wait for the current sidebar order to finish saving.";
+      if (host.failedWrite)
+        return "Retry or discard the failed sidebar change before rearranging this host.";
       if (!allowUninitialized && !host.snapshot?.initialized)
         return "Use this device’s order in sidebar settings before rearranging.";
     }
@@ -281,7 +315,44 @@ export const sidebarOrderSync = {
     }
   },
   dismiss(serverId: string): void {
-    publish(serverId, { error: null });
+    if (!useSidebarOrderSync.getState().hosts[serverId]?.pending)
+      publish(serverId, { error: null, failedWrite: undefined });
+  },
+  async retry(serverId: string): Promise<void> {
+    const host = useSidebarOrderSync.getState().hosts[serverId];
+    const failedWrite = host?.failedWrite;
+    if (!failedWrite || host.pending) return;
+    const connection = connections.get(serverId);
+    if (!connection || host.status !== "online") {
+      publish(serverId, {
+        error: "Connect to the host and reload sidebar ordering before retrying.",
+      });
+      return;
+    }
+    publish(serverId, { pending: true });
+    try {
+      await this.refresh(serverId);
+      if (connections.get(serverId) !== connection) return;
+      const current = useSidebarOrderSync.getState().hosts[serverId];
+      if (current.status !== "online" || !current.snapshot)
+        throw new Error(current.error ?? "Could not reload sidebar ordering.");
+      if (needsRetry(current.snapshot, failedWrite)) {
+        const result = await connection.client.updateSidebarOrder(
+          current.snapshot.revision,
+          failedWrite.change,
+        );
+        if (connections.get(serverId) !== connection) return;
+        if (result.snapshot) accept(serverId, result.snapshot);
+        if (!result.accepted) throw new Error(result.error ?? "Could not save sidebar ordering.");
+      }
+      if (useSidebarOrderSync.getState().hosts[serverId]?.failedWrite === failedWrite)
+        publish(serverId, { failedWrite: undefined, error: null });
+    } catch (error) {
+      if (connections.get(serverId) === connection)
+        publish(serverId, { error: errorMessage(error) });
+    } finally {
+      if (connections.get(serverId) === connection) publish(serverId, { pending: false });
+    }
   },
   async write(change: LocalOrderChange): Promise<void> {
     await prepare();
@@ -317,11 +388,19 @@ export const sidebarOrderSync = {
       targets.map(async (target) => {
         const connection = connections.get(target.id)!;
         const revision = hosts[target.id].snapshot!.revision;
+        const failedWrite = {
+          change: target.change,
+          baseKeys: [...keysForChange(hosts[target.id].snapshot!, target.change)],
+        };
+        // Retain the intent across disconnects too; a retry first checks whether it already committed.
+        publish(target.id, { failedWrite });
         try {
           const result = await connection.client.updateSidebarOrder(revision, target.change);
           if (connections.get(target.id) !== connection) return;
           if (result.snapshot) accept(target.id, result.snapshot);
           if (!result.accepted) throw new Error(result.error ?? "Could not save sidebar ordering.");
+          if (useSidebarOrderSync.getState().hosts[target.id]?.failedWrite === failedWrite)
+            publish(target.id, { failedWrite: undefined });
         } catch (error) {
           if (connections.get(target.id) === connection) {
             await this.refresh(target.id);

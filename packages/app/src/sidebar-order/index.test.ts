@@ -247,3 +247,107 @@ test("unsupported host connection does not wait for local storage hydration", as
     hydration.mockRestore();
   }
 });
+
+test("retries only a failed host after a group rename and reconnect", async () => {
+  const { sidebarOrderSync, useSidebarOrderSync } = await import("./index");
+  const initial = {
+    revision: 1,
+    initialized: true,
+    order: { ...emptyOrder(), projectGroupOrder: ["old", "other"] },
+  };
+  const a = fakeClient(initial);
+  const b = fakeClient(initial);
+  a.methods.updateSidebarOrder.mockImplementationOnce(async () => {
+    const snapshot = {
+      ...initial,
+      revision: 2,
+      order: { ...initial.order, projectGroupOrder: ["new", "other"] },
+    };
+    a.emit(snapshot);
+    return { accepted: true, snapshot, error: null, requestId: "update-a" };
+  });
+  b.methods.updateSidebarOrder.mockRejectedValueOnce(new Error("B offline"));
+  await sidebarOrderSync.connect("a", a.client, true);
+  await sidebarOrderSync.connect("b", b.client, true);
+  await sidebarOrderSync.write({ kind: "renameGroup", fromKey: "old", toKey: "new" });
+  expect(useSidebarOrderSync.getState().hosts.a.failedWrite).toBeUndefined();
+  expect(useSidebarOrderSync.getState().hosts.b.failedWrite?.change).toEqual({
+    kind: "groups",
+    keys: ["new", "other"],
+  });
+  await sidebarOrderSync.refresh("b");
+  expect(useSidebarOrderSync.getState().hosts.b.failedWrite).toBeDefined();
+  // A newer revision for a different scope is safe to retain while retrying the group rename.
+  const reconnectSnapshot = {
+    ...initial,
+    revision: 3,
+    order: { ...initial.order, pinnedWorkspaceOrder: ["new-pin"] },
+  };
+  const reconnected = fakeClient(reconnectSnapshot);
+  reconnected.methods.updateSidebarOrder.mockImplementationOnce(async () => {
+    const snapshot = {
+      ...reconnectSnapshot,
+      revision: 4,
+      order: { ...reconnectSnapshot.order, projectGroupOrder: ["new", "other"] },
+    };
+    reconnected.emit(snapshot);
+    return { accepted: true, snapshot, error: null, requestId: "retry" };
+  });
+  await sidebarOrderSync.connect("b", reconnected.client, true);
+  await sidebarOrderSync.retry("b");
+  expect(a.methods.updateSidebarOrder).toHaveBeenCalledTimes(1);
+  expect(reconnected.methods.updateSidebarOrder).toHaveBeenCalledWith(3, {
+    kind: "groups",
+    keys: ["new", "other"],
+  });
+  expect(useSidebarOrderSync.getState().hosts.b.failedWrite).toBeUndefined();
+  expect(useSidebarOrderSync.getState().hosts.b.snapshot?.order.pinnedWorkspaceOrder).toEqual([
+    "new-pin",
+  ]);
+});
+
+test("retains a failed change until retry or discard and refuses to overwrite a newer order", async () => {
+  const { sidebarOrderSync, useSidebarOrderSync } = await import("./index");
+  const initial = {
+    revision: 1,
+    initialized: true,
+    order: { ...emptyOrder(), projectGroupOrder: ["old", "other"] },
+  };
+  const fake = fakeClient(initial);
+  fake.methods.updateSidebarOrder.mockRejectedValueOnce(new Error("Disk full"));
+  await sidebarOrderSync.connect("host", fake.client, true);
+  await sidebarOrderSync.write({ kind: "renameGroup", fromKey: "old", toKey: "new" });
+  await sidebarOrderSync.write({ kind: "renameGroup", fromKey: "old", toKey: "newer" });
+  expect(fake.methods.updateSidebarOrder).toHaveBeenCalledTimes(1);
+  fake.emit({
+    ...initial,
+    revision: 2,
+    order: { ...initial.order, projectGroupOrder: ["other", "old"] },
+  });
+  await sidebarOrderSync.retry("host");
+  expect(fake.methods.updateSidebarOrder).toHaveBeenCalledTimes(1);
+  expect(useSidebarOrderSync.getState().hosts.host.error).toContain("changed on another device");
+  expect(useSidebarOrderSync.getState().hosts.host.failedWrite).toBeDefined();
+  sidebarOrderSync.dismiss("host");
+  expect(useSidebarOrderSync.getState().hosts.host.failedWrite).toBeUndefined();
+  expect(sidebarOrderSync.readiness(["host"])).toBeNull();
+});
+
+test("recognizes a write that committed before its response was lost", async () => {
+  const { sidebarOrderSync, useSidebarOrderSync } = await import("./index");
+  const initial = {
+    revision: 1,
+    initialized: true,
+    order: { ...emptyOrder(), projectGroupOrder: ["old"] },
+  };
+  const fake = fakeClient(initial);
+  fake.methods.updateSidebarOrder.mockImplementationOnce(async () => {
+    fake.emit({ ...initial, revision: 2, order: { ...initial.order, projectGroupOrder: ["new"] } });
+    throw new Error("Lost response");
+  });
+  await sidebarOrderSync.connect("host", fake.client, true);
+  await sidebarOrderSync.write({ kind: "renameGroup", fromKey: "old", toKey: "new" });
+  await sidebarOrderSync.retry("host");
+  expect(fake.methods.updateSidebarOrder).toHaveBeenCalledTimes(1);
+  expect(useSidebarOrderSync.getState().hosts.host.failedWrite).toBeUndefined();
+});

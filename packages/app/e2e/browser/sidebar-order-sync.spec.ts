@@ -154,10 +154,10 @@ test("desktop import syncs to a compact client and an import failure stays visib
     await expect
       .poll(() => groupOrder(phone))
       .toEqual(["sidebar-project-group-header-zulu", "sidebar-project-group-header-alpha"]);
-    await page.getByTestId("sidebar-order-notice").getByRole("button", { name: "Dismiss" }).click();
-    await page.getByTestId("sidebar-project-group-header-zulu").hover();
-    await page.getByTestId("sidebar-project-group-kebab-zulu").click();
-    await page.getByTestId("sidebar-project-group-menu-move-down-zulu").click();
+    await page
+      .getByTestId("sidebar-order-notice")
+      .getByRole("button", { name: "Retry failed change" })
+      .click();
     await expect
       .poll(() => groupOrder(page))
       .toEqual(["sidebar-project-group-header-alpha", "sidebar-project-group-header-zulu"]);

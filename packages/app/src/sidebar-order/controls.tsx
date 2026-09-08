@@ -24,9 +24,12 @@ function HostOrderControls({
   const refresh = useCallback(() => {
     void sidebarOrderSync.refresh(serverId);
   }, [serverId]);
+  const retry = useCallback(() => {
+    void sidebarOrderSync.retry(serverId);
+  }, [serverId]);
   const dismiss = useCallback(() => sidebarOrderSync.dismiss(serverId), [serverId]);
   const message = t(statusKey(state));
-  if (notice && !state?.error && !state?.pending) return null;
+  if (notice && !state?.error && !state?.pending && !state?.failedWrite) return null;
   return (
     <View testID={notice ? "sidebar-order-notice" : `sidebar-order-host-${serverId}`}>
       <View style={styles.description}>
@@ -39,13 +42,14 @@ function HostOrderControls({
         ) : null}
       </View>
       {notice ? (
-        <NoticeActions error={state?.error ?? null} dismiss={dismiss} />
+        <NoticeActions serverId={serverId} state={state} retry={retry} dismiss={dismiss} />
       ) : (
         <HostOrderActions
           serverId={serverId}
           state={state}
           initialize={initialize}
           refresh={refresh}
+          retry={retry}
           dismiss={dismiss}
         />
       )}
@@ -54,6 +58,7 @@ function HostOrderControls({
 }
 function statusKey(state: HostOrderState | undefined): string {
   if (state?.pending) return "sidebarOrder.pending";
+  if (state?.failedWrite) return "sidebarOrder.unsaved";
   if (state?.status === "online")
     return state.snapshot?.initialized ? "sidebarOrder.synced" : "sidebarOrder.uninitialized";
   return `sidebarOrder.${state?.status ?? "loading"}`;
@@ -63,12 +68,14 @@ function HostOrderActions({
   state,
   initialize,
   refresh,
+  retry,
   dismiss,
 }: {
   serverId: string;
   state: HostOrderState | undefined;
   initialize: () => void;
   refresh: () => void;
+  retry: () => void;
   dismiss: () => void;
 }) {
   const { t } = useTranslation();
@@ -89,23 +96,57 @@ function HostOrderActions({
           {t("sidebarOrder.reload")}
         </MenuItem>
       ) : null}
-      {state?.error ? (
-        <MenuItem closeOnSelect={false} onSelect={dismiss}>
-          {t("sidebarOrder.dismiss")}
+      {state?.failedWrite ? (
+        <MenuItem
+          closeOnSelect={false}
+          disabled={state.pending || state.status !== "online"}
+          onSelect={retry}
+          testID={`sidebar-order-retry-${serverId}`}
+        >
+          {t("sidebarOrder.retry")}
+        </MenuItem>
+      ) : null}
+      {state?.error || state?.failedWrite ? (
+        <MenuItem closeOnSelect={false} disabled={state.pending} onSelect={dismiss}>
+          {t(state.failedWrite ? "sidebarOrder.discard" : "sidebarOrder.dismiss")}
         </MenuItem>
       ) : null}
       <MenuSeparator />
     </>
   );
 }
-function NoticeActions({ error, dismiss }: { error: string | null; dismiss: () => void }) {
+function NoticeActions({
+  serverId,
+  state,
+  retry,
+  dismiss,
+}: {
+  serverId: string;
+  state: HostOrderState | undefined;
+  retry: () => void;
+  dismiss: () => void;
+}) {
   const { t } = useTranslation();
-  return error ? (
-    <Button variant="ghost" size="sm" onPress={dismiss}>
-      {t("sidebarOrder.dismiss")}
-    </Button>
+  return state?.error || state?.failedWrite ? (
+    <View style={styles.actions}>
+      {state.failedWrite ? (
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={state.pending || state.status !== "online"}
+          onPress={retry}
+          testID={`sidebar-order-notice-retry-${serverId}`}
+        >
+          {t("sidebarOrder.retry")}
+        </Button>
+      ) : null}
+      <Button variant="ghost" size="sm" disabled={state.pending} onPress={dismiss}>
+        {t(state.failedWrite ? "sidebarOrder.discard" : "sidebarOrder.dismiss")}
+      </Button>
+    </View>
   ) : null;
 }
+
 export function SidebarOrderControls() {
   const hosts = useHosts();
   return (
@@ -137,6 +178,7 @@ export function SidebarOrderNotice() {
   );
 }
 const styles = StyleSheet.create((theme) => ({
+  actions: { flexDirection: "row", gap: theme.spacing[2] },
   description: { padding: theme.spacing[2], gap: theme.spacing[1] },
   name: { color: theme.colors.foreground, fontSize: theme.fontSize.sm, fontWeight: "500" },
   detail: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
