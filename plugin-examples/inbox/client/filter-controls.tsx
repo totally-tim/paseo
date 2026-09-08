@@ -1,5 +1,6 @@
 import type { PluginTheme } from "@getpaseo/plugin";
-import { Modal } from "@getpaseo/plugin/react-native";
+
+import { Modal } from "@getpaseo/plugin/client/react-native";
 import { useCallback, useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { ALL_PROJECTS, type InboxFilters } from "./filters";

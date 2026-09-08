@@ -1,4 +1,5 @@
 import type { PluginTheme } from "@getpaseo/plugin";
+
 import { StyleSheet, Text, TextInput, View } from "react-native";
 import { useCallback, useMemo } from "react";
 import type { CardActions } from "./card";

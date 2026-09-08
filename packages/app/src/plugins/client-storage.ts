@@ -1,5 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import type { PluginClientStorage } from "@getpaseo/plugin";
+import type { PluginClientStorage } from "@getpaseo/plugin/client";
 
 // A plugin can be reinstalled on reconnect while a previous instance is saving.
 // Reads and writes for the same key must observe that previous instance's writes.

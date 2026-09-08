@@ -1,5 +1,8 @@
-import type { PluginSurfaceProps, PluginTheme, PluginWorkspacePanelProps } from "@getpaseo/plugin";
-import { usePaseo } from "@getpaseo/plugin";
+import type { PluginTheme } from "@getpaseo/plugin";
+import type { PluginSurfaceProps, PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
+
+import { usePaseo } from "@getpaseo/plugin/client";
+
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { type CardActions, InboxCardView } from "./card";

@@ -4,6 +4,7 @@ import { AccountProviderSchema } from "@getpaseo/protocol/provider-accounts";
 import { ProviderAccountStore } from "./provider-accounts/account-store.js";
 import { ProviderAccountService } from "./provider-accounts/account-service.js";
 import { createAccountBackend } from "./provider-accounts/provider-backends.js";
+import { describeHookWorkspace } from "./plugins/lifecycle/index.js";
 import express from "express";
 import { createServer as createHTTPServer, type IncomingMessage, type ServerResponse } from "http";
 import { constants, existsSync, unlinkSync } from "fs";
@@ -885,7 +886,15 @@ export async function createPaseoDaemon(
       forgeOverrides: { github },
     },
   });
+  workspaceRegistry.subscribeToMutations((mutation) => {
+    if (mutation.kind === "archive" && mutation.workspace) {
+      pluginRuntime.emit("workspace.archived", {
+        workspace: describeHookWorkspace(mutation.workspace),
+      });
+    }
+  });
   const workspaceProvisioning = createWorkspaceProvisioningService({
+    lifecycle: pluginRuntime,
     serverId,
     projectRegistry,
     workspaceRegistry,
@@ -940,6 +949,7 @@ export async function createPaseoDaemon(
         dependencies.accountClient ??
         providerSnapshotManager.createAccountClient.bind(providerSnapshotManager)
       )(provider, context),
+    pluginLifecycle: pluginRuntime,
     clients: initialAgentManagerState.clients,
     providerDefinitions: initialAgentManagerState.providerDefinitions,
     registry: agentStorage,

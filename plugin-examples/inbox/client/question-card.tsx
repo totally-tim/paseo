@@ -1,4 +1,5 @@
 import type { PluginTheme } from "@getpaseo/plugin";
+
 import { useCallback, useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { buildAnswers, isAnswered, parseQuestions, type Question } from "./question-form";

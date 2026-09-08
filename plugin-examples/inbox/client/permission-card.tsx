@@ -1,4 +1,5 @@
 import type { PluginTheme } from "@getpaseo/plugin";
+
 import { useCallback, useMemo } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { describeRequest } from "./detail-text";
