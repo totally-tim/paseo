@@ -884,6 +884,9 @@ it("isolates automatic choices by model, permitted pool and work type", async ()
       { id: "model:0:Fable", label: "Weekly · Fable", usedPct: 100 },
     ],
   });
+  const defaultModel = await service.reserve({ provider: "claude", unattended: false });
+  expect(defaultModel?.accountId).toBe(a.account.id);
+  defaultModel?.release();
   await service.setPolicy({ unknownQuota: "allow" });
   const fable = await service.reserve({
     provider: "claude",

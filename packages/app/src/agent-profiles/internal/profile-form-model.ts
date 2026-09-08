@@ -520,15 +520,13 @@ export function openAgentProfileForm(snapshot: AgentProfileFormSnapshot): AgentP
       withOptions.provider.length > 0 &&
       (!withOptions.continuationPolicy ||
         (withOptions.continuationPolicy.accountIds.length > 0 &&
-          withOptions.continuationPolicy.accountIds.every(
-            (id) =>
-              !accounts ||
-              accounts.some(
-                (account) =>
-                  account.id === id &&
-                  account.provider === withOptions.provider &&
-                  !account.removedAt,
-              ),
+          withOptions.continuationPolicy.accountIds.every((id) =>
+            accounts?.some(
+              (account) =>
+                account.id === id &&
+                account.provider === withOptions.provider &&
+                !account.removedAt,
+            ),
           ))) &&
       !withOptions.isSubmitting;
     const resolved: AgentProfileFormState = { ...withOptions, disclosure, canSubmit };

@@ -1,3 +1,4 @@
+import { useAgentCanContinue } from "@/agent-handoff/use-workspace-handoff";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import React, {
   useCallback,
@@ -1456,6 +1457,10 @@ function ResolvedDesktopTabChip({
 }) {
   const { t } = useTranslation();
   const presentation = item.presentation;
+  const agentCanContinue = useAgentCanContinue(
+    serverId,
+    item.tab.target.kind === "agent" ? item.tab.target.agentId : undefined,
+  );
   const resolvedTab = useMemo(
     () =>
       buildWorkspaceDesktopTabActions({
@@ -1468,6 +1473,7 @@ function ResolvedDesktopTabChip({
         onCopyFilePath,
         onReloadAgent,
         onContinueAgent,
+        agentCanContinue,
         onRenameTab,
         onCloseTab,
         onCloseTabsToLeft,
@@ -1477,6 +1483,7 @@ function ResolvedDesktopTabChip({
       }),
     [
       index,
+      agentCanContinue,
       item.tab,
       onCloseOtherTabs,
       onCloseTab,

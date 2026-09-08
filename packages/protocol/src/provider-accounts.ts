@@ -141,6 +141,6 @@ export function getAccountUsageWindows(
       if (label && /^gpt-\d/i.test(label)) scope = label;
     }
     if (!scope) return true;
-    return selected ? selected.includes(key(scope)) : true;
+    return selected ? selected.includes(key(scope)) : false;
   });
 }

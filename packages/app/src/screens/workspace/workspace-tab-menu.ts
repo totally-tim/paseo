@@ -74,6 +74,7 @@ interface BuildWorkspaceTabMenuEntriesInput {
   onCopyFilePath: (path: string) => Promise<void> | void;
   onReloadAgent: (agentId: string) => Promise<void> | void;
   onContinueAgent?: (agentId: string) => void;
+  agentCanContinue?: boolean;
   onRenameTab: (tab: WorkspaceTabDescriptor) => void;
   onCloseTab: (tabId: string) => Promise<void> | void;
   onCloseTabsBefore: (tabId: string) => Promise<void> | void;
@@ -92,6 +93,7 @@ interface BuildWorkspaceDesktopTabActionsInput {
   onCopyFilePath: (path: string) => Promise<void> | void;
   onReloadAgent: (agentId: string) => Promise<void> | void;
   onContinueAgent?: (agentId: string) => void;
+  agentCanContinue?: boolean;
   onRenameTab: (tab: WorkspaceTabDescriptor) => void;
   onCloseTab: (tabId: string) => Promise<void> | void;
   onCloseTabsToLeft: (tabId: string) => Promise<void> | void;
@@ -180,6 +182,7 @@ export function buildWorkspaceTabMenuEntries(
     onCopyFilePath,
     onReloadAgent,
     onContinueAgent,
+    agentCanContinue,
     onRenameTab,
     onCloseTab,
     onCloseTabsBefore,
@@ -298,7 +301,7 @@ export function buildWorkspaceTabMenuEntries(
   });
   if (tab.target.kind === "agent") {
     const { agentId } = tab.target;
-    if (onContinueAgent)
+    if (onContinueAgent && agentCanContinue)
       entries.push({
         kind: "item",
         key: "continue-agent",
@@ -350,6 +353,7 @@ export function buildWorkspaceDesktopTabActions(
       onCopyFilePath: input.onCopyFilePath,
       onReloadAgent: input.onReloadAgent,
       onContinueAgent: input.onContinueAgent,
+      agentCanContinue: input.agentCanContinue,
       onRenameTab: input.onRenameTab,
       onCloseTab: input.onCloseTab,
       onCloseTabsBefore: input.onCloseTabsToLeft,

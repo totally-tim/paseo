@@ -389,9 +389,16 @@ it.each(["mobile", "desktop"] as const)("anchors continuation in the %s agent me
   expect(buildWorkspaceTabMenuEntries(input).some((entry) => entry.key === "continue-agent")).toBe(
     false,
   );
-  const item = buildWorkspaceTabMenuEntries({ ...input, onContinueAgent }).find(
-    (entry) => entry.key === "continue-agent",
-  );
+  expect(
+    buildWorkspaceTabMenuEntries({ ...input, onContinueAgent, agentCanContinue: false }).some(
+      (entry) => entry.key === "continue-agent",
+    ),
+  ).toBe(false);
+  const item = buildWorkspaceTabMenuEntries({
+    ...input,
+    onContinueAgent,
+    agentCanContinue: true,
+  }).find((entry) => entry.key === "continue-agent");
   expect(item?.kind).toBe("item");
   if (item?.kind === "item") item.onSelect();
   expect(onContinueAgent).toHaveBeenCalledWith("agent-123");

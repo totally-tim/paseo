@@ -1,3 +1,4 @@
+import { useSessionStore } from "@/stores/session-store";
 import { useCallback, useState } from "react";
 import { useHostFeature } from "@/runtime/host-features";
 import { useHostRuntimeIsConnected } from "@/runtime/host-runtime";
@@ -31,4 +32,13 @@ export function useWorkspaceHandoff(serverId: string, cwd: string | null, visibl
         />
       ) : null,
   };
+}
+
+export function useAgentCanContinue(serverId: string, agentId: string | undefined) {
+  return useSessionStore((state) => {
+    if (!agentId) return false;
+    const session = state.sessions[serverId];
+    const agent = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
+    return Boolean(agent && !agent.archivedAt);
+  });
 }

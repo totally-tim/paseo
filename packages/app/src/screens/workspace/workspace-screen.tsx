@@ -1,4 +1,4 @@
-import { useWorkspaceHandoff } from "@/agent-handoff/use-workspace-handoff";
+import { useWorkspaceHandoff, useAgentCanContinue } from "@/agent-handoff/use-workspace-handoff";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import type { JsonValue } from "@getpaseo/protocol/agent-types";
 import { getOpenAgentTabLabel } from "@getpaseo/protocol/agent-labels";
@@ -571,6 +571,10 @@ function MobileWorkspaceTabOption({
     }),
     [t],
   );
+  const agentCanContinue = useAgentCanContinue(
+    normalizedServerId,
+    tab.target.kind === "agent" ? tab.target.agentId : undefined,
+  );
   const menuTestIDBase = `workspace-tab-menu-${tab.tabId}`;
   const menuEntries = buildWorkspaceTabMenuEntries({
     surface: "mobile",
@@ -578,6 +582,7 @@ function MobileWorkspaceTabOption({
     index: tabIndex,
     tabCount,
     menuTestIDBase,
+    agentCanContinue,
     onCopyResumeCommand,
     onCopyAgentId,
     onCopyTerminalId,
