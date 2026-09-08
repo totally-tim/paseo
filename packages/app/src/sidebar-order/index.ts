@@ -50,6 +50,7 @@ const cache = create<OrderCache>()(
 interface Connection {
   client: DaemonClient;
   unsubscribe: () => void;
+  latestRevision: number | null;
 }
 const connections = new Map<string, Connection>();
 const offlineOwners = new Map<string, object>();
@@ -113,8 +114,10 @@ function publishProjection(): void {
     applySidebarOrder(next);
 }
 function accept(serverId: string, snapshot: SidebarOrderSnapshot): void {
-  const previous = useSidebarOrderSync.getState().hosts[serverId]?.snapshot;
-  if (previous && previous.revision > snapshot.revision) return;
+  const connection = connections.get(serverId);
+  if (!connection) return;
+  if (connection.latestRevision !== null && connection.latestRevision > snapshot.revision) return;
+  connection.latestRevision = snapshot.revision;
   cache.setState((state) => ({ snapshots: { ...state.snapshots, [serverId]: snapshot } }));
   publish(serverId, { snapshot });
   publishProjection();
@@ -183,16 +186,16 @@ function planWrites(
 export const sidebarOrderSync = {
   async connect(serverId: string, client: DaemonClient, supported: boolean): Promise<void> {
     this.disconnect(serverId);
-    const connection: Connection = { client, unsubscribe: () => undefined };
+    const connection: Connection = { client, unsubscribe: () => undefined, latestRevision: null };
     connections.set(serverId, connection);
-    await prepare();
-    if (connections.get(serverId) !== connection) return;
     // COMPAT(sidebarOrderSync): added after v1.2.0; remove this host gate after 2027-03-08.
     if (!supported) {
       publish(serverId, { status: "unsupported" });
       publishProjection();
       return;
     }
+    await prepare();
+    if (connections.get(serverId) !== connection) return;
     publish(serverId, { status: "loading" });
     connection.unsubscribe = client.on("sidebar.order.changed", (message) => {
       if (connections.get(serverId) === connection) accept(serverId, message.payload);

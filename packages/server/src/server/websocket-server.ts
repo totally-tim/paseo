@@ -1786,6 +1786,7 @@ export class VoiceAssistantWebSocketServer {
         projectCustomIcon: true,
         // COMPAT(projectGroups): added in v0.7.3, remove gate after 2027-03-02.
         projectGroups: true,
+        // COMPAT(sidebarOrderSync): added after v1.2.0; remove this host gate after 2027-03-08.
         sidebarOrderSync: true,
         // COMPAT(fsEntryOps): added in v0.3.0, remove gate after 2027-02-08.
         fsEntryOps: true,

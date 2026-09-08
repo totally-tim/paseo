@@ -3775,6 +3775,7 @@ export const ServerInfoStatusPayloadSchema = z
         projectCustomIcon: z.boolean().optional(),
         // COMPAT(projectGroups): added in v0.7.3, remove gate after 2027-03-02.
         projectGroups: z.boolean().optional(),
+        // COMPAT(sidebarOrderSync): added after v1.2.0; remove this host gate after 2027-03-08.
         sidebarOrderSync: z.boolean().optional(),
         // COMPAT(fsEntryOps): added in v0.3.0, remove gate after 2027-02-08.
         fsEntryOps: z.boolean().optional(),

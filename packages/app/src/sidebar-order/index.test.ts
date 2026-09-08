@@ -204,3 +204,46 @@ test("unsupported hosts never receive a new RPC and uninitialized hosts cannot b
   expect(fake.methods.updateSidebarOrder).not.toHaveBeenCalled();
   expect(useSidebarOrderSync.getState().hosts.host.error).toContain("Use this device");
 });
+
+test("accepts a reset host revision on reconnect", async () => {
+  const { sidebarOrderSync, useSidebarOrderSync } = await import("./index");
+  const old = fakeClient({ revision: 10, initialized: true, order: emptyOrder() });
+  await sidebarOrderSync.connect("host", old.client, true);
+  const reset = fakeClient(uninitialized());
+  await sidebarOrderSync.connect("host", reset.client, true);
+  expect(useSidebarOrderSync.getState().hosts.host.snapshot).toEqual(uninitialized());
+  await sidebarOrderSync.initialize("host");
+  expect(reset.methods.initializeSidebarOrder).toHaveBeenCalledTimes(1);
+});
+
+test("does not let an older initial response replace a new connection event", async () => {
+  const { sidebarOrderSync, useSidebarOrderSync } = await import("./index");
+  const fake = fakeClient(uninitialized());
+  let resolve!: (value: Awaited<ReturnType<DaemonClient["getSidebarOrder"]>>) => void;
+  fake.methods.getSidebarOrder.mockImplementationOnce(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  const connecting = sidebarOrderSync.connect("host", fake.client, true);
+  await vi.waitFor(() => expect(fake.methods.getSidebarOrder).toHaveBeenCalledTimes(1));
+  fake.emit({ revision: 2, initialized: true, order: emptyOrder() });
+  resolve({ requestId: "get", accepted: true, snapshot: uninitialized(), error: null });
+  await connecting;
+  expect(useSidebarOrderSync.getState().hosts.host.snapshot?.revision).toBe(2);
+});
+
+test("unsupported host connection does not wait for local storage hydration", async () => {
+  const { sidebarOrderSync, useSidebarOrderSync } = await import("./index");
+  const { useSidebarOrderStore } = await import("@/stores/sidebar-order-store");
+  const hydration = vi.spyOn(useSidebarOrderStore.persist, "hasHydrated").mockReturnValue(false);
+  const fake = fakeClient(uninitialized());
+  try {
+    await sidebarOrderSync.connect("host", fake.client, false);
+    expect(useSidebarOrderSync.getState().hosts.host.status).toBe("unsupported");
+    expect(fake.methods.getSidebarOrder).not.toHaveBeenCalled();
+  } finally {
+    hydration.mockRestore();
+  }
+});
