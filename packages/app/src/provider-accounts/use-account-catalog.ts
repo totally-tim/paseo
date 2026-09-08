@@ -61,6 +61,7 @@ function useAccountCatalogEntry(
       provider,
       selection ?? { kind: "automatic" },
       input.cwd,
+      input.model,
       revision,
     ],
     enabled,
@@ -71,6 +72,7 @@ function useAccountCatalogEntry(
       const result = await client.getProviderAccountCatalog({
         provider,
         selection,
+        model: input.model,
         cwd: input.cwd ?? undefined,
       });
       if (result.error || !result.entry) throw new Error(result.error ?? result.reason);

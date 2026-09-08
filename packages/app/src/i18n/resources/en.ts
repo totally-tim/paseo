@@ -12,6 +12,12 @@ export const en = {
     dismiss: "Dismiss",
   },
   providerAccounts: {
+    contextUnavailable: "Context usage not reported",
+    automaticHelp: "Stays on one account per model until its capacity runs out.",
+    automaticOrder: "Account order controls which account automatic selection tries next.",
+    useForNewAgents: "Use for new agents",
+    removedAccounts: "Removed accounts ({{count}})",
+    externalHelp: "This login belongs to the host CLI. Manage it in the host terminal.",
     removed: "Removed from new agent selection",
     remove: "Remove account",
     restore: "Restore account",

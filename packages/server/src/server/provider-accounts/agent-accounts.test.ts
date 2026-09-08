@@ -60,6 +60,7 @@ async function setup(usedPct = 10) {
   const add = async (provider: AccountProvider, label: string) => {
     const account = await accounts.add(provider, label);
     await accounts.inspect(account.id);
+    await accounts.edit(account.id, { enabled: true });
     return account;
   };
   cleanup.push(async () => {
@@ -138,7 +139,7 @@ describe("agent account boundaries", () => {
         }),
       ),
     );
-    expect(new Set(starts.map((agent) => agent.config.accountId))).toEqual(new Set([a.id, b.id]));
+    expect(new Set(starts.map((agent) => agent.config.accountId))).toEqual(new Set([a.id]));
     const parent = starts[0];
     const child = await manager.createAgent({ provider: "claude", cwd: directory }, undefined, {
       labels: { [PARENT_AGENT_ID_LABEL]: parent.id },

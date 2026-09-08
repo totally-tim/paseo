@@ -3,6 +3,8 @@ import type { ProviderAccount } from "@getpaseo/protocol/provider-accounts";
 import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import type { AgentContinuationPolicy } from "@getpaseo/protocol/agent-continuation";
+import { Button } from "@/components/ui/button";
+import { useTranslation } from "react-i18next";
 import { Switch } from "@/components/ui/switch";
 import { useHostFeature } from "@/runtime/host-features";
 import { useProviderAccounts } from "./use-provider-accounts";
@@ -20,6 +22,7 @@ export function ContinuationPolicyField({
   onChange: (policy: AgentContinuationPolicy | undefined) => void;
   disabled?: boolean;
 }) {
+  const { t } = useTranslation();
   const supported = useHostFeature(serverId, "agentContinuation");
   const catalog = useProviderAccounts(serverId);
   const enable = useCallback(
@@ -32,6 +35,7 @@ export function ContinuationPolicyField({
       (account) => account.provider === provider && !account.removedAt,
     ) ?? [];
   const selected = value?.accountIds ?? [];
+  const unavailable = selected.filter((id) => !accounts.some((account) => account.id === id));
   return (
     <View style={styles.section}>
       <View style={styles.row}>
@@ -59,19 +63,57 @@ export function ContinuationPolicyField({
               account={account}
               selected={selected}
               onChange={onChange}
-              disabled={disabled}
+              disabled={disabled || !supported || !catalog.connected}
             />
           ))}
           {!selected.length ? (
             <Text style={styles.error}>Select at least one permitted account.</Text>
           ) : null}
-          {selected.some((id) => !accounts.some((account) => account.id === id)) ? (
-            <Text style={styles.error}>
-              A selected account is no longer available. Select the permitted accounts again.
-            </Text>
-          ) : null}
+          {unavailable.map((id) => (
+            <UnavailableAccount
+              key={id}
+              id={id}
+              label={
+                catalog.data?.accounts.find((account) => account.id === id)?.label ??
+                t("providerAccounts.missingAccount")
+              }
+              selected={selected}
+              onChange={onChange}
+              disabled={disabled || !supported}
+            />
+          ))}
         </>
       ) : null}
+    </View>
+  );
+}
+function UnavailableAccount({
+  id,
+  label,
+  selected,
+  onChange,
+  disabled,
+}: {
+  id: string;
+  label: string;
+  selected: string[];
+  disabled?: boolean;
+  onChange: (policy: AgentContinuationPolicy | undefined) => void;
+}) {
+  const { t } = useTranslation();
+  const remove = useCallback(
+    () => onChange({ accountIds: selected.filter((entry) => entry !== id) }),
+    [id, onChange, selected],
+  );
+  return (
+    <View style={styles.row}>
+      <View style={styles.account}>
+        <Text style={styles.label}>{label}</Text>
+        <Text style={styles.error}>{t("providerAccounts.missingAccount")}</Text>
+      </View>
+      <Button variant="outline" size="sm" disabled={disabled} onPress={remove}>
+        {t("providerAccounts.remove")}
+      </Button>
     </View>
   );
 }

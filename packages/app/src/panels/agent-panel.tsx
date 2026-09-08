@@ -1576,7 +1576,7 @@ const AgentComposerSection = memo(function AgentComposerSection({
   }
   if (archivedAt) {
     return (
-      <AgentContinuationControls serverId={serverId} agentId={agentId} cwd={cwd}>
+      <AgentContinuationControls serverId={serverId} agentId={agentId}>
         <ArchivedAgentCallout serverId={serverId} agentId={agentId} />
       </AgentContinuationControls>
     );
@@ -1586,7 +1586,7 @@ const AgentComposerSection = memo(function AgentComposerSection({
   }
 
   return (
-    <AgentContinuationControls serverId={serverId} agentId={agentId} cwd={cwd}>
+    <AgentContinuationControls serverId={serverId} agentId={agentId}>
       <ActiveAgentComposer
         agentId={agentId}
         serverId={serverId}

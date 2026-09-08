@@ -255,7 +255,10 @@ function buildRealtimeVoiceButtonStyle(
 
 function buildAgentStateSelector(serverId: string, agentId: string) {
   return (state: ReturnType<typeof useSessionStore.getState>) => {
-    const agent = state.sessions[serverId]?.agents?.get(agentId) ?? null;
+    const session = state.sessions[serverId];
+    const agent = session
+      ? (session.agents.get(agentId) ?? session.agentDetails.get(agentId))
+      : undefined;
     const usage = agent?.lastUsage;
     return {
       status: agent?.status ?? null,
@@ -265,15 +268,12 @@ function buildAgentStateSelector(serverId: string, agentId: string) {
       totalCostUsd: usage?.totalCostUsd ?? null,
       model: agent?.model ?? null,
       provider: agent?.provider ?? null,
+      accountId: agent?.accountId,
     };
   };
 }
 
 function renderContextWindowMeter(props: ContextWindowMeterProps): ReactElement | null {
-  const hasData = props.maxTokens !== null && props.usedTokens !== null;
-  if (!hasData && !props.pending) {
-    return null;
-  }
   return <ContextWindowMeter {...props} />;
 }
 
@@ -1894,6 +1894,8 @@ function ComposerContentImpl({
         totalCostUsd: agentState.totalCostUsd,
         serverId,
         provider: agentState.provider,
+        accountId: agentState.accountId,
+        model: agentState.model,
         pending: contextWindowPending,
         glyphSize: contextWindowMeterGlyphSize,
       }),
@@ -1904,6 +1906,8 @@ function ComposerContentImpl({
       agentState.lastRequest,
       serverId,
       agentState.provider,
+      agentState.accountId,
+      agentState.model,
       contextWindowPending,
       contextWindowMeterGlyphSize,
     ],

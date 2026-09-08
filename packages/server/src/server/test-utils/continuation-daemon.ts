@@ -114,6 +114,8 @@ export async function createContinuationTestDaemon() {
   const b = await accounts.add("codex", "Account B");
   await accounts.inspect(a.id);
   await accounts.inspect(b.id);
+  await accounts.edit(a.id, { enabled: true });
+  await accounts.edit(b.id, { enabled: true });
   used.set(a.id, 10);
   used.set(b.id, 20);
   const workspace = await client.createWorkspace({

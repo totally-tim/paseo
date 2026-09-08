@@ -504,3 +504,45 @@ it("round trips a profile's fixed account and clears it when changing providers"
   form.setProvider("codex", { label: "Codex" });
   expect(form.getState().submitValue?.accountSelection).toBeUndefined();
 });
+
+it("requires an account before saving an enabled continuation policy", () => {
+  const model = openWithCatalog({ mode: "create" });
+  selectClaude(model);
+  model.setName("Work");
+  model.setContinuationPolicy({ accountIds: [] });
+  expect(model.getState().canSubmit).toBe(false);
+  expect(model.getState().submitValue).toBeNull();
+  model.setContinuationPolicy({ accountIds: ["account-a"] });
+  expect(model.getState().canSubmit).toBe(false);
+  expect(model.getState().submitValue).toBeNull();
+  model.applyAccounts([
+    {
+      id: "account-a",
+      provider: "claude",
+      label: "A",
+      ownership: "managed",
+      enabled: true,
+      authState: "ready",
+      identity: null,
+      error: null,
+      revision: 0,
+      createdAt: "2026-09-08",
+      updatedAt: "2026-09-08",
+    },
+  ]);
+  expect(model.getState().canSubmit).toBe(true);
+  model.setContinuationPolicy(undefined);
+  expect(model.getState().canSubmit).toBe(true);
+});
+
+it("blocks saving a continuation policy whose account was removed", () => {
+  const model = openWithCatalog({ mode: "create" });
+  selectClaude(model);
+  model.setName("Work");
+  model.setContinuationPolicy({ accountIds: ["removed-account"] });
+  model.applyAccounts([]);
+  expect(model.getState().canSubmit).toBe(false);
+  expect(model.getState().submitValue).toBeNull();
+  model.setContinuationPolicy(undefined);
+  expect(model.getState().canSubmit).toBe(true);
+});

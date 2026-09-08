@@ -5,6 +5,39 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { i18n } from "@/i18n/i18next";
 import { ContextWindowMeter } from "./context-window-meter";
 
+vi.mock("@/provider-accounts/use-provider-accounts", () => ({
+  useProviderAccounts: () => ({
+    data: {
+      accounts: [
+        { id: "managed-a", label: "Personal", identity: { email: "personal@example.invalid" } },
+      ],
+      usage: [
+        {
+          accountId: "managed-a",
+          stale: false,
+          usage: {
+            providerId: "codex",
+            displayName: "Personal",
+            status: "available",
+            windows: [
+              {
+                id: "codex:secondary",
+                label: "Weekly · codex",
+                usedPct: 12,
+                resetsAt: "2099-01-01T12:00:00Z",
+              },
+              {
+                id: "gpt-5.3-codex-spark:secondary",
+                label: "Weekly · GPT-5.3-Codex-Spark",
+                usedPct: 100,
+              },
+            ],
+          },
+        },
+      ],
+    },
+  }),
+}));
 vi.mock("@/provider-usage/use-provider-usage", () => ({
   useProviderUsage: () => ({ view: null, refresh: async () => {} }),
 }));
@@ -123,4 +156,34 @@ describe("context cache reporting", () => {
     expect(view.queryByText(/Observed output:/)).toBeNull();
     view.unmount();
   });
+});
+
+it.each([false, true])("keeps unknown context interactive while pending=%s", async (pending) => {
+  const view = render(<ContextWindowMeter maxTokens={null} usedTokens={null} pending={pending} />);
+  fireEvent.keyDown(window, { key: "Tab" });
+  fireEvent.focus(view.getByTestId("context-window-meter"));
+  expect(
+    (await view.findByText(pending ? "Loading..." : "Context usage not reported")).textContent,
+  ).toBeTruthy();
+  view.unmount();
+});
+
+it("shows the running account and only the model's applicable quota windows", async () => {
+  const view = render(
+    <ContextWindowMeter
+      maxTokens={null}
+      usedTokens={null}
+      serverId="host"
+      provider="codex"
+      accountId="managed-a"
+      model="gpt-6-astra"
+    />,
+  );
+  fireEvent.keyDown(window, { key: "Tab" });
+  fireEvent.focus(view.getByTestId("context-window-meter"));
+  expect((await view.findByText("Personal")).textContent).toBe("Personal");
+  expect(view.getByText("personal@example.invalid")).toBeTruthy();
+  expect(view.getByText("Weekly · codex")).toBeTruthy();
+  expect(view.queryByText("Weekly · GPT-5.3-Codex-Spark")).toBeNull();
+  view.unmount();
 });

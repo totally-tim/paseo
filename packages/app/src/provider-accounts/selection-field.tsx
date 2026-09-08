@@ -5,8 +5,9 @@ import { StyleSheet } from "react-native-unistyles";
 import type { AccountSelection, ProviderAccount } from "@getpaseo/protocol/provider-accounts";
 import { SelectField } from "@/components/ui/select-field";
 import { useIsCompactFormFactor } from "@/constants/layout";
+import { ProviderUsageCard } from "@/provider-usage/card";
 import { useProviderAccounts } from "./use-provider-accounts";
-import { accountUsageSummary, selectedAccount } from "./selection-summary";
+import { selectedAccount } from "./selection-summary";
 
 export function AccountSelectionField({
   serverId,
@@ -32,18 +33,16 @@ export function AccountSelectionField({
         id: "automatic",
         value: "automatic",
         label: t("providerAccounts.automatic"),
-        description:
-          selectedAccount(accounts.data, provider)?.label ??
-          t("providerAccounts.noAutomaticAccount"),
+        description: t("providerAccounts.automaticHelp"),
       },
       {
         id: "default",
         value: "default",
         label: t("providerAccounts.hostAccount"),
-        description:
-          accountUsageSummary(
-            accounts.data?.usage.find((entry) => entry.accountId === `default:${provider}`)?.usage,
-          ) ?? t("providerAccounts.usageUnavailable"),
+        disabled:
+          accounts.data?.accounts.find((account) => account.id === `default:${provider}`)
+            ?.enabled === false,
+        description: t("providerAccounts.externalHelp"),
       },
       ...(accounts.data?.accounts ?? [])
         .filter(
@@ -54,11 +53,10 @@ export function AccountSelectionField({
           id: account.id,
           value: account.id,
           label: account.label,
+          disabled: !account.enabled || account.authState !== "ready",
           description:
             account.authState === "ready" && account.enabled
-              ? (accountUsageSummary(
-                  accounts.data?.usage.find((entry) => entry.accountId === account.id)?.usage,
-                ) ?? t("providerAccounts.usageUnavailable"))
+              ? (account.identity?.email ?? t("providerAccounts.auth.ready"))
               : t(
                   account.enabled
                     ? `providerAccounts.auth.${account.authState}`
@@ -90,7 +88,8 @@ export function AccountSelectionField({
   return (
     <View style={compact ? styles.compact : undefined}>
       <SelectField
-        label={compact ? "" : t("providerAccounts.account")}
+        label={t("providerAccounts.account")}
+        field={!compact}
         value={selected}
         selectedDisplay={display}
         options={options}
@@ -122,36 +121,24 @@ function AccountSelectionDetails({
   selection: AccountSelection;
 }) {
   const { t } = useTranslation();
-  const next =
-    selection.kind === "automatic" ? data?.next.find((entry) => entry.provider === provider) : null;
-  const nextText = useNextAccountText(data, next);
   const account = selectedAccount(data, provider, selection);
   const usageEntry = data?.usage.find((entry) => entry.accountId === account?.id);
-  const usageText = accountUsageSummary(usageEntry?.usage);
+
   return (
     <>
-      {next ? (
-        <Text style={styles.text} testID="provider-account-next">
-          {nextText}
-        </Text>
+      {selection.kind === "automatic" ? (
+        <Text style={styles.text}>{t("providerAccounts.automaticHelp")}</Text>
       ) : null}
-      {account ? (
-        <Text style={styles.text} testID="provider-account-selected-usage">
-          {usageText ?? t("providerAccounts.usageUnavailable")}
-          {usageText && usageEntry?.stale ? ` · ${t("providerAccounts.lastReported")}` : ""}
-        </Text>
+      {account && usageEntry ? (
+        <View testID="provider-account-selected-usage">
+          <ProviderUsageCard usage={usageEntry.usage} compact showIdentity={false} />
+          {usageEntry.stale ? (
+            <Text style={styles.text}>{t("providerAccounts.lastReported")}</Text>
+          ) : null}
+        </View>
       ) : null}
     </>
   );
-}
-
-function useNextAccountText(
-  data: ReturnType<typeof useProviderAccounts>["data"],
-  next: { accountId: string | null; reason: string } | null | undefined,
-): string | null {
-  const { t } = useTranslation();
-  const account = data?.accounts.find((entry) => entry.id === next?.accountId);
-  return account ? t("providerAccounts.next", { account: account.label }) : (next?.reason ?? null);
 }
 
 const styles = StyleSheet.create((theme) => ({

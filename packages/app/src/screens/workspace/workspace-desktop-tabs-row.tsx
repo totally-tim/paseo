@@ -1,3 +1,4 @@
+import { useAgentCanContinue } from "@/agent-handoff/use-workspace-handoff";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import React, {
   useCallback,
@@ -511,6 +512,7 @@ interface WorkspaceDesktopTabsRowProps {
   onCopyTerminalId: (terminalId: string) => Promise<void> | void;
   onCopyFilePath: (path: string) => Promise<void> | void;
   onReloadAgent: (agentId: string) => Promise<void> | void;
+  onContinueAgent?: (agentId: string) => void;
   onRenameTab: (tab: WorkspaceTabDescriptor) => void;
   onCloseTabsToLeft: (tabId: string) => Promise<void> | void;
   onCloseTabsToRight: (tabId: string) => Promise<void> | void;
@@ -1004,6 +1006,7 @@ function ResolvedWorkspaceDesktopTabsRow({
   onCopyTerminalId,
   onCopyFilePath,
   onReloadAgent,
+  onContinueAgent,
   onRenameTab,
   onCloseTabsToLeft,
   onCloseTabsToRight,
@@ -1260,6 +1263,7 @@ function ResolvedWorkspaceDesktopTabsRow({
           onCopyTerminalId={onCopyTerminalId}
           onCopyFilePath={onCopyFilePath}
           onReloadAgent={onReloadAgent}
+          onContinueAgent={onContinueAgent}
           onRenameTab={onRenameTab}
           onCloseTabsToLeft={onCloseTabsToLeft}
           onCloseTabsToRight={onCloseTabsToRight}
@@ -1293,6 +1297,7 @@ function ResolvedWorkspaceDesktopTabsRow({
       onCopyResumeCommand,
       onNavigateTab,
       onReloadAgent,
+      onContinueAgent,
       onRenameTab,
       setHoveredCloseTabKey,
       tabMenuLabels,
@@ -1407,6 +1412,7 @@ function ResolvedDesktopTabChip({
   onCopyTerminalId,
   onCopyFilePath,
   onReloadAgent,
+  onContinueAgent,
   onRenameTab,
   onCloseTabsToLeft,
   onCloseTabsToRight,
@@ -1433,6 +1439,7 @@ function ResolvedDesktopTabChip({
   onCopyTerminalId: (terminalId: string) => Promise<void> | void;
   onCopyFilePath: (path: string) => Promise<void> | void;
   onReloadAgent: (agentId: string) => Promise<void> | void;
+  onContinueAgent?: (agentId: string) => void;
   onRenameTab: (tab: WorkspaceTabDescriptor) => void;
   onCloseTabsToLeft: (tabId: string) => Promise<void> | void;
   onCloseTabsToRight: (tabId: string) => Promise<void> | void;
@@ -1450,6 +1457,10 @@ function ResolvedDesktopTabChip({
 }) {
   const { t } = useTranslation();
   const presentation = item.presentation;
+  const agentCanContinue = useAgentCanContinue(
+    serverId,
+    item.tab.target.kind === "agent" ? item.tab.target.agentId : undefined,
+  );
   const resolvedTab = useMemo(
     () =>
       buildWorkspaceDesktopTabActions({
@@ -1461,6 +1472,8 @@ function ResolvedDesktopTabChip({
         onCopyTerminalId,
         onCopyFilePath,
         onReloadAgent,
+        onContinueAgent,
+        agentCanContinue,
         onRenameTab,
         onCloseTab,
         onCloseTabsToLeft,
@@ -1470,6 +1483,7 @@ function ResolvedDesktopTabChip({
       }),
     [
       index,
+      agentCanContinue,
       item.tab,
       onCloseOtherTabs,
       onCloseTab,
@@ -1481,6 +1495,7 @@ function ResolvedDesktopTabChip({
       onCopyResumeCommand,
       labels,
       onReloadAgent,
+      onContinueAgent,
       onRenameTab,
       tabCount,
     ],
