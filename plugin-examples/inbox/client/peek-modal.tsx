@@ -196,13 +196,17 @@ function AgentDetail({
         {agent.provider}
         {agent.model ? ` · ${agent.model}` : ""} · {memberStatus(agent)}
       </Text>
+      {navigation ? (
+        <View style={styles.row}>
+          <ActionButton theme={theme} label="Open agent" onPress={openAgent} />
+        </View>
+      ) : null}
       {request ? (
         <RequestControls agentId={agent.id} request={request} actions={actions} theme={theme} />
       ) : null}
       {agent.lastError ? <Text style={styles.error}>{agent.lastError}</Text> : null}
       <ReplyComposer agent={agent} actions={actions} theme={theme} />
       <View style={styles.row}>
-        {navigation ? <ActionButton theme={theme} label="Open agent" onPress={openAgent} /> : null}
         {canMarkRead ? (
           <ActionButton
             theme={theme}

@@ -19,3 +19,25 @@ export function boardLanes(snapshot: InboxSnapshot, workspaceId?: string): Lanes
 export function boardReady(snapshot: InboxSnapshot, workspaceId?: string): boolean {
   return snapshot.loaded && (Boolean(workspaceId) || snapshot.filtersReady);
 }
+
+/** Search the whole family so a matching child keeps its parent card and review actions. */
+export function searchLanes(lanes: Lanes, query: string): Lanes {
+  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return lanes;
+  const matches = (card: InboxCard) => {
+    const text = [
+      card.workspace?.projectDisplayName,
+      card.workspace?.name,
+      ...card.members.flatMap((member) => [member.title, member.provider, member.model]),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return words.every((word) => text.includes(word));
+  };
+  return {
+    needsYou: lanes.needsYou.filter(matches),
+    working: lanes.working.filter(matches),
+    done: lanes.done.filter(matches),
+  };
+}

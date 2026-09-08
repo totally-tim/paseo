@@ -1,3 +1,4 @@
+import { describeToolCall } from "./detail-text";
 import type { TimelineItem } from "./types";
 
 export type PeekRole = "you" | "agent" | "tool" | "thinking" | "system";
@@ -11,13 +12,19 @@ export function firstLine(text: string, max = 160): string {
   const line = text
     .split("\n")
     .map((part) => part.trim())
+    .filter((part) => !/^!\[[^\]]*\]\([^)]*\)$/.test(part))
     .filter(
       (part) => !/^(?:([-*_])(?:\s*\1){2,}|[=~-]{2,}|`{3,}[^`]*|~{3,}[^~]*|#+\s*)$/.test(part),
     )
     .map((part) => part.replace(/^#{1,6}\s+/, "").replace(/^>\s*/, ""))
     .find((part) => part.length > 0);
   if (!line) return "";
-  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+  const plain = line
+    .replace(/^[-*+]\s+/, "")
+    .replace(/\[([^\]]+)\]\(https?:\/\/[^\s)]+\)/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/`([^`]+)`/g, "$1");
+  return plain.length > max ? `${plain.slice(0, max - 1)}…` : plain;
 }
 
 function toolSuffix(status: string): string {
@@ -53,6 +60,18 @@ export function lastAssistantLine(items: readonly TimelineItem[]): string | null
       const line = firstLine(item.text);
       if (line) return line;
     }
+  }
+  return null;
+}
+
+export function latestActivity(items: readonly TimelineItem[]): string | null {
+  for (let index = items.length - 1; index >= 0; index--) {
+    const item = items[index];
+    if (item.type === "assistant_message") {
+      const text = firstLine(item.text);
+      if (text) return text;
+    }
+    if (item.type === "tool_call") return describeToolCall(item);
   }
   return null;
 }
