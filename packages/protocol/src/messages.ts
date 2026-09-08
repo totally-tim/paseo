@@ -3727,6 +3727,7 @@ export const ServerInfoStatusPayloadSchema = z
         agentForkContext: z.boolean().optional(),
         agentHandoff: z.boolean().optional(),
         providerAccounts: z.boolean().optional(),
+        // COMPAT(providerAccountOrdering): added after v1.2.0; remove after 2027-03-08.
         providerAccountOrdering: z.boolean().optional(),
         agentContinuation: z.boolean().optional(),
         // COMPAT(agentForkContextCursor): added in v0.1.108, remove gate after 2027-01-14.

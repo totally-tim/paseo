@@ -1,3 +1,6 @@
+import { useShallow } from "zustand/shallow";
+import type { WorkspaceTabDescriptor } from "@/screens/workspace/workspace-tabs-types";
+import { canContinueAgent } from "./continuation-eligibility";
 import { useSessionStore } from "@/stores/session-store";
 import { useCallback, useState } from "react";
 import { useHostFeature } from "@/runtime/host-features";
@@ -34,11 +37,19 @@ export function useWorkspaceHandoff(serverId: string, cwd: string | null, visibl
   };
 }
 
-export function useAgentCanContinue(serverId: string, agentId: string | undefined) {
-  return useSessionStore((state) => {
-    if (!agentId) return false;
-    const session = state.sessions[serverId];
-    const agent = session?.agents.get(agentId) ?? session?.agentDetails.get(agentId);
-    return Boolean(agent && !agent.archivedAt);
-  });
+export function useContinuableTabs(serverId: string, tabs: readonly WorkspaceTabDescriptor[]) {
+  return useSessionStore(
+    useShallow((state) => {
+      const session = state.sessions[serverId];
+      return Object.fromEntries(
+        tabs.map((tab) => {
+          const agentId = tab.target.kind === "agent" ? tab.target.agentId : undefined;
+          const agent = agentId
+            ? (session?.agents.get(agentId) ?? session?.agentDetails.get(agentId))
+            : undefined;
+          return [tab.tabId, canContinueAgent(agent)];
+        }),
+      );
+    }),
+  );
 }

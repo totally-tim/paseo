@@ -35,14 +35,16 @@ export function ContinuationPolicyField({
       (account) => account.provider === provider && !account.removedAt,
     ) ?? [];
   const selected = value?.accountIds ?? [];
-  const unavailable = selected.filter((id) => !accounts.some((account) => account.id === id));
+  const unavailable = catalog.data
+    ? selected.filter((id) => !accounts.some((account) => account.id === id))
+    : [];
   return (
     <View style={styles.section}>
       <View style={styles.row}>
         <Text style={styles.label}>Automatically continue using these accounts</Text>
         <Switch
           value={Boolean(value)}
-          disabled={disabled || !supported}
+          disabled={disabled || !supported || !catalog.data || !catalog.connected}
           accessibilityLabel="Automatically continue using these accounts"
           testID="profile-continuation-enable"
           onValueChange={enable}
@@ -57,6 +59,13 @@ export function ContinuationPolicyField({
             Select the accounts this task may use after a confirmed limit. Newly connected accounts
             stay excluded. This applies to future ordinary agents.
           </Text>
+          {!catalog.data ? (
+            <Text style={styles.description}>
+              {catalog.isError
+                ? "Could not load accounts. Retry in account settings."
+                : "Loading accounts…"}
+            </Text>
+          ) : null}
           {accounts.map((account) => (
             <PermittedAccount
               key={account.id}
@@ -79,7 +88,7 @@ export function ContinuationPolicyField({
               }
               selected={selected}
               onChange={onChange}
-              disabled={disabled || !supported}
+              disabled={disabled || !supported || !catalog.data || !catalog.connected}
             />
           ))}
         </>

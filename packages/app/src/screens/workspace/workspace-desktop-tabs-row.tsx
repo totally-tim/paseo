@@ -1,4 +1,4 @@
-import { useAgentCanContinue } from "@/agent-handoff/use-workspace-handoff";
+import { useContinuableTabs } from "@/agent-handoff/use-workspace-handoff";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import React, {
   useCallback,
@@ -1026,6 +1026,8 @@ function ResolvedWorkspaceDesktopTabsRow({
   onExitFocusMode,
 }: ResolvedWorkspaceDesktopTabsRowProps) {
   const { t } = useTranslation();
+  const descriptors = useMemo(() => tabs.map((item) => item.tab), [tabs]);
+  const continuableTabs = useContinuableTabs(normalizedServerId, descriptors);
   const newTabKeys = useShortcutKeys("workspace-tab-new");
   const [tabsContainerWidth, setTabsContainerWidth] = useState<number>(0);
   const [exitFocusModeWidth, setExitFocusModeWidth] = useState<number>(0);
@@ -1254,6 +1256,7 @@ function ResolvedWorkspaceDesktopTabsRow({
           key={`${item.tab.key}:${item.tab.kind}`}
           serverId={normalizedServerId}
           item={item}
+          agentCanContinue={continuableTabs[item.tab.tabId] ?? false}
           isFocused={isFocused}
           isDragging={isActive}
           index={index}
@@ -1283,6 +1286,7 @@ function ResolvedWorkspaceDesktopTabsRow({
     },
     [
       activeDragTabId,
+      continuableTabs,
       isFocused,
       layout.closeButtonPolicy,
       layout.items,
@@ -1413,6 +1417,7 @@ function ResolvedDesktopTabChip({
   onCopyFilePath,
   onReloadAgent,
   onContinueAgent,
+  agentCanContinue,
   onRenameTab,
   onCloseTabsToLeft,
   onCloseTabsToRight,
@@ -1440,6 +1445,7 @@ function ResolvedDesktopTabChip({
   onCopyFilePath: (path: string) => Promise<void> | void;
   onReloadAgent: (agentId: string) => Promise<void> | void;
   onContinueAgent?: (agentId: string) => void;
+  agentCanContinue: boolean;
   onRenameTab: (tab: WorkspaceTabDescriptor) => void;
   onCloseTabsToLeft: (tabId: string) => Promise<void> | void;
   onCloseTabsToRight: (tabId: string) => Promise<void> | void;
@@ -1457,10 +1463,6 @@ function ResolvedDesktopTabChip({
 }) {
   const { t } = useTranslation();
   const presentation = item.presentation;
-  const agentCanContinue = useAgentCanContinue(
-    serverId,
-    item.tab.target.kind === "agent" ? item.tab.target.agentId : undefined,
-  );
   const resolvedTab = useMemo(
     () =>
       buildWorkspaceDesktopTabActions({

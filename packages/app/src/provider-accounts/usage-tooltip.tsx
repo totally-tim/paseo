@@ -39,7 +39,7 @@ export function AccountUsageTooltip({
       {account?.identity?.email ? (
         <Text style={styles.detail}>{account.identity.email}</Text>
       ) : null}
-      {usage ? (
+      {usage && (usage.status !== "available" || usage.windows.length > 0) ? (
         <ProviderUsageCard usage={usage} compact showIdentity={false} showResetDates />
       ) : (
         <Text style={styles.detail}>{t("providerAccounts.usageUnavailable")}</Text>

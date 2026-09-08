@@ -1745,6 +1745,7 @@ export class VoiceAssistantWebSocketServer {
         agentHandoff: true,
         agentContinuation: Boolean(this.agentManager.continuations),
         providerAccounts: Boolean(this.agentManager.accounts),
+        // COMPAT(providerAccountOrdering): added after v1.2.0; remove after 2027-03-08.
         providerAccountOrdering: Boolean(this.agentManager.accounts),
         // COMPAT(agentForkContextCursor): added in v0.1.108, remove gate after 2027-01-14.
         agentForkContextCursor: true,
