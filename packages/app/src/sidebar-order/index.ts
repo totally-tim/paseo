@@ -323,7 +323,7 @@ export const sidebarOrderSync = {
     const failedWrite = host?.failedWrite;
     if (!failedWrite || host.pending) return;
     const connection = connections.get(serverId);
-    if (!connection || host.status !== "online") {
+    if (!connection || host.status === "unsupported") {
       publish(serverId, {
         error: "Connect to the host and reload sidebar ordering before retrying.",
       });

@@ -333,6 +333,26 @@ test("retains a failed change until retry or discard and refuses to overwrite a 
   expect(sidebarOrderSync.readiness(["host"])).toBeNull();
 });
 
+test("retries a failed write when its reload also failed on a connected host", async () => {
+  const { sidebarOrderSync, useSidebarOrderSync } = await import("./index");
+  const initial = {
+    revision: 1,
+    initialized: true,
+    order: { ...emptyOrder(), projectGroupOrder: ["old"] },
+  };
+  const fake = fakeClient(initial);
+  await sidebarOrderSync.connect("host", fake.client, true);
+  fake.methods.updateSidebarOrder.mockRejectedValueOnce(new Error("Write timeout"));
+  fake.methods.getSidebarOrder.mockRejectedValueOnce(new Error("Reload timeout"));
+  await sidebarOrderSync.write({ kind: "renameGroup", fromKey: "old", toKey: "new" });
+  expect(useSidebarOrderSync.getState().hosts.host.status).toBe("loading");
+  expect(useSidebarOrderSync.getState().hosts.host.failedWrite).toBeDefined();
+  await sidebarOrderSync.retry("host");
+  expect(fake.methods.updateSidebarOrder).toHaveBeenCalledTimes(2);
+  expect(useSidebarOrderSync.getState().hosts.host.status).toBe("online");
+  expect(useSidebarOrderSync.getState().hosts.host.failedWrite).toBeUndefined();
+});
+
 test("recognizes a write that committed before its response was lost", async () => {
   const { sidebarOrderSync, useSidebarOrderSync } = await import("./index");
   const initial = {

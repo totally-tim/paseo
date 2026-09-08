@@ -1,10 +1,10 @@
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import { View, Text } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
 import { MenuItem, MenuSeparator } from "@/components/ui/menu";
 import { Button } from "@/components/ui/button";
-import { useHosts } from "@/runtime/host-runtime";
+import { getHostRuntimeStore, useHosts } from "@/runtime/host-runtime";
 import { sidebarOrderSync, useSidebarOrderSync, type HostOrderState } from "./index";
 
 function HostOrderControls({
@@ -18,6 +18,10 @@ function HostOrderControls({
 }) {
   const { t } = useTranslation();
   const state = useSidebarOrderSync((store) => store.hosts[serverId]);
+  useEffect(() => {
+    if (notice) return;
+    return getHostRuntimeStore().acquireDirectoryDemand(serverId);
+  }, [notice, serverId]);
   const initialize = useCallback(() => {
     void sidebarOrderSync.initialize(serverId);
   }, [serverId]);
@@ -99,7 +103,7 @@ function HostOrderActions({
       {state?.failedWrite ? (
         <MenuItem
           closeOnSelect={false}
-          disabled={state.pending || state.status !== "online"}
+          disabled={state.pending || state.status === "offline" || state.status === "unsupported"}
           onSelect={retry}
           testID={`sidebar-order-retry-${serverId}`}
         >
@@ -133,7 +137,7 @@ function NoticeActions({
         <Button
           variant="outline"
           size="sm"
-          disabled={state.pending || state.status !== "online"}
+          disabled={state.pending || state.status === "offline" || state.status === "unsupported"}
           onPress={retry}
           testID={`sidebar-order-notice-retry-${serverId}`}
         >
