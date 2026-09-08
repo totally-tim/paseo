@@ -30,6 +30,7 @@ async function setup(input: { close?: () => Promise<void>; holdSourceCompletion?
   const sourceCompletion = new Promise<void>((resolve) => {
     sourceCompleted = resolve;
   });
+  const sourceEvents: AgentStreamEvent[] = [];
   const starts: Array<{ accountId: string; prompt: string }> = [];
   const emitters = new Map<string, (event: AgentStreamEvent) => void>();
   const accounts = new ProviderAccountService(
@@ -95,6 +96,7 @@ async function setup(input: { close?: () => Promise<void>; holdSourceCompletion?
         vi.spyOn(session, "subscribe").mockImplementation((listener) => {
           listeners.add(listener);
           const stop = subscribe((event) => {
+            if (context.accountId === a) sourceEvents.push(event);
             if (
               input.holdSourceCompletion &&
               context.accountId === a &&
@@ -179,6 +181,7 @@ async function setup(input: { close?: () => Promise<void>; holdSourceCompletion?
   return {
     ...deps,
     sourceCompletion,
+    sourceEvents,
     directory,
     service,
     store,
@@ -1143,12 +1146,34 @@ test("Send now does not fence the replacement turn when the old cancellation is 
     unarchive: false,
     clearPendingPermissions: false,
   });
+  await vi.waitFor(() =>
+    expect(
+      f.sourceEvents.filter(
+        (event) =>
+          event.type === "timeline" &&
+          event.item.type === "tool_call" &&
+          event.item.status === "running",
+      ),
+    ).toHaveLength(1),
+  );
+  await f.agentManager.flush();
   const oldTurn = f.agentManager.getAgent(f.source.id)!.activeForegroundTurnId!;
   await f.service.manageQueue(f.source.id, {
     kind: "enqueue",
     message: { id: "replacement", text: "sleep again" },
   });
   await f.service.manageQueue(f.source.id, { kind: "send_now", messageId: "replacement" });
+  await vi.waitFor(() =>
+    expect(
+      f.sourceEvents.filter(
+        (event) =>
+          event.type === "timeline" &&
+          event.item.type === "tool_call" &&
+          event.item.status === "running",
+      ),
+    ).toHaveLength(2),
+  );
+  await f.agentManager.flush();
   // Providers can deliver the interrupted turn's terminal event after Send now returns.
   f.emitters.get(f.a)!({
     type: "turn_canceled",
