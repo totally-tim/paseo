@@ -5,6 +5,8 @@ describe("provider-native limits", () => {
   it("reports a subagent limit without authorizing recovery of its parent", () => {
     expect(codexLimitNotification("usageLimitExceeded", "subagent")).toEqual({
       type: "notification",
+      code: "provider_subagent_capacity",
+      capacityScope: "account",
       level: "warning",
       message:
         "A Codex subagent reached its usage limit. Inspect its result before deciding how to continue.",

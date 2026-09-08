@@ -7,6 +7,7 @@ import { createTestLogger } from "../../test-utils/test-logger.js";
 import { createTestAgentClient, createTestAgentClients } from "../test-utils/fake-agent-client.js";
 import { AgentManager } from "../agent/agent-manager.js";
 import { AgentStorage } from "../agent/agent-storage.js";
+import { codexLimitNotification } from "../agent/provider-limit.js";
 import { handoffAgent } from "../agent/handoff-agent.js";
 import { sendPromptToAgent } from "../agent/agent-prompt.js";
 import { HANDOFF_FROM_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
@@ -20,11 +21,15 @@ const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });
-async function setup(input: { close?: () => Promise<void> } = {}) {
+async function setup(input: { close?: () => Promise<void>; holdSourceCompletion?: boolean } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), "paseo-continuation-"));
   const logger = createTestLogger();
   let now = Date.parse("2026-09-05T10:00:00Z");
   const used = new Map<string, number>();
+  let sourceCompleted!: () => void;
+  const sourceCompletion = new Promise<void>((resolve) => {
+    sourceCompleted = resolve;
+  });
   const starts: Array<{ accountId: string; prompt: string }> = [];
   const emitters = new Map<string, (event: AgentStreamEvent) => void>();
   const accounts = new ProviderAccountService(
@@ -89,7 +94,17 @@ async function setup(input: { close?: () => Promise<void> } = {}) {
         const subscribe = session.subscribe.bind(session);
         vi.spyOn(session, "subscribe").mockImplementation((listener) => {
           listeners.add(listener);
-          const stop = subscribe(listener);
+          const stop = subscribe((event) => {
+            if (
+              input.holdSourceCompletion &&
+              context.accountId === a &&
+              event.type === "turn_completed"
+            ) {
+              sourceCompleted();
+              return;
+            }
+            listener(event);
+          });
           return () => {
             listeners.delete(listener);
             stop();
@@ -163,6 +178,7 @@ async function setup(input: { close?: () => Promise<void> } = {}) {
   used.set(a, 100);
   return {
     ...deps,
+    sourceCompletion,
     directory,
     service,
     store,
@@ -182,7 +198,7 @@ async function setup(input: { close?: () => Promise<void> } = {}) {
 }
 
 test("a live confirmed limit continues once with the effective configuration and one ordered host queue", async () => {
-  const f = await setup();
+  const f = await setup({ holdSourceCompletion: true });
   const capacity: AgentStreamEvent = {
     type: "timeline",
     provider: "codex",
@@ -200,13 +216,21 @@ test("a live confirmed limit continues once with the effective configuration and
   await f.agentManager.flush();
   await f.service.flush();
   expect(f.starts).toHaveLength(0);
-  f.emitters.get(f.a)!({ type: "turn_started", provider: "codex", turnId: "capacity-turn" });
+  await sendPromptToAgent({
+    ...f,
+    agentId: f.source.id,
+    prompt: "Investigate capacity",
+    unarchive: false,
+    clearPendingPermissions: false,
+  });
+  await f.sourceCompletion;
+  const turnId = f.agentManager.getAgent(f.source.id)!.activeForegroundTurnId!;
   f.emitters.get(f.a)!(capacity);
   f.emitters.get(f.a)!(capacity);
   f.emitters.get(f.a)!({
     type: "turn_failed",
     provider: "codex",
-    turnId: "capacity-turn",
+    turnId,
     error: "Usage limit reached",
   });
   await vi.waitFor(() => expect(f.store.forAgent(f.source.id)?.recovery).toBeTruthy());
@@ -236,7 +260,7 @@ test("a live confirmed limit continues once with the effective configuration and
   });
   expect((await f.agentStorage.list()).length).toBe(2);
   expect(f.starts[0]?.prompt).not.toContain(message.text);
-  expect(f.starts[1]?.prompt).toContain("aGVsbG8=");
+  expect(f.starts[2]?.prompt).toContain("aGVsbG8=");
   expect(f.accounts.hasRuntime(f.a)).toBe(false);
   await f.service.manageQueue(f.source.id, { kind: "enqueue", message });
   await f.service.flush();
@@ -1070,4 +1094,120 @@ test("saved manual handoffs with the old capacity reason are corrected on read",
   expect((await f.service.inspect(f.source.id)).continuation?.reason).toBe(
     "The task continued through a manual handoff.",
   );
+});
+
+test("autonomous capacity failures do not authorize parent continuation", async () => {
+  const f = await setup();
+  f.emitters.get(f.a)!({ type: "turn_started", provider: "codex", turnId: "autonomous" });
+  f.emitters.get(f.a)!({
+    type: "timeline",
+    provider: "codex",
+    turnId: "autonomous",
+    item: codexLimitNotification("usageLimitExceeded")!,
+  });
+  f.emitters.get(f.a)!({
+    type: "turn_failed",
+    provider: "codex",
+    turnId: "autonomous",
+    error: "Quota",
+  });
+  await f.agentManager.flush();
+  await f.service.flush();
+  expect((await f.service.inspect(f.source.id)).continuation).toBeNull();
+  expect(f.starts).toEqual([]);
+});
+
+test("autonomous cancellation leaves the host queue unpaused", async () => {
+  const f = await setup();
+  await f.service.inspect(f.source.id);
+  f.emitters.get(f.a)!({ type: "turn_started", provider: "codex", turnId: "autonomous" });
+  f.emitters.get(f.a)!({
+    type: "turn_canceled",
+    provider: "codex",
+    turnId: "autonomous",
+    reason: "Background task interrupted",
+  });
+  await f.agentManager.flush();
+  await f.service.flush();
+  expect(f.store.forAgent(f.source.id)?.queuePaused).toBe(false);
+  expect((await f.service.inspect(f.source.id)).continuation).toBeNull();
+});
+
+test("Send now does not fence the replacement turn when the old cancellation is delivered", async () => {
+  const f = await setup();
+  await f.agentManager.setAgentMode(f.source.id, "bypassPermissions");
+  await sendPromptToAgent({
+    ...f,
+    agentId: f.source.id,
+    prompt: "sleep",
+    unarchive: false,
+    clearPendingPermissions: false,
+  });
+  const oldTurn = f.agentManager.getAgent(f.source.id)!.activeForegroundTurnId!;
+  await f.service.manageQueue(f.source.id, {
+    kind: "enqueue",
+    message: { id: "replacement", text: "sleep again" },
+  });
+  await f.service.manageQueue(f.source.id, { kind: "send_now", messageId: "replacement" });
+  // Providers can deliver the interrupted turn's terminal event after Send now returns.
+  f.emitters.get(f.a)!({
+    type: "turn_canceled",
+    provider: "codex",
+    turnId: oldTurn,
+    reason: "Interrupted",
+  });
+  await f.agentManager.flush();
+  await f.service.flush();
+  expect(f.store.forAgent(f.source.id)?.queuePaused).toBe(false);
+  const newTurn = f.agentManager.getAgent(f.source.id)!.activeForegroundTurnId!;
+  expect(newTurn).not.toBe(oldTurn);
+  f.emitters.get(f.a)!({
+    type: "timeline",
+    provider: "codex",
+    turnId: newTurn,
+    item: codexLimitNotification("usageLimitExceeded")!,
+  });
+  f.emitters.get(f.a)!({ type: "turn_failed", provider: "codex", turnId: newTurn, error: "Quota" });
+  await f.agentManager.flush();
+  await f.service.flush();
+  await vi.waitFor(() =>
+    expect(f.service.statusFor(f.source.id)).toMatchObject({
+      status: "attention",
+      trigger: "capacity",
+      reason: "An interrupted tool has no confirmed outcome. Inspect its result before continuing.",
+    }),
+  );
+});
+
+test("subagent capacity is remembered without authorizing parent recovery", async () => {
+  const f = await setup();
+  f.used.set(f.a, 10);
+  await sendPromptToAgent({
+    ...f,
+    agentId: f.source.id,
+    prompt: "sleep",
+    unarchive: false,
+    clearPendingPermissions: false,
+  });
+  const turnId = f.agentManager.getAgent(f.source.id)!.activeForegroundTurnId!;
+  f.emitters.get(f.a)!({
+    type: "timeline",
+    provider: "codex",
+    turnId,
+    item: codexLimitNotification("usageLimitExceeded", "subagent")!,
+  });
+  await f.agentManager.flush();
+  expect(f.accounts.list().find((account) => account.id === f.a)?.capacityLimit).toMatchObject({
+    observedAt: new Date(f.now()).toISOString(),
+  });
+  f.emitters.get(f.a)!({
+    type: "turn_failed",
+    provider: "codex",
+    turnId,
+    error: "Unrelated parent failure",
+  });
+  await f.agentManager.flush();
+  await f.service.flush();
+  expect((await f.service.inspect(f.source.id)).continuation).toBeNull();
+  expect(f.agentManager.listAgents().map((agent) => agent.id)).toEqual([f.source.id]);
 });

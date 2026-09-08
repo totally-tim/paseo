@@ -4744,7 +4744,7 @@ export class AgentManager {
   ): Promise<void> {
     if (
       item.type !== "notification" ||
-      item.code !== "provider_capacity" ||
+      (item.code !== "provider_capacity" && item.code !== "provider_subagent_capacity") ||
       !agent.config.accountId
     )
       return;

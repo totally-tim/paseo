@@ -78,7 +78,7 @@ export class AgentContinuationService {
             event.agentId,
             item,
             `${event.epoch ?? "live"}:${event.seq ?? randomUUID()}`,
-            live?.activeForegroundTurnId ?? live?.activeTurnId ?? undefined,
+            live?.activeForegroundTurnId ?? undefined,
           );
           if (capacity) {
             this.observeCapacity(event.agentId, capacity.eventId, capacity.turnId);
@@ -86,15 +86,11 @@ export class AgentContinuationService {
             this.background(event.agentId, () => this.completed(event.agentId));
           } else if (item.type === "turn_failed" && !this.pendingCapacity.has(event.agentId)) {
             this.background(event.agentId, () => this.failed(event.agentId));
-          } else if (item.type === "turn_canceled") {
-            this.background(event.agentId, async () => {
-              const recovery = this.deps.store.forAgent(event.agentId)?.recovery;
-              // Suspending the source is part of an owned handoff. Explicit Stop already
-              // cancels that operation through cancelExisting before interrupting its runtime.
-              if (recovery?.status !== "continuing") await this.cancelExisting(event.agentId);
-            });
           }
         }
+        // Stop fences continuation through cancelAgentRun before runtime interruption.
+        // Reapplying that fence from a delayed turn_canceled could stop a Send now replacement;
+        // provider-native autonomous cancellation does not authorize a host queue pause.
         if (event.type === "agent_state" && event.agent.lifecycle === "idle")
           this.wake(event.agent.id);
       },
