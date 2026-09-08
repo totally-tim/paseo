@@ -83,7 +83,7 @@ export const en = {
     continue: "Start continuation",
     source: "Previous conversation",
     successor: "Open continuation",
-    stopped: "Continuation requested",
+    stopped: "This agent has a continuation",
     briefing: "Additional instructions (optional)",
     thinking: "Thinking: {{value}}",
   },

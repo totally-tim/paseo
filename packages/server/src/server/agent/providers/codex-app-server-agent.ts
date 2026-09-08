@@ -5900,7 +5900,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (subAgentCallId) {
       let status: ToolCallTimelineItem["status"] = "completed";
       if (parsed.status === "failed") {
-        const notification = codexLimitNotification(parsed.errorInfo);
+        const notification = codexLimitNotification(parsed.errorInfo, "subagent");
         if (notification)
           this.emitEvent({ type: "timeline", item: notification, provider: CODEX_PROVIDER });
         status = "failed";

@@ -42,7 +42,17 @@ export function claudeLimitNotification(info: {
   };
 }
 
-export function codexLimitNotification(errorInfo: unknown): LimitNotification | null {
+export function codexLimitNotification(
+  errorInfo: unknown,
+  origin: "foreground" | "subagent" = "foreground",
+): LimitNotification | null {
+  if (errorInfo === "usageLimitExceeded" && origin === "subagent")
+    return {
+      type: "notification",
+      level: "warning",
+      message:
+        "A Codex subagent reached its usage limit. Inspect its result before deciding how to continue.",
+    };
   if (errorInfo === "usageLimitExceeded")
     return {
       type: "notification",

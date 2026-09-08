@@ -1,3 +1,4 @@
+import { CapacityRecoveryTrigger } from "./capacity-trigger.js";
 import { randomUUID } from "node:crypto";
 import type {
   AgentContinuationSnapshot,
@@ -17,18 +18,7 @@ import { buildAgentPrompt } from "../agent/prompt-attachments.js";
 import { AgentContinuationStore, newContinuationRecord, type ContinuationRecord } from "./store.js";
 import { updateQueuedMessages, checkQueuedMessage, messageDigest } from "./queue.js";
 import { continuationSafetyError, isOrdinaryAgent } from "./safety.js";
-import type { AgentStreamEvent } from "../agent/agent-sdk-types.js";
 import { HANDOFF_FROM_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
-
-type CapacityStreamEvent = Extract<AgentStreamEvent, { type: "timeline" }>;
-
-function isCapacityNotification(event: AgentStreamEvent): event is CapacityStreamEvent {
-  return (
-    event.type === "timeline" &&
-    event.item.type === "notification" &&
-    event.item.code === "provider_capacity"
-  );
-}
 
 interface Dependencies extends HandoffDependencies {
   store: AgentContinuationStore;
@@ -42,6 +32,7 @@ export class AgentContinuationService {
   private readonly jobs = new Map<string, Promise<unknown>>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly pendingCapacity = new Set<string>();
+  private readonly capacityTrigger = new CapacityRecoveryTrigger();
   private readonly listeners = new Set<(rootAgentId: string, agentId: string) => void>();
   private readonly now: () => number;
   private unsubscribe?: () => void;
@@ -82,16 +73,26 @@ export class AgentContinuationService {
         if (this.closed) return;
         if (event.type === "agent_stream") {
           const item = event.event;
-          if (isCapacityNotification(item)) {
-            this.observeCapacity(
-              event.agentId,
-              item,
-              `${event.epoch ?? "live"}:${event.seq ?? ""}`,
-            );
+          const live = this.deps.agentManager.getAgent(event.agentId);
+          const capacity = this.capacityTrigger.observe(
+            event.agentId,
+            item,
+            `${event.epoch ?? "live"}:${event.seq ?? randomUUID()}`,
+            live?.activeForegroundTurnId ?? live?.activeTurnId ?? undefined,
+          );
+          if (capacity) {
+            this.observeCapacity(event.agentId, capacity.eventId, capacity.turnId);
           } else if (item.type === "turn_completed") {
             this.background(event.agentId, () => this.completed(event.agentId));
           } else if (item.type === "turn_failed" && !this.pendingCapacity.has(event.agentId)) {
             this.background(event.agentId, () => this.failed(event.agentId));
+          } else if (item.type === "turn_canceled") {
+            this.background(event.agentId, async () => {
+              const recovery = this.deps.store.forAgent(event.agentId)?.recovery;
+              // Suspending the source is part of an owned handoff. Explicit Stop already
+              // cancels that operation through cancelExisting before interrupting its runtime.
+              if (recovery?.status !== "continuing") await this.cancelExisting(event.agentId);
+            });
           }
         }
         if (event.type === "agent_state" && event.agent.lifecycle === "idle")
@@ -102,19 +103,14 @@ export class AgentContinuationService {
     for (const record of this.deps.store.list()) this.wake(record.agentId);
   }
 
-  private observeCapacity(agentId: string, item: CapacityStreamEvent, eventId: string): void {
-    // A delayed notification from a turn that already ended must not suppress the current
-    // turn's events or pause the queue somebody else just filled for it.
-    const live = this.deps.agentManager.getAgent(agentId);
-    const turn = live?.activeForegroundTurnId ?? live?.activeTurnId ?? undefined;
-    if (item.turnId !== undefined && turn !== undefined && item.turnId !== turn) return;
+  private observeCapacity(agentId: string, eventId: string, turnId: string): void {
     // Set synchronously: a following terminal event must not drain the queue first.
     if (this.pendingCapacity.has(agentId)) return;
     this.pendingCapacity.add(agentId);
     void this.reportCapacity(
       agentId,
       eventId.endsWith(":") ? `${eventId}${randomUUID()}` : eventId,
-      item.turnId,
+      turnId,
     )
       .then((opened) => {
         // A fenced or duplicate event opens nothing, so the turn's own failure still has to
@@ -126,7 +122,10 @@ export class AgentContinuationService {
       .catch(() =>
         this.deps.logger.error({ agentId }, "Could not retain account recovery decision"),
       )
-      .finally(() => this.pendingCapacity.delete(agentId));
+      .finally(() => {
+        this.pendingCapacity.delete(agentId);
+        this.wake(agentId);
+      });
   }
 
   subscribe(listener: (rootAgentId: string, agentId: string) => void): () => void {
@@ -150,7 +149,22 @@ export class AgentContinuationService {
 
   statusFor(agentId: string) {
     const recovery = this.deps.store.forAgent(agentId)?.recovery;
-    return recovery ? AgentContinuationStatusSchema.parse(recovery) : undefined;
+    return this.visibleRecovery(recovery ?? null);
+  }
+
+  private visibleRecovery(recovery: ContinuationRecord["recovery"]) {
+    // Stop records a fence even before the task ever needed recovery. That fence is not a
+    // user-visible continuation and must not make an ordinary stop look like automation.
+    if (!recovery || recovery.eventId === "cancel") return undefined;
+    const trigger = recovery.eventId === "manual" ? "manual" : "capacity";
+    return AgentContinuationStatusSchema.parse({
+      ...recovery,
+      trigger,
+      reason:
+        trigger === "manual" && recovery.status === "active"
+          ? "The task continued through a manual handoff."
+          : recovery.reason,
+    });
   }
 
   async inspect(agentId: string): Promise<AgentContinuationSnapshot> {
@@ -245,6 +259,7 @@ export class AgentContinuationService {
   }
 
   async cancelExisting(agentId: string): Promise<void> {
+    this.capacityTrigger.clear(agentId);
     let record = this.deps.store.forAgent(agentId);
     if (!record) {
       const source = await this.deps.agentStorage.get(agentId);
@@ -264,7 +279,10 @@ export class AgentContinuationService {
         Object.assign(current.recovery, {
           operationId: randomUUID(),
           status: "cancelled",
-          reason: "Automatic continuation was cancelled.",
+          reason:
+            current.recovery.eventId === "manual"
+              ? "The manual handoff was cancelled."
+              : "Automatic continuation was cancelled.",
           updatedAt: this.timestamp(),
           nextCheckAt: undefined,
           cancelledTurnId,
@@ -436,7 +454,13 @@ export class AgentContinuationService {
   wake(agentId: string): void {
     this.background(agentId, async () => {
       const record = this.deps.store.forAgent(agentId);
-      if (!record || this.closed) return;
+      if (
+        !record ||
+        this.closed ||
+        this.capacityTrigger.pending(agentId) ||
+        this.pendingCapacity.has(agentId)
+      )
+        return;
       if (
         record.recovery?.status === "waiting" &&
         Date.parse(record.recovery.nextCheckAt ?? "") > this.now()
@@ -453,6 +477,14 @@ export class AgentContinuationService {
     const operationId = recovery.operationId;
     try {
       await this.assertCurrent(record.rootAgentId, operationId);
+      if (recovery.eventId === "manual") {
+        await this.attention(
+          record.rootAgentId,
+          operationId,
+          "The host interrupted a manual handoff. Inspect the source and retry the selected handoff.",
+        );
+        return;
+      }
       if (await this.reconcileHandoff(record)) return;
       const source = await this.deps.agentStorage.get(record.agentId);
       if (!source || !isOrdinaryAgent(source)) {
@@ -753,7 +785,10 @@ export class AgentContinuationService {
         status: "active",
         resumeDispatch: "started",
         updatedAt: this.timestamp(),
-        reason: "The task continued after an account capacity limit.",
+        reason:
+          record.recovery.eventId === "manual"
+            ? "The task continued through a manual handoff."
+            : "The task continued after an account capacity limit.",
       });
       record.queuePaused = false;
     });
@@ -971,7 +1006,7 @@ export class AgentContinuationService {
     return {
       rootAgentId: record.rootAgentId,
       agentId: record.agentId,
-      continuation: record.recovery ? AgentContinuationStatusSchema.parse(record.recovery) : null,
+      continuation: this.visibleRecovery(record.recovery) ?? null,
       queuedMessages: record.queue,
       retiredAt: inspected === record.agentId ? null : (record.retired[inspected] ?? null),
     };

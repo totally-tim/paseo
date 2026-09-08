@@ -29,11 +29,18 @@ export function AgentRecoveryStatus({ serverId, agentId }: { serverId: string; a
   const status = recovery.data?.continuation;
   if (!status) return null;
   const waiting = status.status === "waiting";
+  let label = labels[status.status];
+  let cancelLabel = waiting ? "Cancel wait" : "Cancel automatic continuation";
+  if (status.trigger === "manual") {
+    cancelLabel = "Cancel handoff";
+    if (status.status === "active") label = "Handoff complete";
+    if (status.status === "cancelled") label = "Handoff cancelled";
+  }
   const accountLabel = (id?: string) =>
     accounts.data?.accounts.find((account) => account.id === id)?.label ?? "Account";
   return (
     <View style={styles.container} testID="agent-continuation-status">
-      <Text style={styles.text}>{labels[status.status]}</Text>
+      <Text style={styles.text}>{label}</Text>
       <Text style={styles.text}>{status.reason}</Text>
       {status.previousAccountId && status.accountId ? (
         <Text style={styles.text}>
@@ -58,7 +65,7 @@ export function AgentRecoveryStatus({ serverId, agentId }: { serverId: string; a
           disabled={!recovery.connected}
           testID="agent-continuation-cancel"
         >
-          {waiting ? "Cancel wait" : "Cancel automatic continuation"}
+          {cancelLabel}
         </Button>
       ) : null}
       {error ? <Text style={styles.error}>{error}</Text> : null}

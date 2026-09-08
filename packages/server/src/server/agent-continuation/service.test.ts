@@ -200,8 +200,15 @@ test("a live confirmed limit continues once with the effective configuration and
   await f.agentManager.flush();
   await f.service.flush();
   expect(f.starts).toHaveLength(0);
+  f.emitters.get(f.a)!({ type: "turn_started", provider: "codex", turnId: "capacity-turn" });
   f.emitters.get(f.a)!(capacity);
   f.emitters.get(f.a)!(capacity);
+  f.emitters.get(f.a)!({
+    type: "turn_failed",
+    provider: "codex",
+    turnId: "capacity-turn",
+    error: "Usage limit reached",
+  });
   await vi.waitFor(() => expect(f.store.forAgent(f.source.id)?.recovery).toBeTruthy());
   const message = {
     id: "queued-one",
@@ -344,6 +351,10 @@ test("manual handoff shares successor ownership and archiving a predecessor leav
   };
   const [first, second] = await Promise.all([handoffAgent(f, input), handoffAgent(f, input)]);
   expect(first.id).toBe(second.id);
+  expect((await f.service.inspect(first.id)).continuation).toMatchObject({
+    trigger: "manual",
+    reason: "The task continued through a manual handoff.",
+  });
   expect((await handoffAgent(f, input)).id).toBe(first.id);
   await f.agentManager.archiveSnapshot(f.source.id, new Date().toISOString());
   expect((await f.service.inspect(first.id)).continuation?.status).not.toBe("cancelled");
@@ -815,7 +826,7 @@ test("a rejection with no reported reset waits with a growing backoff instead of
   expect(f.starts).toHaveLength(0);
 });
 
-test("a fenced capacity event still stops the queue for the turn that failed", async () => {
+test("a capacity notification from a settled stopped turn cannot pause later queued work", async () => {
   const f = await setup();
   await f.agentManager.cancelContinuation(f.source.id);
   await f.store.update(f.source.id, (record) => {
@@ -833,9 +844,7 @@ test("a fenced capacity event still stops the queue for the turn that failed", a
     expect(f.agentManager.getAgent(f.source.id)?.activeForegroundTurnId ?? null).toBeNull(),
   );
   expect(f.store.forAgent(f.source.id)?.queuePaused).toBe(false);
-  // The event belongs to the turn an earlier Stop fenced, so no episode opens. Its failure
-  // must still stop the queue instead of being swallowed with the suppressed terminal event,
-  // which would send the next instruction into the account that just reported exhaustion.
+  // An idle historical notification is not a failed foreground turn.
   f.emitters.get(f.a)!({
     type: "timeline",
     provider: "codex",
@@ -849,7 +858,7 @@ test("a fenced capacity event still stops the queue for the turn that failed", a
   });
   await f.agentManager.flush();
   await f.service.flush();
-  await vi.waitFor(() => expect(f.store.forAgent(f.source.id)?.queuePaused).toBe(true));
+  await vi.waitFor(() => expect(f.store.forAgent(f.source.id)?.queuePaused).toBe(false));
 });
 
 test("editing a queued upload releases the copy it replaced and keeps the one it sends", async () => {
@@ -946,5 +955,119 @@ test("a completed continuation starts the next episode without the old backoff",
   await f.service.flush();
   await vi.waitFor(() =>
     expect(f.store.forAgent(f.source.id)?.recovery?.backoffMs).toBeUndefined(),
+  );
+});
+
+test.each(["turn_completed", "turn_canceled"] as const)(
+  "a capacity warning followed by %s never starts automatic continuation",
+  async (type) => {
+    const f = await setup();
+    f.emitters.get(f.a)!({ type: "turn_started", provider: "codex", turnId: "normal-turn" });
+    f.emitters.get(f.a)!({
+      type: "timeline",
+      provider: "codex",
+      turnId: "normal-turn",
+      item: {
+        type: "notification",
+        code: "provider_capacity",
+        level: "warning",
+        message: "Limit notification",
+      },
+    });
+    f.emitters.get(f.a)!({ type, provider: "codex", turnId: "normal-turn", reason: "Normal stop" });
+    await f.agentManager.flush();
+    await f.service.flush();
+    expect(f.starts).toEqual([]);
+    expect(f.agentManager.listAgents().map((agent) => agent.id)).toEqual([f.source.id]);
+    expect((await f.service.inspect(f.source.id)).continuation).toBeNull();
+  },
+);
+
+test("a normal user Stop persists a fence without showing an automatic continuation", async () => {
+  const f = await setup();
+  await f.agentManager.cancelAgentRun(f.source.id);
+  expect(f.store.forAgent(f.source.id)?.recovery?.status).toBe("cancelled");
+  expect((await f.service.inspect(f.source.id)).continuation).toBeNull();
+  expect(f.starts).toEqual([]);
+});
+
+test("Stop between a capacity notification and failure prevents automatic continuation", async () => {
+  const f = await setup();
+  f.emitters.get(f.a)!({ type: "turn_started", provider: "codex", turnId: "stopped-turn" });
+  f.emitters.get(f.a)!({
+    type: "timeline",
+    provider: "codex",
+    turnId: "stopped-turn",
+    item: {
+      type: "notification",
+      code: "provider_capacity",
+      level: "warning",
+      message: "Usage limit reached",
+    },
+  });
+  await f.agentManager.flush();
+  await f.agentManager.cancelAgentRun(f.source.id);
+  f.emitters.get(f.a)!({
+    type: "turn_failed",
+    provider: "codex",
+    turnId: "stopped-turn",
+    error: "Late capacity failure",
+  });
+  await f.agentManager.flush();
+  await f.service.flush();
+  expect(f.starts).toEqual([]);
+  expect(f.agentManager.listAgents().map((agent) => agent.id)).toEqual([f.source.id]);
+  expect((await f.service.inspect(f.source.id)).continuation).toBeNull();
+});
+
+test("restart never converts an unfinished manual handoff into account recovery", async () => {
+  const f = await setup();
+  await f.service.inspect(f.source.id);
+  await f.store.update(f.source.id, (record) => {
+    record.recovery = {
+      rootAgentId: f.source.id,
+      agentId: f.source.id,
+      sourceAgentId: f.source.id,
+      operationId: "manual-op",
+      eventId: "manual",
+      attempts: [],
+      status: "continuing",
+      reason: "Continuing with the selected account",
+      updatedAt: new Date(f.now()).toISOString(),
+    };
+  });
+  await f.service.close();
+  const restarted = await f.startService();
+  await restarted.service.flush();
+  expect((await restarted.service.inspect(f.source.id)).continuation).toMatchObject({
+    status: "attention",
+    trigger: "manual",
+  });
+  expect(f.starts).toEqual([]);
+  expect(f.agentManager.listAgents().map((agent) => agent.id)).toEqual([f.source.id]);
+});
+
+test("saved manual handoffs with the old capacity reason are corrected on read", async () => {
+  const f = await setup();
+  await f.service.inspect(f.source.id);
+  await f.store.update(f.source.id, (record) => {
+    record.recovery = {
+      rootAgentId: f.source.id,
+      agentId: f.source.id,
+      sourceAgentId: f.source.id,
+      operationId: "manual-op",
+      eventId: "manual",
+      attempts: [],
+      status: "active",
+      reason: "The task continued after an account capacity limit.",
+      updatedAt: new Date(f.now()).toISOString(),
+    };
+  });
+  expect(f.service.statusFor(f.source.id)).toMatchObject({
+    trigger: "manual",
+    reason: "The task continued through a manual handoff.",
+  });
+  expect((await f.service.inspect(f.source.id)).continuation?.reason).toBe(
+    "The task continued through a manual handoff.",
   );
 });

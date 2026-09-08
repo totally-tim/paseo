@@ -2,6 +2,14 @@ import { describe, expect, it } from "vitest";
 import { claudeLimitNotification, codexLimitNotification } from "./provider-limit.js";
 
 describe("provider-native limits", () => {
+  it("reports a subagent limit without authorizing recovery of its parent", () => {
+    expect(codexLimitNotification("usageLimitExceeded", "subagent")).toEqual({
+      type: "notification",
+      level: "warning",
+      message:
+        "A Codex subagent reached its usage limit. Inspect its result before deciding how to continue.",
+    });
+  });
   it("uses Claude rejection and its reset time without treating a warning as exhaustion", () => {
     expect(claudeLimitNotification({ status: "allowed_warning" })).toBeNull();
     expect(claudeLimitNotification({ status: "allowed" })).toBeNull();
