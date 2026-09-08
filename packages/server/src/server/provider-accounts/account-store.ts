@@ -14,11 +14,13 @@ import type { ProviderAccountContext } from "../agent/provider-account-context.j
 const StoreSchema = z.object({
   accounts: z.array(ProviderAccountSchema),
   policy: AccountPolicySchema.nullable(),
+  automaticAccounts: z.record(z.string(), z.string()).optional(),
 });
 
 export class ProviderAccountStore {
   private accounts: ProviderAccount[] = [];
   private policy: AccountPolicy | null = null;
+  private automaticAccounts: Record<string, string> = {};
   private writeQueue: Promise<unknown> = Promise.resolve();
   /** Set when the metadata on disk must not be replaced; every mutation refuses. */
   private readOnlyReason: string | null = null;
@@ -46,6 +48,7 @@ export class ProviderAccountStore {
       const data = StoreSchema.parse(JSON.parse(raw));
       this.accounts = data.accounts;
       this.policy = data.policy;
+      this.automaticAccounts = data.automaticAccounts ?? {};
     } catch {
       // Truncated bytes, or a file a newer daemon wrote, must not stop this one from starting.
       // Keep them for inspection; the accounts are re-added rather than silently overwritten.
@@ -70,6 +73,19 @@ export class ProviderAccountStore {
 
   getPolicy(): AccountPolicy | null {
     return this.policy ? { ...this.policy } : null;
+  }
+
+  automaticAccount(key: string): string | undefined {
+    return this.automaticAccounts[key];
+  }
+
+  async rememberAutomaticAccount(key: string, id: string): Promise<void> {
+    await this.serialize(async () => {
+      if (this.automaticAccounts[key] === id) return;
+      const automaticAccounts = { ...this.automaticAccounts, [key]: id };
+      await this.write({ accounts: this.accounts, policy: this.policy, automaticAccounts });
+      this.automaticAccounts = automaticAccounts;
+    });
   }
 
   context(id: string): ProviderAccountContext | undefined {
@@ -121,7 +137,29 @@ export class ProviderAccountStore {
   async save(account: ProviderAccount): Promise<void> {
     const validated = ProviderAccountSchema.parse(account);
     await this.serialize(async () => {
-      const next = [...this.accounts.filter((entry) => entry.id !== account.id), validated];
+      const next = [...this.accounts];
+      const index = next.findIndex((entry) => entry.id === account.id);
+      if (index < 0) next.push(validated);
+      else next[index] = validated;
+      await this.write({ accounts: next, policy: this.policy });
+      this.accounts = next;
+    });
+  }
+
+  async reorder(accountIds: string[]): Promise<void> {
+    await this.serialize(async () => {
+      const live = this.accounts.filter((account) => !account.removedAt);
+      if (
+        accountIds.length !== live.length ||
+        new Set(accountIds).size !== live.length ||
+        accountIds.some((id) => !live.some((account) => account.id === id))
+      ) {
+        throw new Error("Account list changed. Refresh and try again.");
+      }
+      const next = [
+        ...accountIds.map((id) => this.accounts.find((account) => account.id === id)!),
+        ...this.accounts.filter((account) => account.removedAt),
+      ];
       await this.write({ accounts: next, policy: this.policy });
       this.accounts = next;
     });
@@ -149,7 +187,15 @@ export class ProviderAccountStore {
     if (this.readOnlyReason) throw new Error(this.readOnlyReason);
     const temporary = path.join(this.directory, `.${randomUUID()}.tmp`);
     try {
-      await fs.writeFile(temporary, JSON.stringify(data, null, 2), { mode: 0o600, flag: "wx" });
+      await fs.writeFile(
+        temporary,
+        JSON.stringify(
+          { ...data, automaticAccounts: data.automaticAccounts ?? this.automaticAccounts },
+          null,
+          2,
+        ),
+        { mode: 0o600, flag: "wx" },
+      );
       await fs.rename(temporary, this.metadataPath());
     } finally {
       await fs.rm(temporary, { force: true });

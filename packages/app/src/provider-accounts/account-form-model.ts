@@ -10,6 +10,7 @@ export function openAccountForm(account: ProviderAccount) {
   const listeners = new Set<() => void>();
   let state = {
     label: account.label,
+    enabled: account.ownership === "managed" && !account.identity ? true : account.enabled,
     reserve: account.reservePercent?.toString() ?? "",
     interactiveOnly: account.interactiveOnly ?? false,
     pending: false,
@@ -38,6 +39,9 @@ export function openAccountForm(account: ProviderAccount) {
       epoch++;
       state = { ...state, pending: false, code: "", login: null };
       listeners.clear();
+    },
+    setEnabled(value: boolean) {
+      if (!state.pending) commit({ enabled: value });
     },
     setLabel(value: string) {
       if (!state.pending) commit({ label: value });
@@ -70,6 +74,7 @@ export function openAccountForm(account: ProviderAccount) {
         accountId: account.id,
         changes: {
           label: state.label.trim(),
+          enabled: state.enabled,
           reservePercent,
           interactiveOnly: state.interactiveOnly,
         },

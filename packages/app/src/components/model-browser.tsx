@@ -595,7 +595,9 @@ function ModelBrowserRow({
             </Text>
           ) : null}
           {accountSummary ? (
-            <Text style={styles.browserRowDescription}>{accountSummary}</Text>
+            <Text numberOfLines={1} style={styles.browserRowDescription}>
+              {accountSummary}
+            </Text>
           ) : null}
         </View>
         {hasTrailing ? (

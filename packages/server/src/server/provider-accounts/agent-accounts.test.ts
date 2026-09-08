@@ -60,6 +60,7 @@ async function setup(usedPct = 10) {
   const add = async (provider: AccountProvider, label: string) => {
     const account = await accounts.add(provider, label);
     await accounts.inspect(account.id);
+    await accounts.edit(account.id, { enabled: true });
     return account;
   };
   cleanup.push(async () => {

@@ -1,3 +1,4 @@
+import { MAX_CONTENT_WIDTH } from "@/constants/layout";
 import { useCallback, useState } from "react";
 import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
@@ -65,7 +66,13 @@ export function AgentRecoveryStatus({ serverId, agentId }: { serverId: string; a
   );
 }
 const styles = StyleSheet.create((theme) => ({
-  container: { paddingHorizontal: theme.spacing[4], gap: theme.spacing[2] },
+  container: {
+    width: "100%",
+    maxWidth: MAX_CONTENT_WIDTH,
+    alignSelf: "center",
+    paddingHorizontal: theme.spacing[4],
+    gap: theme.spacing[2],
+  },
   text: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
   error: { color: theme.colors.statusDanger, fontSize: theme.fontSize.sm },
 }));

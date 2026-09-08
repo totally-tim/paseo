@@ -1,8 +1,12 @@
+import { ArrowDown, ArrowUp, Pencil } from "lucide-react-native";
+import { useHostFeature } from "@/runtime/host-features";
+import { confirmDialog } from "@/utils/confirm-dialog";
+import { ICON_SIZE, type Theme } from "@/styles/theme";
 import { useSessionStore } from "@/stores/session-store";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Linking, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
-import { StyleSheet } from "react-native-unistyles";
+import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { AccountOperation, ProviderAccount } from "@getpaseo/protocol/provider-accounts";
 import { AdaptiveModalSheet } from "@/components/adaptive-modal-sheet";
 import { Button } from "@/components/ui/button";
@@ -16,6 +20,14 @@ import { ProviderUsageCard } from "@/provider-usage/card";
 import { settingsStyles } from "@/styles/settings";
 import { useProviderAccounts } from "./use-provider-accounts";
 import { openAccountForm } from "./account-form-model";
+
+const ThemedPencil = withUnistyles(Pencil);
+const ThemedArrowUp = withUnistyles(ArrowUp);
+const ThemedArrowDown = withUnistyles(ArrowDown);
+const mutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
+const editIcon = <ThemedPencil size={ICON_SIZE.sm} uniProps={mutedColorMapping} />;
+const moveUpIcon = <ThemedArrowUp size={ICON_SIZE.sm} uniProps={mutedColorMapping} />;
+const moveDownIcon = <ThemedArrowDown size={ICON_SIZE.sm} uniProps={mutedColorMapping} />;
 
 type Manage = ReturnType<typeof useProviderAccounts>["manage"];
 
@@ -121,9 +133,7 @@ export function ProviderAccountsSettingsSection({ serverId }: { serverId: string
           {error ?? t("providerAccounts.loadError")}
         </Text>
       ) : null}
-      {accounts.data?.accounts.map((account) => (
-        <AccountRow key={account.id} account={account} serverId={serverId} edit={setEditing} />
-      ))}
+      <AccountList serverId={serverId} edit={setEditing} perform={perform} pending={pending} />
       <SelectField
         label={t("providerAccounts.unknownUsage")}
         value={accounts.data?.policy?.unknownQuota ?? ""}
@@ -154,29 +164,128 @@ export function ProviderAccountsSettingsSection({ serverId }: { serverId: string
   );
 }
 
+function AccountList({
+  serverId,
+  edit,
+  perform,
+  pending,
+}: {
+  serverId: string;
+  edit: (account: ProviderAccount) => void;
+  perform: (operation: AccountOperation) => Promise<void>;
+  pending: boolean;
+}) {
+  const { t } = useTranslation();
+  const accounts = useProviderAccounts(serverId);
+  const canReorder = useHostFeature(serverId, "providerAccountOrdering");
+  const [showRemoved, setShowRemoved] = useState(false);
+  const toggleRemoved = useCallback(() => setShowRemoved((value) => !value), []);
+  const liveAccounts = accounts.data?.accounts.filter((account) => !account.removedAt) ?? [];
+  const removedAccounts = accounts.data?.accounts.filter((account) => account.removedAt) ?? [];
+  const move = useCallback(
+    (id: string, offset: number) => {
+      const ids = (accounts.data?.accounts ?? [])
+        .filter((account) => !account.removedAt)
+        .map((account) => account.id);
+      const index = ids.indexOf(id);
+      const destination = index + offset;
+      if (index < 0 || destination < 0 || destination >= ids.length) return;
+      [ids[index], ids[destination]] = [ids[destination], ids[index]];
+      void perform({ kind: "reorder", accountIds: ids });
+    },
+    [accounts.data, perform],
+  );
+  return (
+    <>
+      {" "}
+      {liveAccounts.map((account, index) => (
+        <AccountRow
+          key={account.id}
+          account={account}
+          serverId={serverId}
+          edit={edit}
+          move={canReorder ? move : undefined}
+          first={index === 0}
+          last={index === liveAccounts.length - 1}
+          disabled={pending || !accounts.connected}
+        />
+      ))}
+      {removedAccounts.length ? (
+        <>
+          <Button variant="ghost" size="sm" onPress={toggleRemoved}>
+            {t("providerAccounts.removedAccounts", { count: removedAccounts.length })}
+          </Button>
+          {showRemoved
+            ? removedAccounts.map((account) => (
+                <AccountRow key={account.id} account={account} serverId={serverId} edit={edit} />
+              ))
+            : null}
+        </>
+      ) : null}
+    </>
+  );
+}
+
 function AccountRow({
   account,
   serverId,
   edit,
+  move,
+  first,
+  last,
+  disabled,
 }: {
   account: ProviderAccount;
   serverId: string;
   edit?: (account: ProviderAccount) => void;
+  move?: (id: string, offset: number) => void;
+  first?: boolean;
+  last?: boolean;
+  disabled?: boolean;
 }) {
   const { t } = useTranslation();
   const { data } = useProviderAccounts(serverId);
   const open = useCallback(() => edit?.(account), [account, edit]);
+  const up = useCallback(() => move?.(account.id, -1), [account.id, move]);
+  const down = useCallback(() => move?.(account.id, 1), [account.id, move]);
   const usageEntry = data?.usage.find((entry) => entry.accountId === account.id);
   const usage = usageEntry?.usage;
-  const next = data?.next.find((entry) => entry.accountId === account.id);
   return (
     <View style={[settingsStyles.card, styles.card]} testID={`account-row-${account.id}`}>
       <View style={styles.actions}>
-        <Text style={styles.title}>{account.label}</Text>
+        <Text style={styles.accountTitle}>{account.label}</Text>
+        {move ? (
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              leftIcon={moveUpIcon}
+              onPress={up}
+              disabled={disabled || first}
+              accessibilityLabel={t("settings.host.agentProfiles.moveUp")}
+              testID={`account-up-${account.id}`}
+            />
+            <Button
+              variant="ghost"
+              size="sm"
+              leftIcon={moveDownIcon}
+              onPress={down}
+              disabled={disabled || last}
+              accessibilityLabel={t("settings.host.agentProfiles.moveDown")}
+              testID={`account-down-${account.id}`}
+            />
+          </>
+        ) : null}
         {edit ? (
-          <Button variant="ghost" size="sm" onPress={open}>
-            {t("providerAccounts.manage")}
-          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onPress={open}
+            leftIcon={editIcon}
+            accessibilityLabel={
+              account.removedAt ? t("providerAccounts.restore") : t("providerAccounts.manage")
+            }
+          />
         ) : null}
       </View>
       <Text style={styles.text}>
@@ -188,15 +297,26 @@ function AccountRow({
       </Text>
       {account.removedAt ? <Text style={styles.text}>{t("providerAccounts.removed")}</Text> : null}
       {account.error ? <Text style={styles.error}>{account.error}</Text> : null}
-      {next ? (
-        <Text style={styles.text}>
-          {t("providerAccounts.next", { account: account.label })} · {next.reason}
-        </Text>
-      ) : null}
       <AccountCapacityStatus account={account} usage={usage} />
-      {usageEntry?.stale ? <Text style={styles.text}>{t("providerAccounts.stale")}</Text> : null}
-      {usage ? <ProviderUsageCard usage={usage} compact showIdentity={false} /> : null}
+      <AccountRowUsage account={account} entry={usageEntry} />
     </View>
+  );
+}
+
+function AccountRowUsage({
+  account,
+  entry,
+}: {
+  account: ProviderAccount;
+  entry: NonNullable<ReturnType<typeof useProviderAccounts>["data"]>["usage"][number] | undefined;
+}) {
+  const { t } = useTranslation();
+  if (!entry || account.removedAt || account.authState !== "ready") return null;
+  return (
+    <>
+      {entry.stale ? <Text style={styles.text}>{t("providerAccounts.stale")}</Text> : null}
+      <ProviderUsageCard usage={entry.usage} compact showIdentity={false} showResetDates />
+    </>
   );
 }
 
@@ -249,8 +369,9 @@ function AccountEditor({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
-  const host =
-    useSessionStore((state) => state.sessions[serverId]?.serverInfo?.hostname) ?? serverId;
+  const host = useSessionStore(
+    (state) => state.sessions[serverId]?.serverInfo?.hostname ?? serverId,
+  );
   const [advanced, setAdvanced] = useState(false);
   const toggleAdvanced = useCallback(() => setAdvanced((value) => !value), []);
   const verified = isVerifiedAccount(account);
@@ -309,9 +430,10 @@ function AccountEditor({
         const result = await manage(operation);
         form.receiveLogin(result.login);
         codeInput.current?.replaceText("");
+        if (operation.kind === "remove" || operation.kind === "restore") onClose();
         return result;
       }),
-    [form, manage],
+    [form, manage, onClose],
   );
   const startLogin = useCallback(() => {
     void operate({ kind: "login-start", accountId: account.id });
@@ -322,9 +444,6 @@ function AccountEditor({
   const logout = useCallback(() => {
     void operate({ kind: "logout", accountId: account.id });
   }, [account.id, operate]);
-  const toggle = useCallback(() => {
-    void operate({ kind: "edit", accountId: account.id, changes: { enabled: !account.enabled } });
-  }, [account.id, account.enabled, operate]);
   const save = useCallback(async () => {
     const operation = form.saveOperation();
     if (operation && (await operate(operation))) onClose();
@@ -372,6 +491,23 @@ function AccountEditor({
   );
   const disabled = state.pending || !connected;
   const loginDisabled = disabled || Boolean(state.login);
+  if (account.removedAt)
+    return (
+      <AdaptiveModalSheet
+        visible
+        onClose={close}
+        header={header}
+        desktopMaxWidth={520}
+        testID="account-editor"
+      >
+        <View style={styles.form}>
+          <Text style={styles.title}>{account.label}</Text>
+          <AccountStatus account={account} error={state.error} />
+          <Text style={styles.text}>{t("providerAccounts.removalHelp")}</Text>
+          <AccountRemoval account={account} operate={operate} disabled={disabled} />
+        </View>
+      </AdaptiveModalSheet>
+    );
   return (
     <AdaptiveModalSheet
       visible
@@ -409,9 +545,6 @@ function AccountEditor({
               </Button>
             </>
           ) : null}
-          <Button variant="ghost" size="sm" onPress={toggle} disabled={disabled}>
-            {account.enabled ? t("providerAccounts.disable") : t("providerAccounts.enable")}
-          </Button>
         </View>
         {challenge ? (
           <View style={styles.form} testID="account-login-challenge">
@@ -454,9 +587,6 @@ function AccountEditor({
             </Button>
           </View>
         ) : null}
-        {account.ownership === "managed" ? (
-          <AccountRemoval account={account} operate={operate} disabled={loginDisabled} />
-        ) : null}
         {verified ? (
           <>
             <Field label={t("providerAccounts.label")}>
@@ -469,6 +599,16 @@ function AccountEditor({
                 testID="account-label"
               />
             </Field>
+            <View style={styles.actions}>
+              <Text style={styles.text}>{t("providerAccounts.useForNewAgents")}</Text>
+              <Switch
+                value={state.enabled}
+                onValueChange={form.setEnabled}
+                disabled={disabled}
+                accessibilityLabel={t("providerAccounts.useForNewAgents")}
+                testID="account-enabled"
+              />
+            </View>
             <Text style={styles.text}>Permitted use</Text>
             <View style={styles.actions}>
               <Text style={styles.text}>{t("providerAccounts.interactiveOnly")}</Text>
@@ -500,6 +640,11 @@ function AccountEditor({
             ) : null}
           </>
         ) : null}
+        {account.ownership === "managed" ? (
+          <AccountRemoval account={account} operate={operate} disabled={loginDisabled} />
+        ) : (
+          <Text style={styles.text}>{t("providerAccounts.externalHelp")}</Text>
+        )}
       </View>
     </AdaptiveModalSheet>
   );
@@ -551,48 +696,77 @@ function AccountRemoval({
   disabled: boolean;
 }) {
   const { t } = useTranslation();
-  const [credentials, setCredentials] = useState("");
-  const options = useMemo(
-    () => [
-      { id: "retain", value: "retain", label: t("providerAccounts.retainCredentials") },
-      { id: "logout", value: "logout", label: t("providerAccounts.logoutCredentials") },
-    ],
-    [t],
+  const [choosing, setChoosing] = useState(false);
+  const showChoices = useCallback(() => setChoosing(true), []);
+  const removeWith = useCallback(
+    async (credentials: "retain" | "logout") => {
+      if (
+        await confirmDialog({
+          title: t("providerAccounts.remove"),
+          message: `${account.label}\n\n${t("providerAccounts.removalHelp")}\n\n${t(credentials === "retain" ? "providerAccounts.retainCredentials" : "providerAccounts.logoutCredentials")}`,
+          confirmLabel: t("providerAccounts.remove"),
+          cancelLabel: t("common.actions.cancel"),
+          destructive: true,
+        })
+      ) {
+        await operate({ kind: "remove", accountId: account.id, credentials });
+      }
+    },
+    [account.id, account.label, operate, t],
   );
-  const remove = useCallback(() => {
-    if (credentials === "retain" || credentials === "logout")
-      void operate({ kind: "remove", accountId: account.id, credentials });
-  }, [account.id, credentials, operate]);
+  const retain = useCallback(() => {
+    void removeWith("retain");
+  }, [removeWith]);
+  const logout = useCallback(() => {
+    void removeWith("logout");
+  }, [removeWith]);
   const restore = useCallback(() => {
     void operate({ kind: "restore", accountId: account.id });
   }, [account.id, operate]);
   if (account.removedAt)
     return (
-      <Button variant="outline" onPress={restore} disabled={disabled}>
+      <Button variant="outline" onPress={restore} disabled={disabled} testID="account-restore">
         {t("providerAccounts.restore")}
       </Button>
     );
   return (
     <View style={styles.form}>
-      <Text style={styles.text}>{t("providerAccounts.removalHelp")}</Text>
-      <SelectField
-        label={t("providerAccounts.remove")}
-        value={credentials}
-        selectedDisplay={options.find((option) => option.value === credentials) ?? null}
-        options={options}
-        onChange={setCredentials}
-        placeholder={t("providerAccounts.chooseRemoval")}
-        emptyText={t("common.empty.noResults")}
-        disabled={disabled}
-      />
-      <Button variant="outline" onPress={remove} disabled={disabled || !credentials}>
-        {t("providerAccounts.remove")}
-      </Button>
+      {choosing ? (
+        <>
+          <Text style={styles.text}>{t("providerAccounts.chooseRemoval")}</Text>
+          <Button
+            variant="outline"
+            onPress={retain}
+            disabled={disabled}
+            testID="account-remove-retain"
+          >
+            {t("providerAccounts.retainCredentials")}
+          </Button>
+          <Button
+            variant="outline"
+            onPress={logout}
+            disabled={disabled}
+            testID="account-remove-logout"
+          >
+            {t("providerAccounts.logoutCredentials")}
+          </Button>
+        </>
+      ) : (
+        <Button variant="outline" onPress={showChoices} disabled={disabled} testID="account-remove">
+          {t("providerAccounts.remove")}
+        </Button>
+      )}
     </View>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
+  accountTitle: {
+    flex: 1,
+    minWidth: 100,
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.base,
+  },
   card: { padding: theme.spacing[4], gap: theme.spacing[2] },
   actions: { flexDirection: "row", flexWrap: "wrap", gap: theme.spacing[2], alignItems: "center" },
   form: { gap: theme.spacing[4] },

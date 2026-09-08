@@ -41,10 +41,12 @@ export function ProviderUsageCard({
   usage,
   compact = false,
   showIdentity = true,
+  showResetDates = false,
 }: {
   usage: ProviderUsage;
   compact?: boolean;
   showIdentity?: boolean;
+  showResetDates?: boolean;
 }) {
   const status = statusText(usage);
   const footer = footerText(usage);
@@ -100,7 +102,11 @@ export function ProviderUsageCard({
       {usage.windows.length > 0 || balances.length > 0 ? (
         <View style={styles.bars}>
           {usage.windows.map((window) => (
-            <ProviderUsageWindowBar key={window.id} window={window} />
+            <ProviderUsageWindowBar
+              key={window.id}
+              window={window}
+              showResetDate={showResetDates}
+            />
           ))}
           {balances.map((balance) => (
             <ProviderUsageBalanceBar key={balance.id} balance={balance} />

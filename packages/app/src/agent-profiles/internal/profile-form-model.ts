@@ -1,5 +1,5 @@
 import type { AgentContinuationPolicy } from "@getpaseo/protocol/agent-continuation";
-import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
+import type { AccountSelection, ProviderAccount } from "@getpaseo/protocol/provider-accounts";
 import type {
   AgentFeature,
   AgentMode,
@@ -118,6 +118,7 @@ export interface AgentProfileFormState {
 }
 
 export interface AgentProfileFormModel {
+  applyAccounts: (accounts: readonly ProviderAccount[]) => void;
   setContinuationPolicy: (value: AgentContinuationPolicy | undefined) => void;
   setAccountSelection: (value: AccountSelection) => void;
   getState: () => AgentProfileFormState;
@@ -439,6 +440,7 @@ function buildInitialState(snapshot: AgentProfileFormSnapshot): AgentProfileForm
 }
 
 export function openAgentProfileForm(snapshot: AgentProfileFormSnapshot): AgentProfileFormModel {
+  let accounts: readonly ProviderAccount[] | undefined;
   let entries: readonly ProviderSnapshotEntry[] = [];
   let catalogResolution: AgentProfileResolutionStatus = "idle";
   let resolvedFeatureKey: string | null = null;
@@ -516,6 +518,18 @@ export function openAgentProfileForm(snapshot: AgentProfileFormSnapshot): AgentP
     const canSubmit =
       withOptions.name.trim().length > 0 &&
       withOptions.provider.length > 0 &&
+      (!withOptions.continuationPolicy ||
+        (withOptions.continuationPolicy.accountIds.length > 0 &&
+          withOptions.continuationPolicy.accountIds.every(
+            (id) =>
+              !accounts ||
+              accounts.some(
+                (account) =>
+                  account.id === id &&
+                  account.provider === withOptions.provider &&
+                  !account.removedAt,
+              ),
+          ))) &&
       !withOptions.isSubmitting;
     const resolved: AgentProfileFormState = { ...withOptions, disclosure, canSubmit };
     return { ...resolved, submitValue: canSubmit ? buildSubmitValue(resolved) : null };
@@ -544,6 +558,10 @@ export function openAgentProfileForm(snapshot: AgentProfileFormSnapshot): AgentP
     close: () => {
       closed = true;
       listeners = new Set();
+    },
+    applyAccounts: (nextAccounts) => {
+      accounts = nextAccounts;
+      publish((current) => current);
     },
     applyProviderCatalog: (nextEntries) => {
       entries = [...nextEntries];

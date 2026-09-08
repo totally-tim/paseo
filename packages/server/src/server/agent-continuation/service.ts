@@ -639,6 +639,12 @@ export class AgentContinuationService {
         preserveConfiguration: true,
       },
     );
+    await this.deps.accounts.rememberRecoveryAccount(
+      state.config.provider as "claude" | "codex",
+      record.policy.accountIds,
+      state.config.model,
+      accountId,
+    );
     await this.activate(record.rootAgentId, recovery.operationId);
     return true;
   }
@@ -648,6 +654,7 @@ export class AgentContinuationService {
     source: StoredAgentRecord,
     accountId: string,
   ): Promise<void> {
+    if (!record.policy) throw new Error("Automatic continuation needs an explicit account policy.");
     const catalog = await this.deps.agentManager.getAccountCatalog({
       provider: source.provider as "claude" | "codex",
       selection: { kind: "fixed", accountId },
@@ -674,6 +681,12 @@ export class AgentContinuationService {
         unattended: true,
         preserveConfiguration: true,
       },
+    );
+    await this.deps.accounts.rememberRecoveryAccount(
+      source.provider as "claude" | "codex",
+      record.policy.accountIds,
+      model ?? undefined,
+      accountId,
     );
   }
 

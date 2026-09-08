@@ -1,3 +1,4 @@
+import { useWorkspaceHandoff } from "@/agent-handoff/use-workspace-handoff";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import type { JsonValue } from "@getpaseo/protocol/agent-types";
 import { getOpenAgentTabLabel } from "@getpaseo/protocol/agent-labels";
@@ -416,6 +417,7 @@ interface MobileWorkspaceTabSwitcherProps {
   onCopyTerminalId: (terminalId: string) => Promise<void> | void;
   onCopyFilePath: (path: string) => Promise<void> | void;
   onReloadAgent: (agentId: string) => Promise<void> | void;
+  onContinueAgent?: (agentId: string) => void;
   onRenameTab: (tab: WorkspaceTabDescriptor) => void;
   onCloseTab: (tabId: string) => Promise<void> | void;
   onCloseTabsAbove: (tabId: string) => Promise<void> | void;
@@ -523,6 +525,7 @@ function MobileWorkspaceTabOption({
   onCopyTerminalId,
   onCopyFilePath,
   onReloadAgent,
+  onContinueAgent,
   onRenameTab,
   onCloseTab,
   onCloseTabsAbove,
@@ -542,6 +545,7 @@ function MobileWorkspaceTabOption({
   onCopyTerminalId: (terminalId: string) => Promise<void> | void;
   onCopyFilePath: (path: string) => Promise<void> | void;
   onReloadAgent: (agentId: string) => Promise<void> | void;
+  onContinueAgent?: (agentId: string) => void;
   onRenameTab: (tab: WorkspaceTabDescriptor) => void;
   onCloseTab: (tabId: string) => Promise<void> | void;
   onCloseTabsAbove: (tabId: string) => Promise<void> | void;
@@ -579,6 +583,7 @@ function MobileWorkspaceTabOption({
     onCopyTerminalId,
     onCopyFilePath,
     onReloadAgent,
+    onContinueAgent,
     onRenameTab,
     onCloseTab,
     onCloseTabsBefore: onCloseTabsAbove,
@@ -651,6 +656,7 @@ const MobileWorkspaceTabSwitcher = memo(function MobileWorkspaceTabSwitcher({
   onCopyTerminalId,
   onCopyFilePath,
   onReloadAgent,
+  onContinueAgent,
   onRenameTab,
   onCloseTab,
   onCloseTabsAbove,
@@ -708,6 +714,7 @@ const MobileWorkspaceTabSwitcher = memo(function MobileWorkspaceTabSwitcher({
           onCopyTerminalId={onCopyTerminalId}
           onCopyFilePath={onCopyFilePath}
           onReloadAgent={onReloadAgent}
+          onContinueAgent={onContinueAgent}
           onRenameTab={onRenameTab}
           onCloseTab={onCloseTab}
           onCloseTabsAbove={onCloseTabsAbove}
@@ -727,6 +734,7 @@ const MobileWorkspaceTabSwitcher = memo(function MobileWorkspaceTabSwitcher({
       onCopyTerminalId,
       onCopyFilePath,
       onReloadAgent,
+      onContinueAgent,
       onRenameTab,
       onCloseTab,
       onCloseTabsAbove,
@@ -1570,6 +1578,11 @@ function WorkspaceScreenContent({
     (state) => state.sessions[normalizedServerId]?.serverInfo?.features?.providersSnapshot === true,
   );
   const workspaceDirectory = workspaceDescriptor?.workspaceDirectory || null;
+  const { continueAgent, sheet: handoffSheet } = useWorkspaceHandoff(
+    normalizedServerId,
+    workspaceDirectory,
+    isRouteFocused,
+  );
   const isMissingWorkspaceDirectory = Boolean(workspaceDescriptor) && !workspaceDirectory;
   const [isImportSheetVisible, setIsImportSheetVisible] = useState(false);
   const canOpenImportSheet = [client, isConnected, workspaceDirectory].every(Boolean);
@@ -3955,6 +3968,7 @@ function WorkspaceScreenContent({
         onCopyTerminalId={handleCopyTerminalId}
         onCopyFilePath={handleCopyFilePath}
         onReloadAgent={handleReloadAgent}
+        onContinueAgent={continueAgent}
         onRenameTab={handleRenameTab}
         onCloseTabsToLeft={handleCloseTabsToLeftInPane}
         onCloseTabsToRight={handleCloseTabsToRightInPane}
@@ -3991,6 +4005,7 @@ function WorkspaceScreenContent({
     handleCopyTerminalId,
     handleCopyFilePath,
     handleReloadAgent,
+    continueAgent,
     handleRenameTab,
     handleCloseTabsToLeftInPane,
     handleCloseTabsToRightInPane,
@@ -4034,6 +4049,7 @@ function WorkspaceScreenContent({
           onCopyTerminalId={handleCopyTerminalId}
           onCopyFilePath={handleCopyFilePath}
           onReloadAgent={handleReloadAgent}
+          onContinueAgent={continueAgent}
           onRenameTab={handleRenameTab}
           onCloseTab={handleCloseTabById}
           onCloseTabsAbove={handleCloseTabsToLeft}
@@ -4058,6 +4074,7 @@ function WorkspaceScreenContent({
             onCopyTerminalId={handleCopyTerminalId}
             onCopyFilePath={handleCopyFilePath}
             onReloadAgent={handleReloadAgent}
+            onContinueAgent={continueAgent}
             onRenameTab={handleRenameTab}
             onCloseTabsToLeft={handleCloseTabsToLeft}
             onCloseTabsToRight={handleCloseTabsToRight}
@@ -4089,6 +4106,7 @@ function WorkspaceScreenContent({
           </FloatingPanelPortalHostNameProvider>
           <FloatingPanelPortalHost name={workspaceFloatingPanelPortalHostName} />
         </View>
+        {handoffSheet}
         <ImportSessionSheet
           visible={isRouteFocused && isImportSheetVisible}
           client={client}

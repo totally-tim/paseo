@@ -1,3 +1,4 @@
+import { useProviderAccounts } from "@/provider-accounts/use-provider-accounts";
 import { useAccountCatalog } from "@/provider-accounts/use-account-catalog";
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
@@ -19,6 +20,10 @@ export function useAgentProfileFormCatalog(input: {
   model: AgentProfileFormModel;
   state: AgentProfileFormState;
 }): void {
+  const accounts = useProviderAccounts(input.serverId);
+  useEffect(() => {
+    if (accounts.data) input.model.applyAccounts(accounts.data.accounts);
+  }, [accounts.data, input.model]);
   const { entries: hostEntries } = useProvidersSnapshot(input.serverId, { cwd: null });
 
   const entries = useAccountCatalog({

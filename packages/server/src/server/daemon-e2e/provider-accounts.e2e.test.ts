@@ -48,11 +48,21 @@ test("account RPCs preserve both providers' handoff pins and historical context 
       const b = (
         await ctx.client.manageProviderAccount({ kind: "add", provider, label: `${provider} B` })
       ).account!;
-      for (const account of [a, b])
+      for (const account of [a, b]) {
         expect(
           (await ctx.client.manageProviderAccount({ kind: "inspect", accountId: account.id }))
             .account?.authState,
         ).toBe("ready");
+        expect(
+          (
+            await ctx.client.manageProviderAccount({
+              kind: "edit",
+              accountId: account.id,
+              changes: { enabled: true },
+            })
+          ).error,
+        ).toBeNull();
+      }
       const source = await ctx.client.createAgent({
         provider,
         cwd: root,
