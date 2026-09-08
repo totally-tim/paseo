@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import type { AccountProvider } from "@getpaseo/protocol/provider-accounts";
+import type { ProviderUsage } from "../messages.js";
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { createTestAgentClient, createTestAgentClients } from "../test-utils/fake-agent-client.js";
 import { AgentManager } from "../agent/agent-manager.js";
@@ -25,18 +26,27 @@ async function setup(usedPct = 10) {
   const directory = await mkdtemp(path.join(tmpdir(), "paseo-agent-accounts-"));
   const logger = createTestLogger();
   const store = new ProviderAccountStore(directory);
-  const accounts = new ProviderAccountService(store, (account) => ({
-    inspect: async () => ({ key: account.id, email: `${account.id}@example.invalid` }),
-    login: async () => ({ key: account.id }),
-    logout: async () => {},
-    usage: async () => ({
-      providerId: account.provider,
-      displayName: account.label,
-      status: "available",
-      planLabel: null,
-      windows: [{ id: "weekly", label: "Weekly", usedPct, resetsAt: null }],
+  /** Per-account windows, for tests that need the accounts to rank differently. */
+  const windowsByLabel = new Map<string, ProviderUsage["windows"]>();
+  let now = Date.parse("2026-09-05T00:00:00Z");
+  const accounts = new ProviderAccountService(
+    store,
+    (account) => ({
+      inspect: async () => ({ key: account.id, email: `${account.id}@example.invalid` }),
+      login: async () => ({ key: account.id }),
+      logout: async () => {},
+      usage: async () => ({
+        providerId: account.provider,
+        displayName: account.label,
+        status: "available",
+        planLabel: null,
+        windows: windowsByLabel.get(account.label) ?? [
+          { id: "weekly", label: "Weekly", usedPct, resetsAt: null },
+        ],
+      }),
     }),
-  }));
+    () => now,
+  );
   await accounts.initialize();
   const agentStorage = new AgentStorage(path.join(directory, "agents"), logger);
   const accountClients = new Map<string, AgentClient>();
@@ -82,6 +92,10 @@ async function setup(usedPct = 10) {
     accountClients,
     buildManager,
     add,
+    windowsByLabel,
+    setNow: (iso: string) => {
+      now = Date.parse(iso);
+    },
   };
 }
 
@@ -427,3 +441,81 @@ describe("agent account boundaries", () => {
     },
   );
 });
+
+it.each([
+  {
+    continuation: true,
+    winner: "expiring",
+    loser: "roomy",
+    reason: "expires soonest",
+    // Added first, so account order alone would pick it. Ranking has to overrule that.
+    firstAdded: "roomy",
+  },
+  {
+    continuation: false,
+    winner: "roomy",
+    loser: "expiring",
+    reason: "most remaining capacity",
+    firstAdded: "expiring",
+  },
+] as const)(
+  "starts a new agent on the right account when continuation is $continuation",
+  async ({ continuation, winner, loser, reason, firstAdded }) => {
+    const { add, manager, directory, windowsByLabel, agentStorage } = await setup();
+    // Roomy: barely touched, but its weekly rolls last, so its quota is not the quota at risk.
+    windowsByLabel.set("roomy", [
+      {
+        id: "five_hour",
+        label: "Session",
+        usedPct: 10,
+        resetsAt: "2026-09-05T02:00:00Z",
+        periodMinutes: 300,
+      },
+      {
+        id: "seven_day",
+        label: "Weekly",
+        usedPct: 9,
+        resetsAt: "2026-09-11T09:00:00Z",
+        periodMinutes: 10_080,
+      },
+    ]);
+    // Expiring: heavily used, but its weekly rolls first. Worth draining only if this agent
+    // can hand itself over to roomy when it runs out.
+    windowsByLabel.set("expiring", [
+      {
+        id: "five_hour",
+        label: "Session",
+        usedPct: 0,
+        resetsAt: null,
+        periodMinutes: 300,
+      },
+      {
+        id: "seven_day",
+        label: "Weekly",
+        usedPct: 86,
+        resetsAt: "2026-09-09T06:00:00Z",
+        periodMinutes: 10_080,
+      },
+    ]);
+    const first = await add("claude", firstAdded);
+    const second = await add("claude", firstAdded === "roomy" ? "expiring" : "roomy");
+    const byLabel = new Map([
+      [firstAdded, first],
+      [firstAdded === "roomy" ? "expiring" : "roomy", second],
+    ]);
+    const agent = await manager.createAgent(
+      {
+        provider: "claude",
+        cwd: directory,
+        ...(continuation ? { continuationPolicy: { accountIds: [first.id, second.id] } } : {}),
+      },
+      undefined,
+      { workspaceId: "workspace" },
+    );
+    expect(agent.config.accountId).toBe(byLabel.get(winner)?.id);
+    expect(agent.config.accountId).not.toBe(byLabel.get(loser)?.id);
+    const stored = await agentStorage.get(agent.id);
+    expect(stored?.config?.accountId).toBe(byLabel.get(winner)?.id);
+    expect(stored?.config?.accountSelectionReason).toContain(reason);
+  },
+);

@@ -7,6 +7,9 @@ import {
   windowFromUsedPct,
 } from "../../services/quota-fetcher/usage.js";
 
+const FIVE_HOUR_MINUTES = 5 * 60;
+const SEVEN_DAY_MINUTES = 7 * 24 * 60;
+
 const ClaudeWindowSchema = z.object({
   utilization: z.number().finite().nullable(),
   resets_at: z.string().nullable(),
@@ -55,6 +58,9 @@ export function normalizeClaudeAccountUsage(label: string, raw: unknown): Provid
     ["seven_day_opus", "Weekly · Opus"],
     ["seven_day_sonnet", "Weekly · Sonnet"],
   ] as const) {
+    // Claude names the period instead of reporting it. Account ranking needs the number to
+    // tell a session window from a weekly one without matching on ids again.
+    const periodMinutes = id === "five_hour" ? FIVE_HOUR_MINUTES : SEVEN_DAY_MINUTES;
     const value = result.rate_limits[id];
     // An explicit null is a window the provider has but could not read. Keep it as an
     // unknown reading so it still blocks automatic admission; an absent key does not apply.
@@ -65,6 +71,7 @@ export function normalizeClaudeAccountUsage(label: string, raw: unknown): Provid
         label: name,
         utilizationPct: value?.utilization ?? null,
         resetsAt: value?.resets_at ?? null,
+        periodMinutes,
         ...(value ? { tone: toneFromUsedPct(value.utilization) } : {}),
       }),
     );
@@ -76,6 +83,9 @@ export function normalizeClaudeAccountUsage(label: string, raw: unknown): Provid
         label: `Weekly · ${value.display_name}`,
         utilizationPct: value.utilization,
         resetsAt: value.resets_at,
+        // Every model-scoped bucket observed so far resets on the weekly boundary, and the
+        // label Claude gives them says "Weekly" too.
+        periodMinutes: SEVEN_DAY_MINUTES,
       }),
     );
   }
@@ -116,6 +126,7 @@ export function normalizeCodexAccountUsage(label: string, raw: unknown): Provide
           label: title ? `${name} · ${title}` : name,
           utilizationPct: value.usedPercent,
           resetsAt: value.resetsAt == null ? null : toIsoStringOrNull(value.resetsAt * 1000),
+          periodMinutes: minutes ?? null,
           tone: toneFromUsedPct(value.usedPercent),
         }),
       );

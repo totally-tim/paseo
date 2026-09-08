@@ -808,7 +808,7 @@ test("recovery skips a destination that cannot run the model and keeps searching
   await f.accounts.inspect(c.id);
   await f.accounts.edit(c.id, { enabled: true });
   f.used.set(c.id, 20);
-  // B has the most remaining quota but does not offer the running model; C does.
+  // B ranks first on capacity but does not offer the running model; C does.
   f.used.set(f.b, 5);
   await f.agentStorage.upsert({
     ...(await f.agentStorage.get(f.source.id))!,

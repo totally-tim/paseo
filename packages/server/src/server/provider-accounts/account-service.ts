@@ -10,6 +10,8 @@ import type {
   ProviderAccountIdentity,
 } from "@getpaseo/protocol/provider-accounts";
 import { AccountProviderSchema } from "@getpaseo/protocol/provider-accounts";
+import { compareByCapacity, describeRank } from "./account-ranking.js";
+import type { AccountRankMode } from "./account-ranking.js";
 import type { ProviderUsage } from "../messages.js";
 import { unavailableUsage } from "../../services/quota-fetcher/usage.js";
 import type { ProviderAccountContext } from "../agent/provider-account-context.js";
@@ -552,7 +554,17 @@ export class ProviderAccountService {
     const preferred = this.store.automaticAccount(
       automaticAccountKey(input.provider, selection, true, input.model),
     );
-    eligible.sort((a, b) => Number(b.id === preferred) - Number(a.id === preferred));
+    // Recovery runs for an agent whose profile enabled automatic continuation, so it can chase
+    // an expiring window: if the destination runs dry, continuation moves the agent again.
+    const byCapacity = compareByCapacity({
+      windowsOf: (account: ProviderAccount) =>
+        applicableWindows(readings.get(account.id) ?? null, input.model),
+      mode: "soonest-expiry",
+      now: this.now(),
+    });
+    eligible.sort(
+      (a, b) => byCapacity(a, b) || Number(b.id === preferred) - Number(a.id === preferred),
+    );
     if (eligible[0])
       return {
         accountId: eligible[0].id,
@@ -607,6 +619,8 @@ export class ProviderAccountService {
     selection: AccountSelection,
     unattended: boolean,
     model?: string,
+    /** Expiry ranking assumes a dry account can hand itself over. Only continuation does that. */
+    continuationEnabled = false,
   ): AccountChoice {
     const candidates = this.list().filter((account) => account.provider === provider);
     if (selection.kind === "default")
@@ -644,14 +658,54 @@ export class ProviderAccountService {
     if (retained && this.waitForCurrentReading(retained.account, unattended, model))
       return retained.choice;
     const eligible = considered.filter((entry) => entry.choice.accountId !== null);
-    eligible.sort(
-      (a, b) => Number(b.account.id === preferred) - Number(a.account.id === preferred),
+    return this.rankAutomatic({
+      considered,
+      eligible,
+      preferred,
+      model,
+      // Continuation is off by default and excludes scheduled and execution-service agents, so
+      // most starts have no rescue and must finish on the account they picked.
+      mode: continuationEnabled && !unattended ? "soonest-expiry" : "most-remaining",
+    });
+  }
+
+  /** Orders the eligible accounts and explains the winner. Split out to keep `choice` simple. */
+  private rankAutomatic(input: {
+    considered: Array<{ account: ProviderAccount; choice: AccountChoice }>;
+    eligible: Array<{ account: ProviderAccount; choice: AccountChoice }>;
+    preferred: string | undefined;
+    model: string | undefined;
+    mode: AccountRankMode;
+  }): AccountChoice {
+    const byCapacity = compareByCapacity({
+      windowsOf: (entry: (typeof input.eligible)[number]) =>
+        applicableWindows(this.currentUsage(entry.account), input.model),
+      mode: input.mode,
+      now: this.now(),
+    });
+    // Capacity leads and the remembered account breaks ties. Ordering these the other way round
+    // would keep the first-ever choice forever, which is what this ranking exists to end.
+    const ordered = [...input.eligible].sort(
+      (a, b) =>
+        byCapacity(a, b) ||
+        Number(b.account.id === input.preferred) - Number(a.account.id === input.preferred),
     );
+    const winner = ordered[0];
+    if (winner?.choice.accountId) {
+      const why = describeRank({
+        windows: applicableWindows(this.currentUsage(winner.account), input.model),
+        mode: input.mode,
+        now: this.now(),
+      });
+      // A null description means the winner was unscored, so its own eligibility reason already
+      // says the provider did not report usage.
+      if (why) return { accountId: winner.choice.accountId, reason: why };
+    }
     return (
-      eligible[0]?.choice ?? {
+      winner?.choice ?? {
         accountId: null,
-        reason: considered.length
-          ? `No eligible account: ${[...new Set(considered.map((entry) => entry.choice.reason))].join(" ")}`
+        reason: input.considered.length
+          ? `No eligible account: ${[...new Set(input.considered.map((entry) => entry.choice.reason))].join(" ")}`
           : "No enabled account is signed in. Check accounts in Settings.",
       }
     );
@@ -743,6 +797,8 @@ export class ProviderAccountService {
     pinnedAccountId?: string;
     unattended: boolean;
     model?: string;
+    /** True when this agent's profile enables automatic continuation. */
+    continuationEnabled?: boolean;
   }): Promise<AccountLease | null> {
     this.assertOpen();
     if (input.provider !== "claude" && input.provider !== "codex") {
@@ -788,7 +844,13 @@ export class ProviderAccountService {
     }
     const admit = async () => {
       this.assertOpen();
-      const chosen = this.choice(provider, selection, input.unattended, input.model);
+      const chosen = this.choice(
+        provider,
+        selection,
+        input.unattended,
+        input.model,
+        input.continuationEnabled ?? false,
+      );
       if (!chosen.accountId) throw new AccountOperationError(chosen.reason);
       // Hold the lease across persistence so removal cannot invalidate this admission.
       const lease = this.lease(chosen.accountId, chosen.reason);
@@ -879,7 +941,7 @@ export class ProviderAccountService {
     }
     let reason = fixed
       ? "Fixed account"
-      : "Automatic selection keeps this account until its applicable capacity is unavailable";
+      : "Automatic selection ranked this account first for its remaining capacity";
     if (unknown)
       reason =
         "The provider has not reported remaining usage. You can still start an agent manually.";

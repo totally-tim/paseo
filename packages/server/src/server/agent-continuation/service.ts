@@ -562,7 +562,7 @@ export class AgentContinuationService {
   }
 
   /**
-   * The account with the most remaining quota may not offer the running model. Skip it and keep
+   * The account ranked first by capacity may not offer the running model. Skip it and keep
    * looking instead of stopping the task at an incompatible destination.
    */
   private async chooseDestination(

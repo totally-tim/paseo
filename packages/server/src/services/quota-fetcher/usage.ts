@@ -52,6 +52,7 @@ export function windowFromUsedPct(input: {
   label: string;
   utilizationPct: number | null | undefined;
   resetsAt?: string | null;
+  periodMinutes?: number | null;
   tone?: ProviderUsageWindow["tone"];
 }): ProviderUsageWindow {
   const usedPct = typeof input.utilizationPct === "number" ? input.utilizationPct : null;
@@ -62,6 +63,11 @@ export function windowFromUsedPct(input: {
     remainingPct: usedPct === null ? null : Math.max(0, 100 - usedPct),
     resetsAt: input.resetsAt ?? null,
   };
+  // Most providers never report a window length, so omit it rather than sending null from
+  // every fetcher. Absent means "not reported", which is what capacity ranking checks for.
+  if (input.periodMinutes != null) {
+    window.periodMinutes = input.periodMinutes;
+  }
   if (input.tone) {
     window.tone = input.tone;
   }

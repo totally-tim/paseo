@@ -825,7 +825,7 @@ it("keeps a newly verified account out of automatic selection until setup is sav
   });
 });
 
-it("keeps automatic accounts through usage changes, reset of an earlier account, and restart", async () => {
+it("keeps automatic accounts through a rename, a reorder, an earlier account resetting, and restart", async () => {
   const { service, add, store, directory, backends } = await setup();
   const a = await add("sticky-a");
   const b = await add("sticky-b");
@@ -842,7 +842,9 @@ it("keeps automatic accounts through usage changes, reset of an earlier account,
   b.backend.usedPct = 0;
   await service.usage(a.account.id, true);
   await service.usage(b.account.id, true);
-  expect(service.preview("codex", input.selection, input.model).accountId).toBe(a.account.id);
+  // A materially larger balance moves the choice: the remembered account is a tiebreak, not a
+  // lock. Below, an equal balance, a rename, a reorder and a restart all leave it alone.
+  expect(service.preview("codex", input.selection, input.model).accountId).toBe(b.account.id);
   a.backend.usedPct = 100;
   await service.usage(a.account.id, true);
   const next = await service.reserve(input);
@@ -880,7 +882,9 @@ it("isolates automatic choices by model, permitted pool and work type", async ()
     displayName: "A",
     status: "available",
     windows: [
-      { id: "five_hour", label: "Session", usedPct: 10 },
+      // A consumed window carries a reset time in every real reading, and capacity ranking
+      // needs it: consumption with no reset is a reading it cannot rank on.
+      { id: "five_hour", label: "Session", usedPct: 10, resetsAt: "2026-09-05T04:00:00Z" },
       { id: "model:0:Fable", label: "Weekly · Fable", usedPct: 100 },
     ],
   });
@@ -956,4 +960,293 @@ it("does not move a background account because a usage refresh failed", async ()
   const recovered = await service.reserve(input);
   expect(recovered?.accountId).toBe(a.account.id);
   recovered?.release();
+});
+
+/**
+ * Quota windows are use-it-or-lose-it, so these fixtures are the two live accounts the ranking
+ * was designed against: A has a nearly untouched weekly that resets last, B has a heavily used
+ * weekly that resets first, and B's session window has not started so it reports no reset.
+ */
+const RANKING_LATE_SESSION_RESET = "2026-09-05T04:00:00Z";
+
+function ranked(windows: ProviderUsage["windows"]): ProviderUsage {
+  return {
+    providerId: "codex",
+    displayName: "test",
+    status: "available",
+    planLabel: null,
+    windows,
+  };
+}
+
+const FIVE_HOUR = 5 * 60;
+const SEVEN_DAY = 7 * 24 * 60;
+
+/** A: session 10% resetting in 1h53m, weekly 9% resetting in 6d9h. */
+function accountA(session?: Partial<ProviderUsage["windows"][number]>): ProviderUsage {
+  return ranked([
+    {
+      id: "session",
+      label: "Session",
+      usedPct: 10,
+      resetsAt: "2026-09-05T01:53:00Z",
+      periodMinutes: FIVE_HOUR,
+      ...session,
+    },
+    {
+      id: "weekly",
+      label: "Weekly",
+      usedPct: 9,
+      resetsAt: "2026-09-11T09:00:00Z",
+      periodMinutes: SEVEN_DAY,
+    },
+  ]);
+}
+
+/** B: session unstarted, weekly 86% resetting in 4d6h — sooner than A's. */
+function accountB(session?: Partial<ProviderUsage["windows"][number]>): ProviderUsage {
+  return ranked([
+    {
+      id: "session",
+      label: "Session",
+      usedPct: 0,
+      resetsAt: null,
+      periodMinutes: FIVE_HOUR,
+      ...session,
+    },
+    {
+      id: "weekly",
+      label: "Weekly",
+      usedPct: 86,
+      resetsAt: "2026-09-09T06:00:00Z",
+      periodMinutes: SEVEN_DAY,
+    },
+  ]);
+}
+
+/**
+ * `firstAdded` is the account display order would pick with no ranking. Every test names the
+ * one it does *not* expect to win, so removing the comparator makes the test fail rather than
+ * pass for ordering reasons.
+ */
+async function rankingPair(input: { usageB?: ProviderUsage; firstAdded: "a" | "b" }) {
+  const context = await setup();
+  const first = await context.add(`rank-${input.firstAdded}`);
+  const second = await context.add(input.firstAdded === "a" ? "rank-b" : "rank-a");
+  const [a, b] = input.firstAdded === "a" ? [first, second] : [second, first];
+  vi.spyOn(a.backend, "usage").mockResolvedValue(accountA());
+  vi.spyOn(b.backend, "usage").mockResolvedValue(input.usageB ?? accountB());
+  return { ...context, a, b };
+}
+
+describe("capacity ranking", () => {
+  it("sends a continuing start to the account whose quota expires soonest", async () => {
+    const { service, a, b } = await rankingPair({ firstAdded: "a" });
+    // B's weekly rolls on the 9th and A's on the 11th, so B's remaining 14% is the quota that
+    // would otherwise evaporate first. This agent can hand itself over when B runs out.
+    const lease = await service.reserve({
+      provider: "codex",
+      unattended: false,
+      continuationEnabled: true,
+    });
+    expect(lease?.accountId).toBe(b.account.id);
+    expect(lease?.accountId).not.toBe(a.account.id);
+    expect(lease?.reason).toContain("expires soonest");
+    expect(lease?.reason).toContain("2026-09-09T06:00:00Z");
+    lease?.release();
+  });
+
+  it("sends a start with no continuation to the account with the most remaining capacity", async () => {
+    const { service, a, b } = await rankingPair({ firstAdded: "b" });
+    // Automatic continuation is off by default, so nothing moves this agent off B when B's
+    // weekly runs out. Chasing the expiring account would strand it at 14% remaining.
+    const lease = await service.reserve({ provider: "codex", unattended: false });
+    expect(lease?.accountId).toBe(a.account.id);
+    expect(lease?.accountId).not.toBe(b.account.id);
+    expect(lease?.reason).toContain("most remaining capacity");
+    lease?.release();
+  });
+
+  it("keeps an unattended start on remaining capacity even when continuation is enabled", async () => {
+    const { service, a, b } = await rankingPair({ firstAdded: "b" });
+    // Scheduled and execution-service agents are excluded from continuation, so the policy on
+    // the profile does not buy them a handover.
+    const lease = await service.reserve({
+      provider: "codex",
+      unattended: true,
+      continuationEnabled: true,
+    });
+    expect(lease?.accountId).toBe(a.account.id);
+    expect(lease?.accountId).not.toBe(b.account.id);
+    lease?.release();
+  });
+
+  it("ranks capacity ahead of the account a previous start settled on", async () => {
+    const { service, a, b, advance } = await rankingPair({ firstAdded: "a" });
+    const first = await service.reserve({
+      provider: "codex",
+      unattended: false,
+      continuationEnabled: true,
+    });
+    expect(first?.accountId).toBe(b.account.id);
+    first?.release();
+    // B's weekly rolled, so A is now the account whose quota expires first. The remembered
+    // choice is a tiebreak, so it must not hold the next start on B.
+    vi.spyOn(b.backend, "usage").mockResolvedValue(
+      ranked([
+        {
+          id: "weekly",
+          label: "Weekly",
+          usedPct: 1,
+          resetsAt: "2026-09-16T06:00:00Z",
+          periodMinutes: SEVEN_DAY,
+        },
+      ]),
+    );
+    advance(300_001);
+    const second = await service.reserve({
+      provider: "codex",
+      unattended: false,
+      continuationEnabled: true,
+    });
+    expect(second?.accountId).toBe(a.account.id);
+    second?.release();
+  });
+
+  it("ranks a session window last only once it passes 90%", async () => {
+    const onTheLine = await rankingPair({
+      usageB: accountB({ usedPct: 90, resetsAt: RANKING_LATE_SESSION_RESET }),
+      firstAdded: "a",
+    });
+    // Exactly 90 is not yet the wall, so B still wins on its earlier expiry.
+    const allowed = await onTheLine.service.reserve({
+      provider: "codex",
+      unattended: false,
+      continuationEnabled: true,
+    });
+    expect(allowed?.accountId).toBe(onTheLine.b.account.id);
+    allowed?.release();
+    const over = await rankingPair({
+      usageB: accountB({ usedPct: 90.5, resetsAt: RANKING_LATE_SESSION_RESET }),
+      firstAdded: "b",
+    });
+    // Just above it, B walls within minutes and loses despite the earlier expiry.
+    const blocked = await over.service.reserve({
+      provider: "codex",
+      unattended: false,
+      continuationEnabled: true,
+    });
+    expect(blocked?.accountId).toBe(over.a.account.id);
+    blocked?.release();
+  });
+
+  it("still starts when every account's session window is nearly exhausted", async () => {
+    const context = await setup();
+    const low = await context.add("rank-low");
+    const high = await context.add("rank-high");
+    const hot = (usedPct: number, weeklyUsedPct: number) =>
+      ranked([
+        {
+          id: "session",
+          label: "Session",
+          usedPct,
+          resetsAt: RANKING_LATE_SESSION_RESET,
+          periodMinutes: FIVE_HOUR,
+        },
+        {
+          id: "weekly",
+          label: "Weekly",
+          usedPct: weeklyUsedPct,
+          resetsAt: "2026-09-11T09:00:00Z",
+          periodMinutes: SEVEN_DAY,
+        },
+      ]);
+    // Added first, so display order would pick it; it has the least left of the two.
+    vi.spyOn(low.backend, "usage").mockResolvedValue(hot(99, 80));
+    vi.spyOn(high.backend, "usage").mockResolvedValue(hot(95, 20));
+    // Both are past the wall, so neither can be preferred on that count. The fallback still
+    // has to produce an account rather than refusing the start.
+    const lease = await context.service.reserve({
+      provider: "codex",
+      unattended: false,
+      continuationEnabled: true,
+    });
+    expect(lease?.accountId).toBe(high.account.id);
+    lease?.release();
+  });
+
+  it("drops the near-exhaustion penalty once that window has reset", async () => {
+    const context = await setup();
+    const rolled = await context.add("rank-rolled");
+    const healthy = await context.add("rank-healthy");
+    // A cached session reading at 95% whose reset has already passed. The window rolled, so
+    // the percentage is stale and must not hold this account back.
+    vi.spyOn(rolled.backend, "usage").mockResolvedValue(
+      ranked([
+        {
+          id: "session",
+          label: "Session",
+          usedPct: 95,
+          resetsAt: "2026-09-04T23:00:00Z",
+          periodMinutes: FIVE_HOUR,
+        },
+        {
+          id: "weekly",
+          label: "Weekly",
+          usedPct: 10,
+          resetsAt: "2026-09-11T09:00:00Z",
+          periodMinutes: SEVEN_DAY,
+        },
+      ]),
+    );
+    vi.spyOn(healthy.backend, "usage").mockResolvedValue(
+      ranked([
+        {
+          id: "session",
+          label: "Session",
+          usedPct: 89,
+          resetsAt: "2026-09-05T04:00:00Z",
+          periodMinutes: FIVE_HOUR,
+        },
+        {
+          id: "weekly",
+          label: "Weekly",
+          usedPct: 50,
+          resetsAt: "2026-09-07T00:00:00Z",
+          periodMinutes: SEVEN_DAY,
+        },
+      ]),
+    );
+    const lease = await context.service.reserve({ provider: "codex", unattended: false });
+    expect(lease?.accountId).toBe(rolled.account.id);
+    expect(lease?.reason).toContain("Weekly at 10% used");
+    lease?.release();
+  });
+
+  it("separates a window that has not started from one it could not read", async () => {
+    // Consumption with no reset time is a reading we cannot place in time, unlike B's untouched
+    // session window, which reports 0% and no reset because the window has not opened. The
+    // first case unscores B and hands the start to A; the second is what the expiry test uses.
+    const { service, a, b } = await rankingPair({
+      usageB: accountB({ usedPct: 5, resetsAt: null }),
+      firstAdded: "b",
+    });
+    const lease = await service.reserve({
+      provider: "codex",
+      unattended: false,
+      continuationEnabled: true,
+    });
+    expect(lease?.accountId).toBe(a.account.id);
+    expect(lease?.accountId).not.toBe(b.account.id);
+    lease?.release();
+  });
+
+  it("orders automatic recovery by the same expiry rule", async () => {
+    const { service, a, b } = await rankingPair({ firstAdded: "a" });
+    const choice = await service.recoveryChoice({
+      provider: "codex",
+      accountIds: [a.account.id, b.account.id],
+    });
+    expect(choice.accountId).toBe(b.account.id);
+  });
 });

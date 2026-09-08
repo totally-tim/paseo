@@ -1464,6 +1464,9 @@ export class AgentManager {
       selection: config.accountSelection,
       pinnedAccountId,
       unattended: options.unattended ?? Boolean(options.owner || parentId || config.internal),
+      // Only an agent that can continue on another account may be pointed at the one whose
+      // quota expires first. Without a policy it has to finish where it started.
+      continuationEnabled: Boolean(config.continuationPolicy),
     });
     if (!lease) return this.createAgentInternal(config, id, options);
     const pinnedConfig = {

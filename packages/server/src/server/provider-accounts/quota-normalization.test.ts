@@ -16,14 +16,27 @@ describe("provider-owned quota controls", () => {
     });
     expect(result.displayName).toBe("A");
     expect(result.windows).toEqual([
+      // Claude names its window lengths instead of reporting them, and capacity ranking needs
+      // the number to tell a session window from a weekly allowance.
       expect.objectContaining({
         id: "five_hour",
         usedPct: 0,
         remainingPct: 100,
         resetsAt: "2026-09-05T01:00:00Z",
+        periodMinutes: 300,
       }),
-      expect.objectContaining({ id: "seven_day", usedPct: null, remainingPct: null }),
-      expect.objectContaining({ id: "model:0:Fable", label: "Weekly · Fable", usedPct: 42 }),
+      expect.objectContaining({
+        id: "seven_day",
+        usedPct: null,
+        remainingPct: null,
+        periodMinutes: 10_080,
+      }),
+      expect.objectContaining({
+        id: "model:0:Fable",
+        label: "Weekly · Fable",
+        usedPct: 42,
+        periodMinutes: 10_080,
+      }),
     ]);
   });
 
@@ -50,6 +63,8 @@ describe("provider-owned quota controls", () => {
         label: "Weekly",
         usedPct: 49,
         resetsAt: "2027-01-15T08:00:00.000Z",
+        // Codex reports the duration; it used to shape the label and then be discarded.
+        periodMinutes: 10_080,
       }),
     ]);
     expect(result.planLabel).toBe("plus");
