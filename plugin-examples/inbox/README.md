@@ -16,7 +16,9 @@ Idle agents without unread results are hidden. Same-workspace children share the
 card; children in another workspace get their own card. A waiting child supplies the card's
 question, context, and waiting time. Its name appears above the question.
 
-Open a card to select the parent or a child and read that agent's conversation. Reply and
+Use **Preview** (or the card title) to read the recent conversation and select a parent or child.
+**Open agent** on a card goes directly to the agent shown in its preview, including a waiting child.
+The preview also has **Open agent** beside the selected conversation details. Reply and
 **Open agent** always target the selected agent. Unread child results remain available after
 you mark the parent read.
 
@@ -32,6 +34,9 @@ closing a peek, refreshing the page, and reconnecting preserve the draft. A succ
 clears only the text that was sent. Save and send failures remain visible beside the composer.
 Drafts stay on this app installation; they do not sync to another device.
 
+Search matches agent titles, providers, models, projects, and workspaces, including children.
+Review next and keyboard navigation use the visible search results. Clear search restores the board.
+
 Project and project-group filters also persist locally per host. A global review waits for
 those filters to load. Workspace panels always show their own workspace, independently of
 the global filters. The sidebar badge counts all waiting cards on the host.
@@ -41,7 +46,7 @@ letting older fetch results replace newer live updates.
 
 ## Layout and shortcuts
 
-Desktop gives Needs you more width; each lane scrolls independently. Compact layouts use
+Desktop gives each lane equal width; each lane scrolls independently. Compact layouts use
 collapsible sections. Peeks use the host's scrolling modal so long questions and conversations
 do not clip the actions. Cards use neutral borders; lane headings communicate status.
 

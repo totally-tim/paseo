@@ -32,6 +32,22 @@ describe("timeline text", () => {
     expect(itemToPeekRow({ type: "turn_started" } as unknown as TimelineItem)).toBeNull();
   });
 
+  it("makes linked, formatted results readable without changing code identifiers", () => {
+    expect(
+      firstLine("**PR [#544](https://example.com/pull/544)** is ready. `build_app` passed."),
+    ).toBe("PR #544 is ready. build_app passed.");
+    expect(firstLine("- **Done**: fixed `some_value`.")).toBe("Done: fixed some_value.");
+  });
+
+  it("skips image-only updates when choosing a readable activity preview", () => {
+    expect(
+      lastAssistantLine([
+        { type: "assistant_message", text: "Checking the updated board." },
+        { type: "assistant_message", text: "![Image](file:///tmp/capture.png)" },
+      ] as TimelineItem[]),
+    ).toBe("Checking the updated board.");
+  });
+
   it("finds the last assistant line", () => {
     const items = [
       { type: "assistant_message", text: "first" },
