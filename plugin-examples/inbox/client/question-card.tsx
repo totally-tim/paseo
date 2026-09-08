@@ -257,26 +257,47 @@ export function ActionButton({
   danger?: boolean;
   disabled?: boolean;
 }) {
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [pressed, setPressed] = useState(false);
+  const enter = useCallback(() => setHovered(true), []);
+  const leave = useCallback(() => setHovered(false), []);
+  const focus = useCallback(() => setFocused(true), []);
+  const blur = useCallback(() => setFocused(false), []);
+  const pressIn = useCallback(() => setPressed(true), []);
+  const pressOut = useCallback(() => setPressed(false), []);
+  const highlighted = !disabled && (hovered || pressed);
   const accessibilityState = useMemo(() => ({ disabled }), [disabled]);
   const styles = useMemo(
     () =>
       StyleSheet.create({
         button: {
           backgroundColor: primary ? theme.colors.accent : theme.colors.surface2,
+          borderWidth: 1,
+          borderColor: focused ? theme.colors.accent : theme.colors.border,
+          minHeight: 32,
+          justifyContent: "center",
           borderRadius: 8,
           paddingHorizontal: 12,
           paddingVertical: 7,
           opacity: disabled ? 0.5 : 1,
+          ...(!primary && highlighted ? { backgroundColor: theme.colors.surface1 } : {}),
         },
         label: { color: buttonColor(theme, primary, danger), fontSize: 13, fontWeight: "600" },
       }),
-    [danger, disabled, primary, theme],
+    [danger, disabled, primary, theme, highlighted, focused],
   );
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityState={accessibilityState}
       onPress={onPress}
+      onHoverIn={enter}
+      onHoverOut={leave}
+      onFocus={focus}
+      onBlur={blur}
+      onPressIn={pressIn}
+      onPressOut={pressOut}
       disabled={disabled}
       style={styles.button}
     >

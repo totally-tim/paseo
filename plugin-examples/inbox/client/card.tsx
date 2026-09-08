@@ -6,8 +6,7 @@ import { useCallback, useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { formatSince, type InboxCard } from "./lanes";
 import { ActionButton } from "./question-card";
-import { describeToolCall, lastToolCall } from "./detail-text";
-import { lastAssistantLine } from "./timeline-text";
+import { lastAssistantLine, latestActivity } from "./timeline-text";
 import type { Agent, PaseoApi, PermissionResponse } from "./types";
 
 import { OperationFeedback, ReplyComposer, RequestControls } from "./controls";
@@ -26,6 +25,7 @@ export interface CardActions {
   onReply(agentId: string): void;
   onMarkRead(agentId: string): void;
   onOpen(card: InboxCard): void;
+  onOpenAgent?: (agentId: string) => void;
 }
 
 export function cardTitle(card: InboxCard): string {
@@ -60,8 +60,7 @@ export function useWorkingActivity(paseo: PaseoApi, agent: Agent, enabled: boole
       const page = await paseo.agents
         .ref(agent.id)
         .timeline.refetch({ direction: "tail", limit: 8, projection: "projected" });
-      const item = lastToolCall(page.entries.map((entry) => entry.item));
-      return item ? describeToolCall(item) : null;
+      return latestActivity(page.entries.map((entry) => entry.item));
     },
   });
 }
@@ -91,9 +90,18 @@ function useCardStyles(theme: PluginTheme, focused: boolean) {
           borderRadius: 10,
           overflow: "hidden",
         },
-        content: { flex: 1, padding: 12, gap: 10 },
+        content: { flex: 1, minWidth: 0, padding: 14, gap: 12 },
+        actions: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 },
+        context: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 17 },
+        label: { color: theme.colors.foregroundMuted, fontSize: 11, fontWeight: "600" },
         titleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-        title: { flex: 1, color: theme.colors.foreground, fontSize: 14, fontWeight: "600" },
+        title: {
+          flex: 1,
+          color: theme.colors.foreground,
+          fontSize: 14,
+          lineHeight: 20,
+          fontWeight: "600",
+        },
         metaRow: { flexDirection: "row", alignItems: "center", gap: 6 },
         meta: { flex: 1, color: theme.colors.foregroundMuted, fontSize: 12 },
         since: { color: theme.colors.foregroundMuted, fontSize: 12 },
@@ -106,6 +114,12 @@ function useCardStyles(theme: PluginTheme, focused: boolean) {
   );
 }
 
+function timeLabel(card: InboxCard): string {
+  if (card.reason === "working") return "running";
+  if (card.reason === "finished") return "ago";
+  return "waiting";
+}
+
 function finishedText(line: string | null | undefined, pending: boolean): string {
   if (line) return line;
   return pending ? "…" : "Finished.";
@@ -115,14 +129,12 @@ function CardBody({
   card,
   theme,
   paseo,
-  now,
   actions,
   focused = false,
 }: {
   card: InboxCard;
   theme: PluginTheme;
   paseo: PaseoApi;
-  now: number;
   actions: CardActions;
   focused?: boolean;
 }) {
@@ -137,7 +149,6 @@ function CardBody({
     actions.active && card.reason === "working",
   );
   const styles = useCardStyles(theme, focused);
-  const since = formatSince(card.since, now);
   const readOperation = actions.operations.get(readKey(card.subject.id));
 
   const markRead = useCallback(
@@ -163,14 +174,22 @@ function CardBody({
     );
   } else if (card.reason === "working") {
     body = (
-      <Text numberOfLines={2} style={styles.body}>
-        {activity.data ?? (activity.isPending ? "…" : "Thinking")}
-        <Text style={styles.muted}> · {since || "a moment"}</Text>
-      </Text>
+      <View style={styles.finished}>
+        <Text style={styles.label}>Latest activity</Text>
+        <Text numberOfLines={3} style={styles.body}>
+          {activity.data ?? (activity.isPending ? "Loading activity…" : "Working…")}
+        </Text>
+        {activity.isError ? (
+          <Text style={styles.error}>
+            Activity unavailable. Open agent for the live conversation.
+          </Text>
+        ) : null}
+      </View>
     );
   } else {
     body = (
       <View style={styles.finished}>
+        <Text style={styles.label}>Latest result</Text>
         <Text numberOfLines={3} style={styles.body}>
           {finishedText(tail.data, tail.isPending)}
         </Text>
@@ -178,12 +197,14 @@ function CardBody({
           <Text style={styles.error}>Could not load the result. Open the card to retry.</Text>
         ) : null}
         <ReplyComposer agent={card.subject} theme={theme} actions={actions} />
-        <ActionButton
-          theme={theme}
-          label={readOperation?.status === "pending" ? "Marking read…" : "Mark read"}
-          onPress={markRead}
-          disabled={readOperation?.status === "pending"}
-        />
+        <View style={styles.actions}>
+          <ActionButton
+            theme={theme}
+            label={readOperation?.status === "pending" ? "Marking read…" : "Mark read"}
+            onPress={markRead}
+            disabled={readOperation?.status === "pending"}
+          />
+        </View>
         <OperationFeedback theme={theme} operation={readOperation} />
       </View>
     );
@@ -210,16 +231,25 @@ export function InboxCardView({
   const styles = useCardStyles(theme, focused);
   const since = formatSince(card.since, now);
   const open = useCallback(() => actions.onOpen(card), [actions, card]);
+  const openAgent = useCallback(
+    () => actions.onOpenAgent?.(card.subject.id),
+    [actions, card.subject.id],
+  );
   return (
     <View style={styles.shell}>
       <View style={styles.content}>
+        {card.workspace ? (
+          <Text numberOfLines={2} style={styles.context}>
+            {card.workspace.projectDisplayName} / {card.workspace.name}
+          </Text>
+        ) : null}
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`Open ${cardTitle(card)}`}
+          accessibilityLabel={`Preview ${cardTitle(card)}`}
           onPress={open}
           style={styles.titleRow}
         >
-          <Text numberOfLines={1} style={styles.title}>
+          <Text numberOfLines={2} style={styles.title}>
             {cardTitle(card)}
           </Text>
           <Icon name="ChevronRight" size={14} color={theme.colors.foregroundMuted} />
@@ -227,17 +257,22 @@ export function InboxCardView({
         {card.subject.id !== card.agent.id ? (
           <Text style={styles.muted}>Subagent: {card.subject.title || card.subject.provider}</Text>
         ) : null}
-        <CardBody card={card} theme={theme} paseo={paseo} now={now} actions={actions} />
-        {card.workspace ? (
-          <Text style={styles.meta}>
-            {card.workspace.projectDisplayName} / {card.workspace.name}
-          </Text>
-        ) : null}
+        <CardBody card={card} theme={theme} paseo={paseo} actions={actions} />
         <View style={styles.metaRow}>
           <Text numberOfLines={1} style={styles.meta}>
             {metaParts(card)}
           </Text>
-          {since ? <Text style={styles.since}>{since}</Text> : null}
+          {since ? (
+            <Text style={styles.since}>
+              {since} {timeLabel(card)}
+            </Text>
+          ) : null}
+        </View>
+        <View style={styles.actions}>
+          <ActionButton theme={theme} label="Preview" onPress={open} />
+          {actions.onOpenAgent ? (
+            <ActionButton theme={theme} label="Open agent" onPress={openAgent} />
+          ) : null}
         </View>
       </View>
     </View>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { firstLine, itemToPeekRow, lastAssistantLine } from "./timeline-text";
+import { firstLine, itemToPeekRow, lastAssistantLine, latestActivity } from "./timeline-text";
 import type { TimelineItem } from "./types";
 
 describe("timeline text", () => {
@@ -32,6 +32,22 @@ describe("timeline text", () => {
     expect(itemToPeekRow({ type: "turn_started" } as unknown as TimelineItem)).toBeNull();
   });
 
+  it("makes linked, formatted results readable without changing code identifiers", () => {
+    expect(
+      firstLine("**PR [#544](https://example.com/pull/544)** is ready. `build_app` passed."),
+    ).toBe("PR #544 is ready. build_app passed.");
+    expect(firstLine("- **Done**: fixed `some_value`.")).toBe("Done: fixed some_value.");
+  });
+
+  it("skips image-only updates when choosing a readable activity preview", () => {
+    expect(
+      lastAssistantLine([
+        { type: "assistant_message", text: "Checking the updated board." },
+        { type: "assistant_message", text: "![Image](file:///tmp/capture.png)" },
+      ] as TimelineItem[]),
+    ).toBe("Checking the updated board.");
+  });
+
   it("finds the last assistant line", () => {
     const items = [
       { type: "assistant_message", text: "first" },
@@ -47,4 +63,23 @@ describe("timeline text", () => {
     expect(lastAssistantLine(items)).toBe("last line");
     expect(lastAssistantLine([])).toBeNull();
   });
+});
+
+it("chooses readable activity in timeline order", () => {
+  const assistant = { type: "assistant_message", text: "Checking files" } as TimelineItem;
+  const tool = {
+    type: "tool_call",
+    name: "Bash",
+    status: "running",
+    callId: "call",
+    detail: { type: "shell", command: "npm run lint" },
+  } as TimelineItem;
+  const image = {
+    type: "assistant_message",
+    text: "![Image](file:///tmp/image.png)",
+  } as TimelineItem;
+  expect(latestActivity([assistant, tool])).toBe("Bash: npm run lint");
+  expect(latestActivity([tool, assistant])).toBe("Checking files");
+  expect(latestActivity([assistant, tool, image])).toBe("Bash: npm run lint");
+  expect(latestActivity([image])).toBeNull();
 });
