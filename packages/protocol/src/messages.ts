@@ -1076,6 +1076,65 @@ const WorkspaceLabelSyncCursorSchema = z.object({
   afterSeq: z.number().int().nonnegative(),
 });
 
+export const SidebarOrderDataSchema = z.object({
+  projectOrder: z.array(z.string()),
+  projectGroupOrder: z.array(z.string()),
+  pinnedWorkspaceOrder: z.array(z.string()),
+  workspaceOrderByProject: z.record(z.string(), z.array(z.string())),
+});
+export const SidebarOrderSnapshotSchema = z.object({
+  revision: z.number().int().nonnegative(),
+  initialized: z.boolean(),
+  order: SidebarOrderDataSchema,
+});
+export type SidebarOrderData = z.infer<typeof SidebarOrderDataSchema>;
+export type SidebarOrderSnapshot = z.infer<typeof SidebarOrderSnapshotSchema>;
+export const SidebarOrderChangeSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("projects"), keys: z.array(z.string()) }),
+  z.object({ kind: z.literal("groups"), keys: z.array(z.string()) }),
+  z.object({ kind: z.literal("pins"), keys: z.array(z.string()) }),
+  z.object({ kind: z.literal("workspaces"), projectId: z.string(), keys: z.array(z.string()) }),
+]);
+export type SidebarOrderChange = z.infer<typeof SidebarOrderChangeSchema>;
+export const SidebarOrderGetRequestSchema = z.object({
+  type: z.literal("sidebar.order.get.request"),
+  requestId: z.string(),
+  subscribe: z.boolean(),
+});
+export const SidebarOrderInitializeRequestSchema = z.object({
+  type: z.literal("sidebar.order.initialize.request"),
+  requestId: z.string(),
+  order: SidebarOrderDataSchema,
+});
+export const SidebarOrderUpdateRequestSchema = z.object({
+  type: z.literal("sidebar.order.update.request"),
+  requestId: z.string(),
+  expectedRevision: z.number().int().nonnegative(),
+  change: SidebarOrderChangeSchema,
+});
+const SidebarOrderResultSchema = z.object({
+  requestId: z.string(),
+  accepted: z.boolean(),
+  snapshot: SidebarOrderSnapshotSchema.nullable(),
+  error: z.string().nullable(),
+});
+export const SidebarOrderGetResponseSchema = z.object({
+  type: z.literal("sidebar.order.get.response"),
+  payload: SidebarOrderResultSchema,
+});
+export const SidebarOrderInitializeResponseSchema = z.object({
+  type: z.literal("sidebar.order.initialize.response"),
+  payload: SidebarOrderResultSchema,
+});
+export const SidebarOrderUpdateResponseSchema = z.object({
+  type: z.literal("sidebar.order.update.response"),
+  payload: SidebarOrderResultSchema,
+});
+export const SidebarOrderChangedSchema = z.object({
+  type: z.literal("sidebar.order.changed"),
+  payload: SidebarOrderSnapshotSchema,
+});
+
 export const WorkspaceLabelListRequestSchema = z.object({
   type: z.literal("workspace.label.list.request"),
   requestId: z.string(),
@@ -3218,6 +3277,9 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ProjectRemoveRequestSchema,
   WorkspaceTitleSetRequestSchema,
   WorkspacePinSetRequestSchema,
+  SidebarOrderGetRequestSchema,
+  SidebarOrderInitializeRequestSchema,
+  SidebarOrderUpdateRequestSchema,
   WorkspaceLabelListRequestSchema,
   WorkspaceLabelAssignmentSetRequestSchema,
   WorkspaceLabelUpdateRequestSchema,
@@ -3713,6 +3775,7 @@ export const ServerInfoStatusPayloadSchema = z
         projectCustomIcon: z.boolean().optional(),
         // COMPAT(projectGroups): added in v0.7.3, remove gate after 2027-03-02.
         projectGroups: z.boolean().optional(),
+        sidebarOrderSync: z.boolean().optional(),
         // COMPAT(fsEntryOps): added in v0.3.0, remove gate after 2027-02-08.
         fsEntryOps: z.boolean().optional(),
         // COMPAT(fsEntryDuplicate): added in v0.3.0, remove gate after 2027-02-09.
@@ -6680,6 +6743,10 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ArtifactMessageSchema,
   AgentUpdateMessageSchema,
   WorkspaceUpdateMessageSchema,
+  SidebarOrderGetResponseSchema,
+  SidebarOrderInitializeResponseSchema,
+  SidebarOrderUpdateResponseSchema,
+  SidebarOrderChangedSchema,
   WorkspaceLabelListResponseSchema,
   WorkspaceLabelUpdateSchema,
   WorkspaceLabelAssignmentSetResponseSchema,

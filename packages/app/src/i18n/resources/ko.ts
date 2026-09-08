@@ -2,6 +2,7 @@ import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
 
 export const ko: TranslationResources = {
+  sidebarOrder: en.sidebarOrder,
   providerAccounts: en.providerAccounts,
   agentHandoff: {
     custom: "사용자 지정 설정",

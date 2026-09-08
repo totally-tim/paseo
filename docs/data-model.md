@@ -60,6 +60,7 @@ $PASEO_HOME/
 ├── projects/
 │   ├── projects.json                    # Project registry
 │   ├── workspaces.json                  # Workspace registry
+│   ├── sidebar-order.json               # Shared sidebar order and revision
 │   ├── workspace-labels.json            # Shared host-local label catalog
 │   ├── workspace-labels.transaction.json # Recoverable catalog/assignment compound commit
 │   └── icons/                           # Host-local custom project icon images
@@ -572,6 +573,23 @@ These small files are not validated as full Zod schemas but are persisted under 
 ## Client-side stores (App)
 
 These live in React Native `AsyncStorage` or browser `IndexedDB`, not on the daemon filesystem.
+
+### Sidebar ordering
+
+The daemon owns ordering for its projects, groups, workspaces, and pinned workspaces in
+`projects/sidebar-order.json`. A revision check prevents a stale client from overwriting a newer
+arrangement. Clients subscribe when loading the directory and reload after reconnecting; offline
+clients display their cached order and cannot submit reorders.
+
+On first use, choose **Ordering sync → Use this device’s order** in the sidebar display menu on
+the device whose arrangement you want to keep. Reading the order never initializes it, so a phone
+connecting first cannot replace the desktop arrangement. Only one import can win. The app retains
+its original device order separately from its shared-order cache until and after import.
+
+Ordering is host-local. A combined sidebar merges host sequences by server ID, keeping the first
+occurrence of shared group and project keys. Cross-host placement is not a separate preference.
+A multi-host change can partially succeed; failures remain visible for the affected hosts.
+Filters, collapsed sections, and pane layouts remain device-owned.
 
 ### Keying convention: directory-backed vs workspace-owned
 

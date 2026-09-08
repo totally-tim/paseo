@@ -1,3 +1,4 @@
+import { SidebarOrderControls } from "@/sidebar-order/controls";
 import {
   useCallback,
   useMemo,
@@ -200,6 +201,7 @@ export function SidebarDisplayPreferencesMenu(): ReactElement {
 
   const pages = useMemo<MenuPageDefinition[]>(() => {
     const definitions: MenuPageDefinition[] = [
+      { id: "orderSync", title: t("sidebarOrder.title"), content: <SidebarOrderControls /> },
       {
         id: "grouping",
         title: t("sidebar.display.grouping.label"),
@@ -310,6 +312,9 @@ export function SidebarDisplayPreferencesMenu(): ReactElement {
           sheetTitle={t("sidebar.display.heading")}
           testID="sidebar-display-preferences-content"
         >
+          <MenuSubTrigger id="orderSync" testID="sidebar-order-settings">
+            {t("sidebarOrder.title")}
+          </MenuSubTrigger>
           <MenuSubTrigger
             id="grouping"
             value={t(GROUPING_LABEL_KEYS[preferences.grouping])}

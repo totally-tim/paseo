@@ -1,4 +1,16 @@
 export const en = {
+  sidebarOrder: {
+    title: "Ordering sync",
+    import: "Use this device’s order",
+    pending: "Saving sidebar order…",
+    synced: "Order synced",
+    uninitialized: "Import the order from the device you want to keep.",
+    unsupported: "Update this host to sync ordering.",
+    offline: "Connect to this host to change ordering.",
+    loading: "Loading shared order…",
+    reload: "Reload shared order",
+    dismiss: "Dismiss",
+  },
   providerAccounts: {
     removed: "Removed from new agent selection",
     remove: "Remove account",

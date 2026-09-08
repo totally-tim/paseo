@@ -1,3 +1,4 @@
+import type { SidebarOrderData, SidebarOrderChange } from "@getpaseo/protocol/messages";
 import type { AccountOperation, AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import type { z } from "zod";
 import { CLIENT_CAPS, type ClientCapability } from "@getpaseo/protocol/client-capabilities";
@@ -2789,6 +2790,22 @@ export class DaemonClient {
       message: { type: "project.icon.set.request", projectId, source },
     });
     if (!payload.accepted) throw new Error(payload.error ?? "setProjectIcon rejected");
+  }
+
+  async getSidebarOrder(subscribe = true) {
+    return this.sendNamespacedCorrelatedSessionRequest<"sidebar.order.get.response">({
+      message: { type: "sidebar.order.get.request", subscribe },
+    });
+  }
+  async initializeSidebarOrder(order: SidebarOrderData) {
+    return this.sendNamespacedCorrelatedSessionRequest<"sidebar.order.initialize.response">({
+      message: { type: "sidebar.order.initialize.request", order },
+    });
+  }
+  async updateSidebarOrder(expectedRevision: number, change: SidebarOrderChange) {
+    return this.sendNamespacedCorrelatedSessionRequest<"sidebar.order.update.response">({
+      message: { type: "sidebar.order.update.request", expectedRevision, change },
+    });
   }
 
   async setProjectGroup(

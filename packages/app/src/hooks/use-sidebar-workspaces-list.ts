@@ -166,10 +166,12 @@ export function useSidebarWorkspacesList(options?: {
     });
 
     if (updates.projectOrder) {
-      orderStore.setProjectOrder(updates.projectOrder);
+      useSidebarOrderStore.setState({ projectOrder: updates.projectOrder });
     }
     for (const { projectViewKey, order } of updates.workspaceOrders) {
-      orderStore.setWorkspaceOrder(projectViewKey, order);
+      useSidebarOrderStore.setState((state) => ({
+        workspaceOrderByProject: { ...state.workspaceOrderByProject, [projectViewKey]: order },
+      }));
     }
   }, [persistedProjectOrder, projects]);
 

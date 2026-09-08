@@ -33,6 +33,7 @@ export type ProjectGroupReadiness =
   | { kind: "needs_host_update"; serverIds: string[] };
 
 export type ProjectGroupOutcome =
+  | { kind: "order_not_ready"; message: string }
   | { kind: "applied"; serverIds: string[] }
   | { kind: "needs_host_update"; serverIds: string[] }
   | { kind: "host_disconnected"; serverIds: string[] }

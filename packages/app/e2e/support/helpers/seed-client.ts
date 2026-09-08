@@ -1,3 +1,4 @@
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import path from "node:path";
 import { readFileSync } from "node:fs";
 import type { TerminalActivity } from "@getpaseo/protocol/terminal-activity";
@@ -27,7 +28,10 @@ interface SeedProjectDescriptor {
  * browser. Domain-specific helpers wrap it for their own flows; specs should
  * prefer those wrappers over reaching for this client directly.
  */
-export interface SeedDaemonClient {
+export interface SeedDaemonClient extends Pick<
+  DaemonClient,
+  "setProjectGroup" | "getSidebarOrder" | "updateSidebarOrder"
+> {
   connect(): Promise<void>;
   close(): Promise<void>;
   addProject(cwd: string): Promise<{

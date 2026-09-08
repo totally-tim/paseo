@@ -1,3 +1,4 @@
+import { sidebarOrderSync } from "@/sidebar-order";
 import type {
   DaemonClient,
   FetchAgentsEntry,
@@ -188,6 +189,7 @@ export class DirectorySync {
     this.unsubscribe?.();
     this.unsubscribe = null;
     workspaceLabels.disconnect(this.serverId);
+    sidebarOrderSync.disconnect(this.serverId);
     this.connection = connection;
     this.abortPendingSessionWaits();
     if (!connection.client || connection.status !== "online") return true;
@@ -295,6 +297,7 @@ export class DirectorySync {
     this.fullDemandSources.clear();
     this.routeDemandIds.clear();
     workspaceLabels.disconnect(this.serverId);
+    sidebarOrderSync.forget(this.serverId);
   }
 
   private hasDemand(): boolean {
@@ -622,17 +625,24 @@ export class DirectorySync {
       ...this.workspaces.snapshot(),
       checkpoint: this.cursors,
     });
-    if (this.getOnlineConnection()) await this.connectWorkspaceLabels();
+    if (this.getOnlineConnection()) await this.connectDirectoryMetadata();
   }
 
-  async connectWorkspaceLabels(): Promise<void> {
+  async connectDirectoryMetadata(): Promise<void> {
     const { client } = this.requireOnline();
     const serverInfo = client.getLastServerInfoMessage();
-    await workspaceLabels.connect({
-      serverId: this.serverId,
-      client,
-      supportsWorkspaceLabels: serverInfo?.features?.workspaceLabels === true,
-    });
+    await Promise.all([
+      sidebarOrderSync.connect(
+        this.serverId,
+        client,
+        serverInfo?.features?.sidebarOrderSync === true,
+      ),
+      workspaceLabels.connect({
+        serverId: this.serverId,
+        client,
+        supportsWorkspaceLabels: serverInfo?.features?.workspaceLabels === true,
+      }),
+    ]);
   }
 
   acceptWorkspaces(workspaces: readonly WorkspaceDescriptor[]): void {

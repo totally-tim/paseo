@@ -2,6 +2,7 @@ import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
 
 export const zhCN: TranslationResources = {
+  sidebarOrder: en.sidebarOrder,
   providerAccounts: en.providerAccounts,
   agentHandoff: {
     custom: "自定义配置",
