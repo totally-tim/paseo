@@ -18,4 +18,6 @@ Account lifecycle and persistence; selection and continuation validity; settings
 
 ## Retro log
 
+- 2026-09-08: PR review follow-up fixed account-loading validation, archived continuation actions, default-model quota selection, sidebar reconnect revisions, Kanban search/activity, and ACP notification ordering. Keep configuration transactions open until queued notifications drain; scope cached revision comparisons to a connection. Responsive settings checks must tolerate page remounts at breakpoints.
+
 - 2026-09-08: Reviewed account removal, ordering, activation, profile selection, usage presentation, and continuation. Added regression coverage for stable order, active account limits, explicit activation, and invalid continuation selections. Browser proof covers removal with retained login, restore, ordering, the missing-metrics context indicator, and tab-menu continuation against an isolated daemon. Additional coverage checks sticky model/pool/workload choices across resets and restarts, and account-specific tooltip quota. Live authenticated-provider and native-device proof remain separate.
