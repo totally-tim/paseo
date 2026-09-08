@@ -177,6 +177,7 @@ function AccountList({
 }) {
   const { t } = useTranslation();
   const accounts = useProviderAccounts(serverId);
+  // COMPAT(providerAccountOrdering): added after v1.2.0; remove after 2027-03-08.
   const canReorder = useHostFeature(serverId, "providerAccountOrdering");
   const [showRemoved, setShowRemoved] = useState(false);
   const toggleRemoved = useCallback(() => setShowRemoved((value) => !value), []);
@@ -197,7 +198,6 @@ function AccountList({
   );
   return (
     <>
-      {" "}
       {liveAccounts.map((account, index) => (
         <AccountRow
           key={account.id}

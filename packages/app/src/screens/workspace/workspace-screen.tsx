@@ -1,4 +1,4 @@
-import { useWorkspaceHandoff, useAgentCanContinue } from "@/agent-handoff/use-workspace-handoff";
+import { useWorkspaceHandoff, useContinuableTabs } from "@/agent-handoff/use-workspace-handoff";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import type { JsonValue } from "@getpaseo/protocol/agent-types";
 import { getOpenAgentTabLabel } from "@getpaseo/protocol/agent-labels";
@@ -526,6 +526,7 @@ function MobileWorkspaceTabOption({
   onCopyFilePath,
   onReloadAgent,
   onContinueAgent,
+  agentCanContinue,
   onRenameTab,
   onCloseTab,
   onCloseTabsAbove,
@@ -546,6 +547,7 @@ function MobileWorkspaceTabOption({
   onCopyFilePath: (path: string) => Promise<void> | void;
   onReloadAgent: (agentId: string) => Promise<void> | void;
   onContinueAgent?: (agentId: string) => void;
+  agentCanContinue: boolean;
   onRenameTab: (tab: WorkspaceTabDescriptor) => void;
   onCloseTab: (tabId: string) => Promise<void> | void;
   onCloseTabsAbove: (tabId: string) => Promise<void> | void;
@@ -570,10 +572,6 @@ function MobileWorkspaceTabOption({
       close: t("workspace.tabs.menu.close"),
     }),
     [t],
-  );
-  const agentCanContinue = useAgentCanContinue(
-    normalizedServerId,
-    tab.target.kind === "agent" ? tab.target.agentId : undefined,
   );
   const menuTestIDBase = `workspace-tab-menu-${tab.tabId}`;
   const menuEntries = buildWorkspaceTabMenuEntries({
@@ -669,6 +667,7 @@ const MobileWorkspaceTabSwitcher = memo(function MobileWorkspaceTabSwitcher({
   onCloseOtherTabs,
 }: MobileWorkspaceTabSwitcherProps) {
   const { t } = useTranslation();
+  const continuableTabs = useContinuableTabs(normalizedServerId, tabs);
   const [isOpen, setIsOpen] = useState(false);
   const anchorRef = useRef<View>(null);
   const tabIndexByKey = useMemo(() => {
@@ -707,6 +706,7 @@ const MobileWorkspaceTabSwitcher = memo(function MobileWorkspaceTabSwitcher({
       return (
         <MobileWorkspaceTabOption
           tab={tab}
+          agentCanContinue={continuableTabs[tab.tabId] ?? false}
           tabIndex={tabIndex}
           tabCount={tabs.length}
           normalizedServerId={normalizedServerId}
@@ -729,6 +729,7 @@ const MobileWorkspaceTabSwitcher = memo(function MobileWorkspaceTabSwitcher({
       );
     },
     [
+      continuableTabs,
       tabByKey,
       tabIndexByKey,
       tabs.length,

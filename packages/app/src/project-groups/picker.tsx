@@ -86,6 +86,8 @@ export function projectGroupOutcomeMessage(
   outcome: ProjectGroupOutcome,
 ): string | null {
   switch (outcome.kind) {
+    case "order_not_ready":
+      return outcome.message;
     case "applied":
       return null;
     case "needs_host_update":
@@ -280,14 +282,19 @@ function ProjectGroupRenamePage({
   const submit = useCallback(() => {
     if (!normalized || unchanged) return;
     void (async () => {
+      const members = resolveMembers();
+      const serverIds = new Set<string>();
+      for (const member of members) for (const host of member.hosts) serverIds.add(host.serverId);
       const applied = await mutation.run(() =>
-        setProjectGroupOnProjects({ projects: resolveMembers(), group: normalized }),
+        setProjectGroupOnProjects({ projects: members, group: normalized }),
       );
       // The group's place in the sidebar is stored under its key; a new name is a new key.
       if (applied) {
         useSidebarOrderStore
           .getState()
-          .renameProjectGroupOrderKey(projectGroupKey(name), projectGroupKey(normalized));
+          .renameProjectGroupOrderKey(projectGroupKey(name), projectGroupKey(normalized), [
+            ...serverIds,
+          ]);
       }
     })();
   }, [mutation, name, normalized, resolveMembers, unchanged]);

@@ -2,6 +2,7 @@ import { en, type TranslationResources } from "./en";
 import { pluginSettings } from "./plugin-settings";
 
 export const ptBR: TranslationResources = {
+  sidebarOrder: en.sidebarOrder,
   providerAccounts: en.providerAccounts,
   agentHandoff: {
     custom: "Configuração personalizada",

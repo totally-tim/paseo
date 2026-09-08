@@ -54,6 +54,7 @@ const sessionMock = vi.hoisted(() => {
       this.args.clientCapabilities = capabilities;
     });
     clearAgentTimelineSubscription = vi.fn();
+    clearSidebarOrderSubscription = () => {};
     getClientActivity = vi.fn(() => null);
     getSessionId = vi.fn(() => "mock-session-id");
     getPermissions = vi.fn(() => this.args.permissions as string[]);

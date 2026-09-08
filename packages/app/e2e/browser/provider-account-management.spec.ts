@@ -50,7 +50,10 @@ test("reorders, removes and restores accounts through settings", async ({ page }
   for (const width of [320, 375, 414, 768, 1280]) {
     await page.setViewportSize({ width, height: 900 });
     await expect(section).toBeVisible();
-    await section.getByTestId(moved).scrollIntoViewIfNeeded();
+    // Crossing the settings breakpoint remounts the page while the locator is scrolling.
+    await expect(async () => {
+      await section.getByTestId(moved).scrollIntoViewIfNeeded();
+    }).toPass({ timeout: 5_000 });
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true);

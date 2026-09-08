@@ -1,3 +1,4 @@
+import type { SidebarOrderStore } from "./sidebar-order-store.js";
 import { handleContinuationRequest } from "./agent-continuation/session.js";
 import type { AgentContinuationService } from "./agent-continuation/service.js";
 import { handleAccountCatalog } from "./provider-accounts/account-catalog.js";
@@ -469,6 +470,7 @@ export interface SessionOptions {
   downloadTokenStore: DownloadTokenStore;
   pushNotifications: PushNotifications;
   paseoHome: string;
+  sidebarOrderStore?: SidebarOrderStore;
   worktreesRoot?: string;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
@@ -683,6 +685,8 @@ export class Session {
     | null;
   private readonly sessionLogger: pino.Logger;
   private readonly paseoHome: string;
+  private readonly sidebarOrderStore?: SidebarOrderStore;
+  private readonly sidebarOrderSubscriptions = new Map<object | undefined, () => void>();
   private readonly projectIcons: ProjectIconReader;
   private readonly worktreesRoot: string | undefined;
   private readonly rewindInitiators = new Map<string, object | undefined>();
@@ -782,6 +786,7 @@ export class Session {
       downloadTokenStore,
       pushNotifications,
       paseoHome,
+      sidebarOrderStore,
       worktreesRoot,
       agentManager,
       agentStorage,
@@ -836,6 +841,8 @@ export class Session {
     this.onWorkspaceRecovered = onWorkspaceRecovered ?? null;
     this.pushNotifications = pushNotifications;
     this.paseoHome = paseoHome;
+    this.sidebarOrderStore = sidebarOrderStore;
+
     this.agentRequests = options.agentRequests;
     this.projectIcons = new ProjectIconReader(paseoHome);
     this.worktreesRoot = worktreesRoot;
@@ -1154,6 +1161,11 @@ export class Session {
       this.viewedTimelineAgentIdsBySource.clear();
       this.viewedTimelineAgentIds.clear();
     }
+  }
+
+  clearSidebarOrderSubscription(source?: object): void {
+    this.sidebarOrderSubscriptions.get(source)?.();
+    this.sidebarOrderSubscriptions.delete(source);
   }
 
   clearAgentTimelineSubscription(source: object): void {
@@ -2025,6 +2037,7 @@ export class Session {
       this.dispatchAgentLifecycleMessage(msg) ??
       this.dispatchAgentConfigMessage(msg) ??
       this.dispatchCheckoutMessage(msg) ??
+      this.dispatchSidebarOrderMessage(msg, source) ??
       this.dispatchWorkspaceLifecycleMessage(msg) ??
       this.dispatchWorkspaceFileMessage(msg, source) ??
       this.dispatchProviderMessage(msg) ??
@@ -2625,6 +2638,81 @@ export class Session {
       return this.handleWorkspaceSetupRunRequest(msg);
     }
     return undefined;
+  }
+
+  private dispatchSidebarOrderMessage(
+    msg: SessionInboundMessage,
+    source?: object,
+  ): Promise<void> | undefined {
+    switch (msg.type) {
+      case "sidebar.order.get.request":
+      case "sidebar.order.initialize.request":
+      case "sidebar.order.update.request":
+        return this.handleSidebarOrder(msg, source);
+      default:
+        return undefined;
+    }
+  }
+  private async handleSidebarOrder(
+    request: Extract<
+      SessionInboundMessage,
+      {
+        type:
+          | "sidebar.order.get.request"
+          | "sidebar.order.initialize.request"
+          | "sidebar.order.update.request";
+      }
+    >,
+    source?: object,
+  ): Promise<void> {
+    const responseTypes = {
+      "sidebar.order.get.request": "sidebar.order.get.response",
+      "sidebar.order.initialize.request": "sidebar.order.initialize.response",
+      "sidebar.order.update.request": "sidebar.order.update.response",
+    } as const;
+    const type = responseTypes[request.type];
+    try {
+      const store = this.sidebarOrderStore;
+      if (!store) throw new Error("Sidebar ordering unavailable");
+      if (request.type === "sidebar.order.get.request") {
+        this.clearSidebarOrderSubscription(source);
+        if (request.subscribe && !this.isCleanedUp) {
+          this.sidebarOrderSubscriptions.set(
+            source,
+            store.subscribe((snapshot) =>
+              this.emitForSource({ type: "sidebar.order.changed", payload: snapshot }, source),
+            ),
+          );
+        }
+        const snapshot = await store.get();
+        this.emitForSource(
+          {
+            type,
+            payload: { requestId: request.requestId, accepted: true, error: null, snapshot },
+          },
+          source,
+        );
+      } else {
+        const result =
+          request.type === "sidebar.order.initialize.request"
+            ? await store.initialize(request.order)
+            : await store.update(request.expectedRevision, request.change);
+        this.emitForSource({ type, payload: { requestId: request.requestId, ...result } }, source);
+      }
+    } catch (error) {
+      this.emitForSource(
+        {
+          type,
+          payload: {
+            requestId: request.requestId,
+            accepted: false,
+            snapshot: null,
+            error: getErrorMessage(error),
+          },
+        },
+        source,
+      );
+    }
   }
 
   private dispatchWorkspaceLabelMessage(msg: SessionInboundMessage): Promise<void> | undefined {
@@ -8015,6 +8103,8 @@ export class Session {
     this.unsubscribePluginChanges = null;
     this.unsubscribeWorkspaceMutations?.();
     this.unsubscribeWorkspaceMutations = null;
+    for (const unsubscribe of this.sidebarOrderSubscriptions.values()) unsubscribe();
+    this.sidebarOrderSubscriptions.clear();
     this.workspaceLabelSubscription?.unsubscribe();
     this.workspaceLabelSubscription = null;
     this.agentUpdates.dispose();

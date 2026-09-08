@@ -1,8 +1,20 @@
+import type { SidebarOrderData } from "@getpaseo/protocol/messages";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { z } from "zod";
 import { createValidatedPersistStorage } from "@/storage/validated-persist-storage";
+
+import { renameOrderKey, type LocalOrderChange } from "@/sidebar-order/change";
+export { renameOrderKey, type LocalOrderChange } from "@/sidebar-order/change";
+let orderWriter: ((change: LocalOrderChange) => void) | null = null;
+export function setSidebarOrderWriter(writer: (change: LocalOrderChange) => void): void {
+  orderWriter = writer;
+}
+/** Replica updates and automatic discovery never invoke user mutation handlers. */
+export function applySidebarOrder(order: SidebarOrderData): void {
+  useSidebarOrderStore.setState(order);
+}
 
 interface SidebarOrderStoreState {
   projectOrder: string[];
@@ -11,15 +23,23 @@ interface SidebarOrderStoreState {
   pinnedWorkspaceOrder: string[];
   workspaceOrderByProject: Record<string, string[]>;
   getProjectOrder: () => string[];
-  setProjectOrder: (keys: string[]) => void;
+  setProjectOrder: (keys: string[], serverIds?: readonly string[]) => void;
   getProjectGroupOrder: () => string[];
-  setProjectGroupOrder: (keys: string[]) => void;
+  setProjectGroupOrder: (keys: string[], serverIds?: readonly string[]) => void;
   /** A renamed group keeps its place: its entry moves to the new key. */
-  renameProjectGroupOrderKey: (fromKey: string, toKey: string) => void;
+  renameProjectGroupOrderKey: (
+    fromKey: string,
+    toKey: string,
+    serverIds?: readonly string[],
+  ) => void;
   getPinnedWorkspaceOrder: () => string[];
-  setPinnedWorkspaceOrder: (keys: string[]) => void;
+  setPinnedWorkspaceOrder: (keys: string[], serverIds?: readonly string[]) => void;
   getWorkspaceOrder: (projectViewKey: string) => string[];
-  setWorkspaceOrder: (projectViewKey: string, keys: string[]) => void;
+  setWorkspaceOrder: (
+    projectViewKey: string,
+    keys: string[],
+    serverIds?: readonly string[],
+  ) => void;
 }
 
 interface SidebarOrderPersistedState {
@@ -141,12 +161,6 @@ export function migrateSidebarOrderState(persistedState: unknown): {
   };
 }
 
-export function renameOrderKey(order: string[], fromKey: string, toKey: string): string[] {
-  if (fromKey === toKey || !order.includes(fromKey)) return order;
-  const withoutTarget = order.filter((key) => key !== toKey);
-  return withoutTarget.map((key) => (key === fromKey ? toKey : key));
-}
-
 export const useSidebarOrderStore = create<SidebarOrderStoreState>()(
   persist(
     (set, get) => ({
@@ -155,22 +169,36 @@ export const useSidebarOrderStore = create<SidebarOrderStoreState>()(
       pinnedWorkspaceOrder: [],
       workspaceOrderByProject: {},
       getProjectOrder: () => get().projectOrder,
-      setProjectOrder: (keys) => {
+      setProjectOrder: (keys, serverIds = []) => {
         const normalized = normalizeKeys(keys);
+        if (orderWriter) {
+          orderWriter({ serverIds, kind: "projects", keys: normalized });
+          return;
+        }
         set({ projectOrder: normalized });
       },
       getProjectGroupOrder: () => get().projectGroupOrder,
-      setProjectGroupOrder: (keys) => {
+      setProjectGroupOrder: (keys, serverIds = []) => {
+        if (orderWriter) {
+          orderWriter({ serverIds, kind: "groups", keys: normalizeKeys(keys) });
+          return;
+        }
         set({ projectGroupOrder: normalizeKeys(keys) });
       },
-      renameProjectGroupOrderKey: (fromKey, toKey) => {
-        set((state) => ({
-          projectGroupOrder: renameOrderKey(state.projectGroupOrder, fromKey, toKey),
-        }));
+      renameProjectGroupOrderKey: (fromKey, toKey, serverIds = []) => {
+        if (orderWriter) {
+          orderWriter({ serverIds, kind: "renameGroup", fromKey, toKey });
+          return;
+        }
+        get().setProjectGroupOrder(renameOrderKey(get().projectGroupOrder, fromKey, toKey));
       },
       getPinnedWorkspaceOrder: () => get().pinnedWorkspaceOrder,
-      setPinnedWorkspaceOrder: (keys) => {
+      setPinnedWorkspaceOrder: (keys, serverIds = []) => {
         const normalized = normalizeKeys(keys);
+        if (orderWriter) {
+          orderWriter({ serverIds, kind: "pins", keys: normalized });
+          return;
+        }
         set({ pinnedWorkspaceOrder: normalized });
       },
       getWorkspaceOrder: (projectViewKey) => {
@@ -178,10 +206,14 @@ export const useSidebarOrderStore = create<SidebarOrderStoreState>()(
         if (!scope) return [];
         return get().workspaceOrderByProject[scope] ?? [];
       },
-      setWorkspaceOrder: (projectViewKey, keys) => {
+      setWorkspaceOrder: (projectViewKey, keys, serverIds = []) => {
         const scope = projectViewKey.trim();
         if (!scope) return;
         const normalized = normalizeKeys(keys);
+        if (orderWriter) {
+          orderWriter({ serverIds, kind: "workspaces", projectViewKey: scope, keys: normalized });
+          return;
+        }
         set((state) => ({
           workspaceOrderByProject: {
             ...state.workspaceOrderByProject,

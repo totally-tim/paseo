@@ -1,3 +1,4 @@
+import { sidebarOrderSync } from "@/sidebar-order";
 import type {
   DaemonClient,
   FetchAgentsEntry,
@@ -155,6 +156,8 @@ export class DirectorySync {
   private readonly routeDemandIds = new Set<string>();
   private readonly fullDemandSources = new Set<object>();
   private demandRefresh: Promise<void> | null = null;
+  private metadataConnection: { source: DirectorySourceToken; promise: Promise<void> } | null =
+    null;
   private satisfiedDemandSource: DirectorySourceToken | null = null;
   private cursors: DirectoryCheckpoint = {};
 
@@ -188,6 +191,7 @@ export class DirectorySync {
     this.unsubscribe?.();
     this.unsubscribe = null;
     workspaceLabels.disconnect(this.serverId);
+    sidebarOrderSync.disconnect(this.serverId);
     this.connection = connection;
     this.abortPendingSessionWaits();
     if (!connection.client || connection.status !== "online") return true;
@@ -268,7 +272,18 @@ export class DirectorySync {
     else this.fullDemandSources.delete(source);
     if (!wasDemanded && this.fullDemandSources.size > 0) {
       void this.loadCachedDirectory().catch(() => undefined);
-      if (this.getOnlineConnection()) void this.requestDemandRefresh().catch(() => undefined);
+      const connection = this.getOnlineConnection();
+      if (connection)
+        void this.requestDemandRefresh()
+          .then(() => {
+            if (
+              this.fullDemandSources.size > 0 &&
+              this.isCurrent(connection.client, connection.source)
+            )
+              return this.connectDirectoryMetadata();
+            return undefined;
+          })
+          .catch(() => undefined);
     }
   }
 
@@ -295,6 +310,7 @@ export class DirectorySync {
     this.fullDemandSources.clear();
     this.routeDemandIds.clear();
     workspaceLabels.disconnect(this.serverId);
+    sidebarOrderSync.forget(this.serverId);
   }
 
   private hasDemand(): boolean {
@@ -622,17 +638,36 @@ export class DirectorySync {
       ...this.workspaces.snapshot(),
       checkpoint: this.cursors,
     });
-    if (this.getOnlineConnection()) await this.connectWorkspaceLabels();
+    if (this.getOnlineConnection()) await this.connectDirectoryMetadata();
   }
 
-  async connectWorkspaceLabels(): Promise<void> {
-    const { client } = this.requireOnline();
+  connectDirectoryMetadata(): Promise<void> {
+    const { client, source } = this.requireOnline();
+    const previous = this.metadataConnection;
+    if (
+      previous?.source.clientGeneration === source.clientGeneration &&
+      previous.source.connectionEpoch === source.connectionEpoch
+    )
+      return previous.promise;
     const serverInfo = client.getLastServerInfoMessage();
-    await workspaceLabels.connect({
-      serverId: this.serverId,
-      client,
-      supportsWorkspaceLabels: serverInfo?.features?.workspaceLabels === true,
+    const promise = Promise.all([
+      sidebarOrderSync.connect(
+        this.serverId,
+        client,
+        serverInfo?.features?.sidebarOrderSync === true,
+      ),
+      workspaceLabels.connect({
+        serverId: this.serverId,
+        client,
+        supportsWorkspaceLabels: serverInfo?.features?.workspaceLabels === true,
+      }),
+    ]).then(() => undefined);
+    const metadataConnection = { source, promise };
+    this.metadataConnection = metadataConnection;
+    void promise.catch(() => {
+      if (this.metadataConnection === metadataConnection) this.metadataConnection = null;
     });
+    return promise;
   }
 
   acceptWorkspaces(workspaces: readonly WorkspaceDescriptor[]): void {

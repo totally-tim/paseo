@@ -1,3 +1,4 @@
+import { SidebarOrderStore } from "./sidebar-order-store.js";
 import { AgentRequests } from "./agent/requests/index.js";
 import { WebSocket, WebSocketServer } from "ws";
 import type { IncomingMessage, Server as HTTPServer } from "http";
@@ -561,6 +562,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly workspaceAutoName: WorkspaceAutoName;
   private readonly downloadTokenStore: DownloadTokenStore;
   private readonly paseoHome: string;
+  private readonly sidebarOrderStore: SidebarOrderStore;
   private readonly worktreesRoot: string | undefined;
   private readonly daemonConfigStore: DaemonConfigStore;
   private readonly pushNotifications: PushNotifications;
@@ -688,6 +690,9 @@ export class VoiceAssistantWebSocketServer {
     this.workspaceAutoName = workspaceAutoName;
     this.downloadTokenStore = downloadTokenStore;
     this.paseoHome = paseoHome;
+    this.sidebarOrderStore = new SidebarOrderStore(
+      join(paseoHome, "projects", "sidebar-order.json"),
+    );
     this.worktreesRoot = daemonRuntimeConfig?.worktreesRoot;
     this.daemonConfigStore = daemonConfigStore;
     this.mcpBaseUrl = mcpBaseUrl;
@@ -1420,6 +1425,7 @@ export class VoiceAssistantWebSocketServer {
       downloadTokenStore: this.downloadTokenStore,
       pushNotifications: this.pushNotifications,
       paseoHome: this.paseoHome,
+      sidebarOrderStore: this.sidebarOrderStore,
       worktreesRoot: this.worktreesRoot,
       agentManager: this.agentManager,
       continuations: this.continuations,
@@ -1739,6 +1745,7 @@ export class VoiceAssistantWebSocketServer {
         agentHandoff: true,
         agentContinuation: Boolean(this.agentManager.continuations),
         providerAccounts: Boolean(this.agentManager.accounts),
+        // COMPAT(providerAccountOrdering): added after v1.2.0; remove after 2027-03-08.
         providerAccountOrdering: Boolean(this.agentManager.accounts),
         // COMPAT(agentForkContextCursor): added in v0.1.108, remove gate after 2027-01-14.
         agentForkContextCursor: true,
@@ -1781,6 +1788,8 @@ export class VoiceAssistantWebSocketServer {
         projectCustomIcon: true,
         // COMPAT(projectGroups): added in v0.7.3, remove gate after 2027-03-02.
         projectGroups: true,
+        // COMPAT(sidebarOrderSync): added after v1.2.0; remove this host gate after 2027-03-08.
+        sidebarOrderSync: true,
         // COMPAT(fsEntryOps): added in v0.3.0, remove gate after 2027-02-08.
         fsEntryOps: true,
         // COMPAT(fsEntryDuplicate): added in v0.3.0, remove gate after 2027-02-09.
@@ -1906,6 +1915,7 @@ export class VoiceAssistantWebSocketServer {
     this.sessions.delete(ws);
     connection.sockets.delete(ws);
     connection.session.clearAgentTimelineSubscription(ws);
+    connection.session.clearSidebarOrderSubscription(ws);
     this.socketIdentities.delete(ws);
 
     if (connection.sockets.size === 0) {

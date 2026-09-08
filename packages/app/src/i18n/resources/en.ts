@@ -1,4 +1,19 @@
 export const en = {
+  sidebarOrder: {
+    title: "Ordering sync",
+    import: "Use this device’s order",
+    pending: "Saving sidebar order…",
+    unsaved: "Sidebar change not saved",
+    retry: "Retry failed change",
+    discard: "Discard failed change",
+    synced: "Order synced",
+    uninitialized: "Import the order from the device you want to keep.",
+    unsupported: "Update this host to sync ordering.",
+    offline: "Connect to this host to change ordering.",
+    loading: "Loading shared order…",
+    reload: "Reload shared order",
+    dismiss: "Dismiss",
+  },
   providerAccounts: {
     contextUnavailable: "Context usage not reported",
     automaticHelp: "Stays on one account per model until its capacity runs out.",

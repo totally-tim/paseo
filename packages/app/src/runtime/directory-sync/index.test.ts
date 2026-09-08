@@ -5,7 +5,7 @@ import {
   type ReplicaSqliteConnection,
   type SqliteValue,
 } from "@/runtime/replica-cache/row-store-sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { SessionOutboundMessage } from "@getpaseo/protocol/messages";
 import {
@@ -410,9 +410,31 @@ describe("DirectorySync session readiness", () => {
     directory.dispose();
   });
 
+  it("connects metadata when full demand follows a completed agent route", async () => {
+    const serverId = "route-before-sidebar";
+    const { client, directory } = createDirectory(serverId);
+    const store = useSessionStore.getState();
+    store.initializeSession(serverId, client as unknown as DaemonClient, 1);
+    store.updateSessionServerInfo(serverId, {
+      serverId,
+      hostname: null,
+      version: "test",
+      features: { workspaceMultiplicity: true },
+    });
+    const metadata = vi.spyOn(directory, "connectDirectoryMetadata");
+    directory.setAgentRouteDemand(["agent-1"]);
+    await directory.refreshDemand();
+    expect(metadata).not.toHaveBeenCalled();
+    directory.setDemand({}, true);
+    await expect.poll(() => metadata.mock.calls.length).toBe(1);
+    expect(client.fetchAgentsCalls).toBe(1);
+    directory.dispose();
+  });
+
   it("coalesces overlapping route and full-directory demand", async () => {
     const serverId = "coalesced-directory-demand";
     const { client, directory } = createDirectory(serverId);
+    const metadata = vi.spyOn(directory, "connectDirectoryMetadata");
     const releaseAgents = client.holdAgentFetch();
     const releaseWorkspaces = client.holdWorkspaceFetch();
     const store = useSessionStore.getState();
@@ -442,6 +464,7 @@ describe("DirectorySync session readiness", () => {
     });
     await directory.refreshDemand();
 
+    await expect.poll(() => metadata.mock.calls.length).toBe(1);
     expect(client.fetchAgentsCalls).toBe(1);
     expect(client.fetchWorkspacesCalls).toBe(1);
     directory.dispose();

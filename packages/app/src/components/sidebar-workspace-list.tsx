@@ -1,3 +1,6 @@
+import { sidebarOrderSync } from "@/sidebar-order";
+import { SidebarOrderNotice } from "@/sidebar-order/controls";
+import { applyProjectOrderWrite } from "@/components/sidebar/project-order-epoch";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import {
   View,
@@ -192,11 +195,7 @@ import type { HostBadgeModel } from "@/hosts/appearance";
 import { useHostBadges } from "@/hosts/use-host-badges";
 import { useSidebarRowItems } from "@/components/sidebar/display-preferences/model";
 import { PullRequestStateIcon } from "@/git/pull-request-state-icon";
-import {
-  settleProjectOrder,
-  writeProjectOrder,
-  type ProjectOrderHandle,
-} from "@/components/sidebar/project-order-writer";
+import { writeProjectOrder } from "@/components/sidebar/project-order-writer";
 import {
   beginProjectGroupMove,
   finishProjectGroupMove,
@@ -2064,6 +2063,7 @@ export function SidebarWorkspaceList({
           currentOrder,
           reorderedVisibleKeys: reorderedWorkspaceKeys,
         }),
+        [...new Set(reorderedWorkspaces.map((workspace) => workspace.serverId))],
       );
     },
     [getPinnedWorkspaceOrder, setPinnedWorkspaceOrder],
@@ -2137,7 +2137,12 @@ export function SidebarWorkspaceList({
       />
     );
 
-  return content;
+  return (
+    <>
+      <SidebarOrderNotice />
+      {content}
+    </>
+  );
 }
 
 /**
@@ -2346,11 +2351,16 @@ function ProjectModeList({
     });
   }, [creatingWorkspaceIds, projects]);
 
-  // Every project-order write goes through the module-owned writer, which keeps one history of
-  // the writes still waiting on a host (see project-order-writer.ts).
+  // Same-list reorders retain their splice semantics; the store submits the resulting host scopes.
   const projectOrderIO = useMemo(
-    () => ({ getOrder: getProjectOrder, setOrder: setProjectOrder }),
-    [getProjectOrder, setProjectOrder],
+    () => ({
+      getOrder: getProjectOrder,
+      setOrder: (keys: string[]) =>
+        setProjectOrder(keys, [
+          ...new Set(projects.flatMap((project) => project.hosts.map((host) => host.serverId))),
+        ]),
+    }),
+    [getProjectOrder, setProjectOrder, projects],
   );
 
   // Every project list is a partition of the one stored order, so a drag inside a list splices
@@ -2398,10 +2408,7 @@ function ProjectModeList({
       ),
     [allProjects],
   );
-  // The order is written before the host answers: the replica push and the RPC response race,
-  // and writing the order after the push would move the row twice. While any such write is
-  // pending, every project-order write goes through the epoch (see project-order-writer.ts), so
-  // a refusal drops that one write and nothing the user did since.
+  // Commit the placement first; then apply its order intent to the latest shared snapshot.
   const applyGroupMove = useCallback(
     async (
       viewKey: string,
@@ -2410,6 +2417,11 @@ function ProjectModeList({
     ) => {
       const project = projects.find((entry) => entry.viewKey === viewKey);
       if (!project) return;
+      const readiness = sidebarOrderSync.readiness(project.hosts.map((host) => host.serverId));
+      if (readiness) {
+        toast.error(readiness);
+        return;
+      }
       const claim = beginProjectGroupMove({ viewKey, target, groupKeysByViewKey });
       if (!claim) return;
       let accepted = false;
@@ -2420,16 +2432,19 @@ function ProjectModeList({
           position,
           arrivingKeys: claim.arrivingKeys,
         });
-        const handle: ProjectOrderHandle | null = write
-          ? writeProjectOrder(projectOrderIO, write, "pending")
-          : null;
-        // A throw is a failed write with no host named: the same rollback and the same toast.
+
+        // A failed group change leaves the shared ordering untouched.
         const outcome = await setProjectGroup({ project, group: target.groupName }).catch(
           (): ProjectGroupOutcome => ({ kind: "failed", serverIds: [] }),
         );
         const message = projectGroupOutcomeMessage(t, outcome);
         accepted = message === null;
-        if (handle) settleProjectOrder(projectOrderIO, handle, accepted ? "accepted" : "refused");
+        if (accepted && write)
+          await sidebarOrderSync.write({
+            serverIds: project.hosts.map((host) => host.serverId),
+            kind: "projects",
+            keys: applyProjectOrderWrite(projectOrderIO.getOrder(), write),
+          });
         if (message) toast.error(message);
       } finally {
         finishProjectGroupMove({ viewKey, accepted });
@@ -2497,6 +2512,7 @@ function ProjectModeList({
           currentOrder: currentWorkspaceOrder,
           reorderedVisibleKeys: reorderedWorkspaceKeys,
         }),
+        [...new Set(reorderedWorkspaces.map((workspace) => workspace.serverId))],
       );
     },
     [getWorkspaceOrder, setWorkspaceOrder],
@@ -2611,9 +2627,10 @@ function ProjectModeList({
           visibleKeys: projectGroups.map((group) => group.key),
           nextKeys: groups.map((group) => group.key),
         }),
+        [...new Set(projects.flatMap((project) => project.hosts.map((host) => host.serverId)))],
       );
     },
-    [allProjectGroupKeys, getProjectGroupOrder, projectGroups, setProjectGroupOrder],
+    [allProjectGroupKeys, getProjectGroupOrder, projectGroups, setProjectGroupOrder, projects],
   );
   const handleGroupReorder = useCallback(
     ({ activeGroupKey, overGroupKey }: ProjectGroupReorderInput) => {
