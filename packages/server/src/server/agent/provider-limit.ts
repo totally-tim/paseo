@@ -42,7 +42,20 @@ export function claudeLimitNotification(info: {
   };
 }
 
-export function codexLimitNotification(errorInfo: unknown): LimitNotification | null {
+export function codexLimitNotification(
+  errorInfo: unknown,
+  origin: "foreground" | "subagent" = "foreground",
+): LimitNotification | null {
+  // Remember the shared account rejection without attributing it to the parent turn.
+  if (errorInfo === "usageLimitExceeded" && origin === "subagent")
+    return {
+      type: "notification",
+      code: "provider_subagent_capacity",
+      capacityScope: "account",
+      level: "warning",
+      message:
+        "A Codex subagent reached its usage limit. Inspect its result before deciding how to continue.",
+    };
   if (errorInfo === "usageLimitExceeded")
     return {
       type: "notification",

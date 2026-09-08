@@ -10,6 +10,7 @@ export const AgentContinuationStatusSchema = z.object({
   rootAgentId: z.string(),
   agentId: z.string(),
   status: z.enum(["continuing", "waiting", "attention", "cancelled", "active"]),
+  trigger: z.enum(["manual", "capacity"]).optional(),
   reason: z.string(),
   updatedAt: z.string(),
   nextCheckAt: z.string().optional(),

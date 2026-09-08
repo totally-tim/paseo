@@ -163,6 +163,9 @@ export async function createContinuationTestDaemon() {
           message: "The provider confirmed a usage limit.",
         },
       });
+      sessions
+        .get(accountId)
+        ?.emit({ type: "turn_failed", provider: "codex", error: "Usage limit reached" });
     },
     finish(accountId: string) {
       sessions.get(accountId)?.finish();
