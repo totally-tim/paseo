@@ -6,8 +6,7 @@ import { useCallback, useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { formatSince, type InboxCard } from "./lanes";
 import { ActionButton } from "./question-card";
-import { describeToolCall, lastToolCall } from "./detail-text";
-import { lastAssistantLine } from "./timeline-text";
+import { lastAssistantLine, latestActivity } from "./timeline-text";
 import type { Agent, PaseoApi, PermissionResponse } from "./types";
 
 import { OperationFeedback, ReplyComposer, RequestControls } from "./controls";
@@ -61,11 +60,7 @@ export function useWorkingActivity(paseo: PaseoApi, agent: Agent, enabled: boole
       const page = await paseo.agents
         .ref(agent.id)
         .timeline.refetch({ direction: "tail", limit: 8, projection: "projected" });
-      const item = lastToolCall(page.entries.map((entry) => entry.item));
-      return (
-        lastAssistantLine(page.entries.map((entry) => entry.item)) ??
-        (item ? describeToolCall(item) : null)
-      );
+      return latestActivity(page.entries.map((entry) => entry.item));
     },
   });
 }

@@ -656,11 +656,14 @@ class AcpRuntime {
     let committedConfig: ProviderConfigState | null = null;
     try {
       for (const change of ordered) await this.applyConfigChange(change);
+      // ACP notifications run on a separate lane; keep them inside this transaction.
+      await this.drainNotifications();
       committedConfig =
         this.stagedTransformerConfig ?? toProviderConfigState(this.modes, this.configOptions);
     } catch (error) {
       try {
         await this.restoreConfig(previousModes, previousOptions);
+        await this.drainNotifications();
       } catch (rollbackError) {
         const failure = new AggregateError(
           [error, rollbackError],

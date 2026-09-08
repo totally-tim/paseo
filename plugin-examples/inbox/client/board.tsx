@@ -322,10 +322,8 @@ export function InboxBoard({
 
   const store = getInboxStore();
   const interactionRevision = useRef(0);
-  const lanes = useMemo(
-    () => searchLanes(boardLanes(snapshot, workspaceId), search),
-    [snapshot, workspaceId, search],
-  );
+  const unfilteredLanes = useMemo(() => boardLanes(snapshot, workspaceId), [snapshot, workspaceId]);
+  const lanes = useMemo(() => searchLanes(unfilteredLanes, search), [unfilteredLanes, search]);
   const ordered = useMemo(() => LANE_ORDER.flatMap((lane) => lanes[lane]), [lanes]);
   const openCard = ordered.find((card) => card.agent.id === openCardId) ?? null;
   const open = useCallback((card: InboxCard) => {
@@ -362,11 +360,14 @@ export function InboxBoard({
   const pendingOpenAgentId = snapshot.pendingOpenAgentId;
   useEffect(() => {
     if (!isActive || workspaceId || !pendingOpenAgentId || !store) return;
-    const card = ordered.find((item) => item.agent.id === pendingOpenAgentId);
+    const card = LANE_ORDER.flatMap((lane) => unfilteredLanes[lane]).find(
+      (item) => item.agent.id === pendingOpenAgentId,
+    );
     if (!card) return;
+    setSearch("");
     open(card);
     store.clearPendingOpen();
-  }, [isActive, workspaceId, pendingOpenAgentId, store, ordered, open]);
+  }, [isActive, workspaceId, pendingOpenAgentId, store, unfilteredLanes, open]);
 
   const candidates = useCallback(() => {
     const current = store?.getSnapshot();

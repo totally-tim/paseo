@@ -1,3 +1,4 @@
+import { describeToolCall } from "./detail-text";
 import type { TimelineItem } from "./types";
 
 export type PeekRole = "you" | "agent" | "tool" | "thinking" | "system";
@@ -59,6 +60,18 @@ export function lastAssistantLine(items: readonly TimelineItem[]): string | null
       const line = firstLine(item.text);
       if (line) return line;
     }
+  }
+  return null;
+}
+
+export function latestActivity(items: readonly TimelineItem[]): string | null {
+  for (let index = items.length - 1; index >= 0; index--) {
+    const item = items[index];
+    if (item.type === "assistant_message") {
+      const text = firstLine(item.text);
+      if (text) return text;
+    }
+    if (item.type === "tool_call") return describeToolCall(item);
   }
   return null;
 }

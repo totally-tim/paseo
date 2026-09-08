@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { firstLine, itemToPeekRow, lastAssistantLine } from "./timeline-text";
+import { firstLine, itemToPeekRow, lastAssistantLine, latestActivity } from "./timeline-text";
 import type { TimelineItem } from "./types";
 
 describe("timeline text", () => {
@@ -63,4 +63,23 @@ describe("timeline text", () => {
     expect(lastAssistantLine(items)).toBe("last line");
     expect(lastAssistantLine([])).toBeNull();
   });
+});
+
+it("chooses readable activity in timeline order", () => {
+  const assistant = { type: "assistant_message", text: "Checking files" } as TimelineItem;
+  const tool = {
+    type: "tool_call",
+    name: "Bash",
+    status: "running",
+    callId: "call",
+    detail: { type: "shell", command: "npm run lint" },
+  } as TimelineItem;
+  const image = {
+    type: "assistant_message",
+    text: "![Image](file:///tmp/image.png)",
+  } as TimelineItem;
+  expect(latestActivity([assistant, tool])).toBe("Bash: npm run lint");
+  expect(latestActivity([tool, assistant])).toBe("Checking files");
+  expect(latestActivity([assistant, tool, image])).toBe("Bash: npm run lint");
+  expect(latestActivity([image])).toBeNull();
 });
