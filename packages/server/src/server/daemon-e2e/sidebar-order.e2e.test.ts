@@ -54,3 +54,73 @@ test("two clients share imported order, reject stale writes and reload on reconn
     await daemon.close();
   }
 }, 60000);
+
+test("sidebar replies and subscriptions stay on their physical socket", async () => {
+  const daemon = await createTestPaseoDaemon();
+  const config = { url: `ws://127.0.0.1:${daemon.port}/ws`, clientId: "shared-sidebar-client" };
+  const legacy = new DaemonClient(config);
+  const first = new DaemonClient(config);
+  const second = new DaemonClient(config);
+  const traffic = (client: DaemonClient) => {
+    const types: string[] = [];
+    for (const type of [
+      "sidebar.order.get.response",
+      "sidebar.order.initialize.response",
+      "sidebar.order.update.response",
+      "sidebar.order.changed",
+    ] as const) {
+      client.on(type, () => types.push(type));
+    }
+    return types;
+  };
+  const legacyTraffic = traffic(legacy);
+  const firstTraffic = traffic(first);
+  const secondTraffic = traffic(second);
+  try {
+    await Promise.all([legacy.connect(), first.connect(), second.connect()]);
+    await first.getSidebarOrder(true);
+    await second.getSidebarOrder(true);
+    expect(firstTraffic).toEqual(["sidebar.order.get.response"]);
+    expect(secondTraffic).toEqual(["sidebar.order.get.response"]);
+    const order = {
+      projectOrder: [],
+      projectGroupOrder: ["old"],
+      pinnedWorkspaceOrder: [],
+      workspaceOrderByProject: {},
+    };
+    await first.initializeSidebarOrder(order);
+    await second.listProjects();
+    expect(firstTraffic).toEqual([
+      "sidebar.order.get.response",
+      "sidebar.order.changed",
+      "sidebar.order.initialize.response",
+    ]);
+    expect(secondTraffic).toEqual(["sidebar.order.get.response", "sidebar.order.changed"]);
+    await first.getSidebarOrder(false);
+    await second.updateSidebarOrder(1, { kind: "groups", keys: ["new"] });
+    await first.listProjects();
+    expect(firstTraffic).toEqual([
+      "sidebar.order.get.response",
+      "sidebar.order.changed",
+      "sidebar.order.initialize.response",
+      "sidebar.order.get.response",
+    ]);
+    expect(secondTraffic).toEqual([
+      "sidebar.order.get.response",
+      "sidebar.order.changed",
+      "sidebar.order.changed",
+      "sidebar.order.update.response",
+    ]);
+    await first.close();
+    await second.updateSidebarOrder(2, { kind: "groups", keys: ["latest"] });
+    await legacy.listProjects();
+    expect(legacyTraffic).toEqual([]);
+    expect(secondTraffic.slice(-2)).toEqual([
+      "sidebar.order.changed",
+      "sidebar.order.update.response",
+    ]);
+  } finally {
+    await Promise.all([legacy.close(), first.close(), second.close()]);
+    await daemon.close();
+  }
+}, 60000);

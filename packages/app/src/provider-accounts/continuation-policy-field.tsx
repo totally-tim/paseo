@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { useTranslation } from "react-i18next";
 import { Switch } from "@/components/ui/switch";
 import { useHostFeature } from "@/runtime/host-features";
+import { continuationAccountChoices } from "./account-view-model";
 import { useProviderAccounts } from "./use-provider-accounts";
 
 export function ContinuationPolicyField({
@@ -30,14 +31,12 @@ export function ContinuationPolicyField({
     [onChange],
   );
   if (provider !== "claude" && provider !== "codex") return null;
-  const accounts =
-    catalog.data?.accounts.filter(
-      (account) => account.provider === provider && !account.removedAt,
-    ) ?? [];
   const selected = value?.accountIds ?? [];
-  const unavailable = catalog.data
-    ? selected.filter((id) => !accounts.some((account) => account.id === id))
-    : [];
+  const { accounts, unavailable } = continuationAccountChoices(
+    catalog.data?.accounts,
+    provider,
+    selected,
+  );
   return (
     <View style={styles.section}>
       <View style={styles.row}>

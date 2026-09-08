@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { StyleSheet } from "react-native-unistyles";
-import { getAccountUsageWindows } from "@getpaseo/protocol/provider-accounts";
+import { applicableAccountUsage } from "./account-view-model";
 import { ProviderUsageCard } from "@/provider-usage/card";
 import { useProviderAccounts } from "./use-provider-accounts";
 
@@ -21,13 +21,7 @@ export function AccountUsageTooltip({
   const accounts = useProviderAccounts(serverId);
   const account = accounts.data?.accounts.find((entry) => entry.id === accountId);
   const entry = accounts.data?.usage.find((item) => item.accountId === accountId);
-  const usage = useMemo(
-    () =>
-      entry
-        ? { ...entry.usage, windows: getAccountUsageWindows(entry.usage, model ?? undefined) }
-        : null,
-    [entry, model],
-  );
+  const usage = useMemo(() => applicableAccountUsage(entry?.usage, model), [entry, model]);
   const providerLabel =
     ({ claude: "Claude", codex: "Codex" } as Record<string, string>)[provider ?? ""] ?? provider;
   return (
@@ -39,7 +33,7 @@ export function AccountUsageTooltip({
       {account?.identity?.email ? (
         <Text style={styles.detail}>{account.identity.email}</Text>
       ) : null}
-      {usage && (usage.status !== "available" || usage.windows.length > 0) ? (
+      {usage ? (
         <ProviderUsageCard usage={usage} compact showIdentity={false} showResetDates />
       ) : (
         <Text style={styles.detail}>{t("providerAccounts.usageUnavailable")}</Text>

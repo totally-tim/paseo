@@ -570,11 +570,7 @@ These small files are not validated as full Zod schemas but are persisted under 
 
 ---
 
-## Client-side stores (App)
-
-These live in React Native `AsyncStorage` or browser `IndexedDB`, not on the daemon filesystem.
-
-### Sidebar ordering
+## Sidebar ordering
 
 The daemon owns ordering for its projects, groups, workspaces, and pinned workspaces in
 `projects/sidebar-order.json`. A revision check prevents a stale client from overwriting a newer
@@ -592,6 +588,12 @@ A multi-host change can partially succeed. Retry or discard the retained change 
 that host again. Retry preserves newer changes to other ordering fields and refuses to overwrite
 a conflicting order from another device.
 Filters, collapsed sections, and pane layouts remain device-owned.
+
+## Client-side stores (App)
+
+These live in React Native `AsyncStorage` or browser `IndexedDB`, not on the daemon filesystem.
+
+The sidebar keeps a local replica and a preserved pre-sync import order; see [Sidebar ordering](#sidebar-ordering) for daemon ownership and recovery.
 
 ### Keying convention: directory-backed vs workspace-owned
 

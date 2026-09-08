@@ -1,4 +1,3 @@
-import { sidebarOrderSync } from "@/sidebar-order";
 import { useCallback, useMemo, useRef, useState, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { Plus } from "lucide-react-native";
@@ -283,19 +282,19 @@ function ProjectGroupRenamePage({
   const submit = useCallback(() => {
     if (!normalized || unchanged) return;
     void (async () => {
-      const applied = await mutation.run(() => {
-        const members = resolveMembers();
-        const serverIds = new Set<string>();
-        for (const member of members) for (const host of member.hosts) serverIds.add(host.serverId);
-        const problem = sidebarOrderSync.readiness([...serverIds]);
-        if (problem) return Promise.resolve({ kind: "order_not_ready" as const, message: problem });
-        return setProjectGroupOnProjects({ projects: members, group: normalized });
-      });
+      const members = resolveMembers();
+      const serverIds = new Set<string>();
+      for (const member of members) for (const host of member.hosts) serverIds.add(host.serverId);
+      const applied = await mutation.run(() =>
+        setProjectGroupOnProjects({ projects: members, group: normalized }),
+      );
       // The group's place in the sidebar is stored under its key; a new name is a new key.
       if (applied) {
         useSidebarOrderStore
           .getState()
-          .renameProjectGroupOrderKey(projectGroupKey(name), projectGroupKey(normalized));
+          .renameProjectGroupOrderKey(projectGroupKey(name), projectGroupKey(normalized), [
+            ...serverIds,
+          ]);
       }
     })();
   }, [mutation, name, normalized, resolveMembers, unchanged]);

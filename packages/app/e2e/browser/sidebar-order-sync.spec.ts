@@ -5,6 +5,13 @@ import { getServerId } from "../support/helpers/server-id";
 import { daemonWsRoutePattern } from "../support/helpers/daemon-port";
 import { openSidebarDisplayPage } from "../support/helpers/sidebar";
 import { waitForSidebarHydration } from "../support/helpers/workspace-ui";
+import {
+  addConnectedHostAndReload,
+  openSidebarHostFilter,
+  toggleHostFilter,
+  reloadPreservingHostRegistry,
+} from "../support/helpers/hosts";
+import { startIsolatedHostDaemon } from "../support/helpers/isolated-host-daemon";
 import type { Page } from "@playwright/test";
 
 async function capture(page: Page, path: string): Promise<string> {
@@ -31,6 +38,7 @@ test("desktop import syncs to a compact client and an import failure stays visib
     await second.client.setProjectGroup(second.projectId, "Zulu");
     let failImport = true;
     let failUpdate = false;
+    let failGet = false;
     await page.routeWebSocket(daemonWsRoutePattern(), (browserSocket) => {
       const server = browserSocket.connectToServer();
       browserSocket.onMessage((raw) => {
@@ -69,6 +77,22 @@ test("desktop import syncs to a compact client and an import failure stays visib
                   accepted: false,
                   snapshot: null,
                   error: "Reorder failed. Try again.",
+                },
+              },
+            }),
+          );
+        } else if (failGet && envelope.message?.type === "sidebar.order.get.request") {
+          failGet = false;
+          browserSocket.send(
+            JSON.stringify({
+              type: "session",
+              message: {
+                type: "sidebar.order.get.response",
+                payload: {
+                  requestId: envelope.message.requestId,
+                  accepted: false,
+                  snapshot: null,
+                  error: "Reload timeout",
                 },
               },
             }),
@@ -154,10 +178,19 @@ test("desktop import syncs to a compact client and an import failure stays visib
     await expect
       .poll(() => groupOrder(phone))
       .toEqual(["sidebar-project-group-header-zulu", "sidebar-project-group-header-alpha"]);
-    await page
+    await openSidebarDisplayPage(page, "sidebar-order-settings");
+    failGet = true;
+    await page.getByText("Reload shared order", { exact: true }).click();
+    await expect(page.getByTestId(`sidebar-order-host-${getServerId()}`)).toContainText(
+      "Reload timeout",
+    );
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+    const retry = page
       .getByTestId("sidebar-order-notice")
-      .getByRole("button", { name: "Retry failed change" })
-      .click();
+      .getByRole("button", { name: "Retry failed change" });
+    await expect(retry).toBeEnabled();
+    await retry.click();
     await expect
       .poll(() => groupOrder(page))
       .toEqual(["sidebar-project-group-header-alpha", "sidebar-project-group-header-zulu"]);
@@ -175,5 +208,37 @@ test("desktop import syncs to a compact client and an import failure stays visib
     await phoneContext?.close();
     await second.cleanup();
     await first.cleanup();
+  }
+});
+
+test("ordering settings can import a host excluded by the sidebar filter", async ({ page }) => {
+  test.setTimeout(120000);
+  const secondary = await startIsolatedHostDaemon("sidebar-order-filtered");
+  const primary = await seedWorkspace({
+    repoPrefix: "sidebar-order-filter-",
+    title: "Visible workspace",
+  });
+  try {
+    await gotoAppShell(page);
+    await addConnectedHostAndReload(page, {
+      serverId: secondary.serverId,
+      port: secondary.port,
+      label: "Filtered host",
+    });
+    await expect(page.getByTestId("sidebar-display-preferences-menu")).toBeVisible();
+    await openSidebarHostFilter(page);
+    await toggleHostFilter(page, getServerId());
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+    await reloadPreservingHostRegistry(page);
+    await expect(page.getByTestId("sidebar-display-preferences-menu")).toBeVisible();
+    await openSidebarDisplayPage(page, "sidebar-order-settings");
+    const controls = page.getByTestId(`sidebar-order-host-${secondary.serverId}`);
+    await expect(controls).toContainText("Use this device", { timeout: 30000 });
+    await page.getByTestId(`sidebar-order-import-${secondary.serverId}`).click();
+    await expect(controls).toContainText("Order synced");
+  } finally {
+    await primary.cleanup();
+    await secondary.close();
   }
 });

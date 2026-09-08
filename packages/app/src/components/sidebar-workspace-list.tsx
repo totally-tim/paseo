@@ -2063,6 +2063,7 @@ export function SidebarWorkspaceList({
           currentOrder,
           reorderedVisibleKeys: reorderedWorkspaceKeys,
         }),
+        [...new Set(reorderedWorkspaces.map((workspace) => workspace.serverId))],
       );
     },
     [getPinnedWorkspaceOrder, setPinnedWorkspaceOrder],
@@ -2352,8 +2353,14 @@ function ProjectModeList({
 
   // Same-list reorders retain their splice semantics; the store submits the resulting host scopes.
   const projectOrderIO = useMemo(
-    () => ({ getOrder: getProjectOrder, setOrder: setProjectOrder }),
-    [getProjectOrder, setProjectOrder],
+    () => ({
+      getOrder: getProjectOrder,
+      setOrder: (keys: string[]) =>
+        setProjectOrder(keys, [
+          ...new Set(projects.flatMap((project) => project.hosts.map((host) => host.serverId))),
+        ]),
+    }),
+    [getProjectOrder, setProjectOrder, projects],
   );
 
   // Every project list is a partition of the one stored order, so a drag inside a list splices
@@ -2434,6 +2441,7 @@ function ProjectModeList({
         accepted = message === null;
         if (accepted && write)
           await sidebarOrderSync.write({
+            serverIds: project.hosts.map((host) => host.serverId),
             kind: "projects",
             keys: applyProjectOrderWrite(projectOrderIO.getOrder(), write),
           });
@@ -2504,6 +2512,7 @@ function ProjectModeList({
           currentOrder: currentWorkspaceOrder,
           reorderedVisibleKeys: reorderedWorkspaceKeys,
         }),
+        [...new Set(reorderedWorkspaces.map((workspace) => workspace.serverId))],
       );
     },
     [getWorkspaceOrder, setWorkspaceOrder],
@@ -2618,9 +2627,10 @@ function ProjectModeList({
           visibleKeys: projectGroups.map((group) => group.key),
           nextKeys: groups.map((group) => group.key),
         }),
+        [...new Set(projects.flatMap((project) => project.hosts.map((host) => host.serverId)))],
       );
     },
-    [allProjectGroupKeys, getProjectGroupOrder, projectGroups, setProjectGroupOrder],
+    [allProjectGroupKeys, getProjectGroupOrder, projectGroups, setProjectGroupOrder, projects],
   );
   const handleGroupReorder = useCallback(
     ({ activeGroupKey, overGroupKey }: ProjectGroupReorderInput) => {

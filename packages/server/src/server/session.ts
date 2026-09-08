@@ -686,7 +686,7 @@ export class Session {
   private readonly sessionLogger: pino.Logger;
   private readonly paseoHome: string;
   private readonly sidebarOrderStore?: SidebarOrderStore;
-  private sidebarOrderUnsubscribe: (() => void) | null = null;
+  private readonly sidebarOrderSubscriptions = new Map<object | undefined, () => void>();
   private readonly projectIcons: ProjectIconReader;
   private readonly worktreesRoot: string | undefined;
   private readonly rewindInitiators = new Map<string, object | undefined>();
@@ -1161,6 +1161,11 @@ export class Session {
       this.viewedTimelineAgentIdsBySource.clear();
       this.viewedTimelineAgentIds.clear();
     }
+  }
+
+  clearSidebarOrderSubscription(source?: object): void {
+    this.sidebarOrderSubscriptions.get(source)?.();
+    this.sidebarOrderSubscriptions.delete(source);
   }
 
   clearAgentTimelineSubscription(source: object): void {
@@ -2032,6 +2037,7 @@ export class Session {
       this.dispatchAgentLifecycleMessage(msg) ??
       this.dispatchAgentConfigMessage(msg) ??
       this.dispatchCheckoutMessage(msg) ??
+      this.dispatchSidebarOrderMessage(msg, source) ??
       this.dispatchWorkspaceLifecycleMessage(msg) ??
       this.dispatchWorkspaceFileMessage(msg, source) ??
       this.dispatchProviderMessage(msg) ??
@@ -2047,7 +2053,6 @@ export class Session {
   private dispatchWorkspaceLifecycleMessage(msg: SessionInboundMessage): Promise<void> | undefined {
     return (
       this.dispatchWorkspaceRecoveryMessage(msg) ??
-      this.dispatchSidebarOrderMessage(msg) ??
       this.dispatchWorkspaceLabelMessage(msg) ??
       this.dispatchWorkspaceSetupMessage(msg) ??
       this.dispatchWorkspaceAndProjectMessage(msg)
@@ -2635,12 +2640,15 @@ export class Session {
     return undefined;
   }
 
-  private dispatchSidebarOrderMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+  private dispatchSidebarOrderMessage(
+    msg: SessionInboundMessage,
+    source?: object,
+  ): Promise<void> | undefined {
     switch (msg.type) {
       case "sidebar.order.get.request":
       case "sidebar.order.initialize.request":
       case "sidebar.order.update.request":
-        return this.handleSidebarOrder(msg);
+        return this.handleSidebarOrder(msg, source);
       default:
         return undefined;
     }
@@ -2655,6 +2663,7 @@ export class Session {
           | "sidebar.order.update.request";
       }
     >,
+    source?: object,
   ): Promise<void> {
     const responseTypes = {
       "sidebar.order.get.request": "sidebar.order.get.response",
@@ -2666,35 +2675,43 @@ export class Session {
       const store = this.sidebarOrderStore;
       if (!store) throw new Error("Sidebar ordering unavailable");
       if (request.type === "sidebar.order.get.request") {
-        this.sidebarOrderUnsubscribe?.();
-        this.sidebarOrderUnsubscribe = null;
+        this.clearSidebarOrderSubscription(source);
         if (request.subscribe && !this.isCleanedUp) {
-          this.sidebarOrderUnsubscribe = store.subscribe((snapshot) =>
-            this.emit({ type: "sidebar.order.changed", payload: snapshot }),
+          this.sidebarOrderSubscriptions.set(
+            source,
+            store.subscribe((snapshot) =>
+              this.emitForSource({ type: "sidebar.order.changed", payload: snapshot }, source),
+            ),
           );
         }
         const snapshot = await store.get();
-        this.emit({
-          type,
-          payload: { requestId: request.requestId, accepted: true, error: null, snapshot },
-        });
+        this.emitForSource(
+          {
+            type,
+            payload: { requestId: request.requestId, accepted: true, error: null, snapshot },
+          },
+          source,
+        );
       } else {
         const result =
           request.type === "sidebar.order.initialize.request"
             ? await store.initialize(request.order)
             : await store.update(request.expectedRevision, request.change);
-        this.emit({ type, payload: { requestId: request.requestId, ...result } });
+        this.emitForSource({ type, payload: { requestId: request.requestId, ...result } }, source);
       }
     } catch (error) {
-      this.emit({
-        type,
-        payload: {
-          requestId: request.requestId,
-          accepted: false,
-          snapshot: null,
-          error: getErrorMessage(error),
+      this.emitForSource(
+        {
+          type,
+          payload: {
+            requestId: request.requestId,
+            accepted: false,
+            snapshot: null,
+            error: getErrorMessage(error),
+          },
         },
-      });
+        source,
+      );
     }
   }
 
@@ -8086,8 +8103,8 @@ export class Session {
     this.unsubscribePluginChanges = null;
     this.unsubscribeWorkspaceMutations?.();
     this.unsubscribeWorkspaceMutations = null;
-    this.sidebarOrderUnsubscribe?.();
-    this.sidebarOrderUnsubscribe = null;
+    for (const unsubscribe of this.sidebarOrderSubscriptions.values()) unsubscribe();
+    this.sidebarOrderSubscriptions.clear();
     this.workspaceLabelSubscription?.unsubscribe();
     this.workspaceLabelSubscription = null;
     this.agentUpdates.dispose();
