@@ -1415,12 +1415,43 @@ export class AgentManager {
     return config;
   }
 
+  /**
+   * Runs the plugin agent.create hook before account reservation so a plugin
+   * that rewrites the provider reserves against the provider that will
+   * actually run. The wire schema behind the hook strips daemon-internal
+   * fields (accountId, accountSelectionReason, internal); re-apply them — no
+   * plugin can change them, and a caller-pinned account against a rewritten
+   * provider is rejected by reserve with an explicit error.
+   */
+  private async applyAgentCreateLifecycleHook(
+    config: AgentSessionConfig,
+    options: CreateAgentOptions,
+  ): Promise<{ config: AgentSessionConfig; options: CreateAgentOptions }> {
+    if (!this.pluginLifecycle || config.internal) return { config, options };
+    const request = await this.pluginLifecycle.before("agent.create", {
+      config,
+      env: options.env,
+    });
+    return {
+      config: {
+        ...request.config,
+        internal: config.internal,
+        ...(config.accountId !== undefined ? { accountId: config.accountId } : {}),
+        ...(config.accountSelectionReason !== undefined
+          ? { accountSelectionReason: config.accountSelectionReason }
+          : {}),
+      },
+      options: { ...options, env: request.env },
+    };
+  }
+
   private async createAgentWithAccount(
     config: AgentSessionConfig,
     agentId: string | undefined,
     options: CreateAgentOptions,
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
+    ({ config, options } = await this.applyAgentCreateLifecycleHook(config, options));
     config = this.validateContinuationConfig(config, options);
     if (!this.accounts) return this.createAgentInternal(config, agentId, options);
     const id = validateAgentId(agentId ?? this.idFactory(), "createAgent");
@@ -1502,14 +1533,6 @@ export class AgentManager {
     this.assertAcceptingAgentRegistrations();
     const resolvedAgentId = validateAgentId(agentId ?? this.idFactory(), "createAgent");
     await this.assertAgentNotHandedOff(resolvedAgentId);
-    if (this.pluginLifecycle && !config.internal) {
-      const request = await this.pluginLifecycle.before("agent.create", {
-        config,
-        env: options.env,
-      });
-      config = { ...request.config, internal: config.internal };
-      options = { ...options, env: request.env };
-    }
     await this.deleteAgentState(resolvedAgentId);
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
       config,
