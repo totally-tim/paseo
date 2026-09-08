@@ -60,6 +60,7 @@ export function scoreAccount(input: { windows: ProviderUsageWindow[]; now: numbe
   let remainingPct = Number.POSITIVE_INFINITY;
   let scarcestWindow: ProviderUsageWindow | null = null;
   let aboutToWall = false;
+  let contributing = 0;
   for (const window of input.windows) {
     if (typeof window.usedPct !== "number") return UNKNOWN;
     const resetsAt = Date.parse(window.resetsAt ?? "");
@@ -70,6 +71,7 @@ export function scoreAccount(input: { windows: ProviderUsageWindow[]; now: numbe
     // A reset in the past means the window rolled after this cached reading was taken, so its
     // used percentage is stale-high. Skip it entirely rather than judging the account on it.
     if (hasReset && resetsAt <= input.now) continue;
+    contributing += 1;
     const period = window.periodMinutes;
     if (
       typeof period === "number" &&
@@ -86,12 +88,14 @@ export function scoreAccount(input: { windows: ProviderUsageWindow[]; now: numbe
       expiryWindow = window;
     }
   }
+  // Every window had already rolled, so the reading says nothing about what is left now. Another
+  // agent may be spending the fresh allowance. Missing evidence is not full capacity.
+  if (contributing === 0) return UNKNOWN;
   return {
     unknown: false,
     aboutToWall,
     expiresAt: expiresAt === Number.NEGATIVE_INFINITY ? Number.POSITIVE_INFINITY : expiresAt,
-    // Every window had rolled or had yet to open, so nothing constrains this account.
-    remainingPct: remainingPct === Number.POSITIVE_INFINITY ? 100 : remainingPct,
+    remainingPct,
     expiryWindow,
     scarcestWindow,
   };

@@ -1465,8 +1465,9 @@ export class AgentManager {
       pinnedAccountId,
       unattended: options.unattended ?? Boolean(options.owner || parentId || config.internal),
       // Only an agent that can continue on another account may be pointed at the one whose
-      // quota expires first. Without a policy it has to finish where it started.
-      continuationEnabled: Boolean(config.continuationPolicy),
+      // quota expires first. `isOrdinaryAgent` also demands a workspace, which continuation
+      // config validation does not check, so a policy alone would not buy a recovery.
+      continuationEnabled: Boolean(config.continuationPolicy) && Boolean(options.workspaceId),
     });
     if (!lease) return this.createAgentInternal(config, id, options);
     const pinnedConfig = {

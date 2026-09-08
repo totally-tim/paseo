@@ -854,13 +854,17 @@ it("keeps automatic accounts through a rename, a reorder, an earlier account res
   await service.usage(a.account.id, true);
   expect(service.preview("codex", input.selection, input.model).accountId).toBe(b.account.id);
   await service.edit(b.account.id, { label: "Renamed" });
-  await service.reorder(
-    store
+  // Put A first, so the assertion after the restart can only pass if the remembered choice for
+  // B survived. Reversing the list left B first and let display order carry it either way.
+  await service.reorder([
+    a.account.id,
+    b.account.id,
+    ...store
       .list()
       .filter((account) => !account.removedAt)
       .map((account) => account.id)
-      .toReversed(),
-  );
+      .filter((id) => id !== a.account.id && id !== b.account.id),
+  ]);
   await service.close();
   const restarted = new ProviderAccountService(
     new ProviderAccountStore(directory),
@@ -1238,6 +1242,79 @@ describe("capacity ranking", () => {
     });
     expect(lease?.accountId).toBe(a.account.id);
     expect(lease?.accountId).not.toBe(b.account.id);
+    lease?.release();
+  });
+
+  it("does not treat a nearly exhausted weekly window as the session wall", async () => {
+    const context = await setup();
+    // Added first, and its weekly is at 95%. If the short-window guard applied to weekly
+    // allowances it would rank last, and the later-resetting account would win instead.
+    const soon = await context.add("rank-soon");
+    const later = await context.add("rank-later");
+    vi.spyOn(soon.backend, "usage").mockResolvedValue(
+      ranked([
+        {
+          id: "weekly",
+          label: "Weekly",
+          usedPct: 95,
+          resetsAt: "2026-09-07T00:00:00Z",
+          periodMinutes: SEVEN_DAY,
+        },
+      ]),
+    );
+    vi.spyOn(later.backend, "usage").mockResolvedValue(
+      ranked([
+        {
+          id: "weekly",
+          label: "Weekly",
+          usedPct: 50,
+          resetsAt: "2026-09-11T00:00:00Z",
+          periodMinutes: SEVEN_DAY,
+        },
+      ]),
+    );
+    const lease = await context.service.reserve({
+      provider: "codex",
+      unattended: false,
+      continuationEnabled: true,
+    });
+    expect(lease?.accountId).toBe(soon.account.id);
+    expect(lease?.accountId).not.toBe(later.account.id);
+    lease?.release();
+  });
+
+  it("cannot score an account whose every window has already rolled", async () => {
+    const context = await setup();
+    // Added first. Its only reading predates its own reset, so it says nothing about what is
+    // left now — another agent may already be spending the fresh allowance.
+    const stale = await context.add("rank-stale");
+    const measured = await context.add("rank-measured");
+    vi.spyOn(stale.backend, "usage").mockResolvedValue(
+      ranked([
+        {
+          id: "weekly",
+          label: "Weekly",
+          usedPct: 95,
+          resetsAt: "2026-09-04T23:59:00Z",
+          periodMinutes: SEVEN_DAY,
+        },
+      ]),
+    );
+    vi.spyOn(measured.backend, "usage").mockResolvedValue(
+      ranked([
+        {
+          id: "weekly",
+          label: "Weekly",
+          usedPct: 1,
+          resetsAt: "2026-09-05T04:00:00Z",
+          periodMinutes: SEVEN_DAY,
+        },
+      ]),
+    );
+    // Treating the discarded reading as full capacity would beat a real 99% remaining.
+    const lease = await context.service.reserve({ provider: "codex", unattended: false });
+    expect(lease?.accountId).toBe(measured.account.id);
+    expect(lease?.accountId).not.toBe(stale.account.id);
     lease?.release();
   });
 
