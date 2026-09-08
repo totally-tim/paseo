@@ -90,6 +90,9 @@ export async function handleAccountOperation(
       case "restore":
         await service.restore(operation.accountId);
         break;
+      case "reorder":
+        await service.reorder(operation.accountIds);
+        break;
       case "policy":
         await service.setPolicy(operation.policy);
         break;

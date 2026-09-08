@@ -1,3 +1,4 @@
+import { getAccountUsageWindows } from "@getpaseo/protocol/provider-accounts";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -87,6 +88,7 @@ async function setup() {
     backend.identity = { key: `${provider}:${label}`, email: `${label}@example.invalid` };
     backends.set(account.id, backend);
     await service.inspect(account.id);
+    await service.edit(account.id, { enabled: true });
     return { account: store.get(account.id), backend };
   }
   return {
@@ -250,6 +252,7 @@ describe("provider accounts", () => {
     backend.identity = host.identity;
     backends.set(managed.id, backend);
     expect((await service.inspect(managed.id)).authState).toBe("ready");
+    await service.edit(managed.id, { enabled: true });
     expect(service.choice("codex", { kind: "automatic" }, false).accountId).toBe(managed.id);
     expect(store.get("default:codex").ownership).toBe("external");
     expect(host.logouts).toBe(0);
@@ -317,15 +320,13 @@ describe("provider accounts", () => {
   it("coordinates concurrent automatic starts and honors a fixed override", async () => {
     const { service, add } = await setup();
     const a = await add("a");
-    const b = await add("b");
+    await add("b");
     const leases = await Promise.all(
       [0, 1].map(() =>
         service.reserve({ provider: "codex", selection: { kind: "automatic" }, unattended: false }),
       ),
     );
-    expect(new Set(leases.map((lease) => lease!.accountId))).toEqual(
-      new Set([a.account.id, b.account.id]),
-    );
+    expect(new Set(leases.map((lease) => lease!.accountId))).toEqual(new Set([a.account.id]));
     const fixed = await service.reserve({
       provider: "codex",
       selection: { kind: "fixed", accountId: a.account.id },
@@ -762,4 +763,197 @@ it("matches a model-scoped window whose label is spaced differently from the mod
   expect((await service.recoveryChoice({ ...input, model: "claude-haiku-4-5" })).accountId).toBe(
     account.account.id,
   );
+});
+
+describe("account management order and removal", () => {
+  it("persists explicit ordering across updates and reloads", async () => {
+    const { service, store, directory, add } = await setup();
+    const a = await add("First");
+    const b = await add("Second");
+    const original = service.list().map((account) => account.id);
+    await service.edit(a.account.id, { label: "Renamed" });
+    expect(service.list().map((account) => account.id)).toEqual(original);
+    const order = [
+      b.account.id,
+      a.account.id,
+      ...original.filter((id) => id !== a.account.id && id !== b.account.id),
+    ];
+    await service.reorder(order);
+    await service.inspect(a.account.id);
+    expect(service.list().map((account) => account.id)).toEqual(order);
+    const reloaded = new ProviderAccountStore(directory);
+    await reloaded.initialize();
+    expect(reloaded.list().map((account) => account.id)).toEqual(order);
+    await expect(service.reorder([a.account.id, a.account.id])).rejects.toThrow();
+    expect(store.list().map((account) => account.id)).toEqual(order);
+  });
+
+  it("releases removed account slots and enforces the limit on restore", async () => {
+    const { service } = await setup();
+    const removed = await service.add("codex", "Removed");
+    await service.remove(removed.id, "retain");
+    for (let index = 0; index < 32; index++) await service.add("codex", `Account ${index}`);
+    await expect(service.add("codex", "Overflow")).rejects.toThrow("32");
+    await expect(service.restore(removed.id)).rejects.toThrow("32");
+    const active = service
+      .list()
+      .find((account) => account.ownership === "managed" && !account.removedAt)!;
+    await service.remove(active.id, "retain");
+    await service.restore(removed.id);
+    expect(service.store.get(removed.id).removedAt).toBeUndefined();
+    expect(service.store.get(removed.id).enabled).toBe(false);
+  });
+});
+
+it("keeps a newly verified account out of automatic selection until setup is saved", async () => {
+  const { service, backends, store } = await setup();
+  const account = await service.add("codex", "Setup");
+  const backend = new TestAccountBackend();
+  backend.identity = { key: "setup-identity" };
+  backends.set(account.id, backend);
+  await service.inspect(account.id);
+  expect(store.get(account.id).authState).toBe("ready");
+  expect(store.get(account.id).enabled).toBe(false);
+  expect(
+    service.choice("codex", { kind: "automatic", accountIds: [account.id] }, false).accountId,
+  ).toBeNull();
+  await service.edit(account.id, { enabled: true, interactiveOnly: true, reservePercent: 25 });
+  expect(store.get(account.id)).toMatchObject({
+    enabled: true,
+    interactiveOnly: true,
+    reservePercent: 25,
+  });
+});
+
+it("keeps automatic accounts through usage changes, reset of an earlier account, and restart", async () => {
+  const { service, add, store, directory, backends } = await setup();
+  const a = await add("sticky-a");
+  const b = await add("sticky-b");
+  const input = {
+    provider: "codex",
+    selection: { kind: "automatic" as const },
+    unattended: false,
+    model: "gpt-6-astra",
+  };
+  const first = await service.reserve(input);
+  expect(first?.accountId).toBe(a.account.id);
+  first?.release();
+  a.backend.usedPct = 70;
+  b.backend.usedPct = 0;
+  await service.usage(a.account.id, true);
+  await service.usage(b.account.id, true);
+  expect(service.preview("codex", input.selection, input.model).accountId).toBe(a.account.id);
+  a.backend.usedPct = 100;
+  await service.usage(a.account.id, true);
+  const next = await service.reserve(input);
+  expect(next?.accountId).toBe(b.account.id);
+  next?.release();
+  a.backend.usedPct = 0;
+  await service.usage(a.account.id, true);
+  expect(service.preview("codex", input.selection, input.model).accountId).toBe(b.account.id);
+  await service.edit(b.account.id, { label: "Renamed" });
+  await service.reorder(
+    store
+      .list()
+      .filter((account) => !account.removedAt)
+      .map((account) => account.id)
+      .toReversed(),
+  );
+  await service.close();
+  const restarted = new ProviderAccountService(
+    new ProviderAccountStore(directory),
+    (account) => backends.get(account.id) ?? new TestAccountBackend(),
+  );
+  cleanups.push(() => restarted.close());
+  await restarted.initialize();
+  const resumed = await restarted.reserve(input);
+  expect(resumed?.accountId).toBe(b.account.id);
+  resumed?.release();
+});
+
+it("isolates automatic choices by model, permitted pool and work type", async () => {
+  const { service, add } = await setup();
+  const a = await add("scoped-a", "claude");
+  const b = await add("scoped-b", "claude");
+  vi.spyOn(a.backend, "usage").mockResolvedValue({
+    providerId: "claude",
+    displayName: "A",
+    status: "available",
+    windows: [
+      { id: "five_hour", label: "Session", usedPct: 10 },
+      { id: "model:0:Fable", label: "Weekly · Fable", usedPct: 100 },
+    ],
+  });
+  const defaultModel = await service.reserve({ provider: "claude", unattended: false });
+  expect(defaultModel?.accountId).toBe(a.account.id);
+  defaultModel?.release();
+  await service.setPolicy({ unknownQuota: "allow" });
+  const fable = await service.reserve({
+    provider: "claude",
+    model: "claude-fable-5.1",
+    unattended: false,
+  });
+  expect(fable?.accountId).toBe(b.account.id);
+  fable?.release();
+  const opus = await service.reserve({
+    provider: "claude",
+    model: "claude-opus-5",
+    unattended: false,
+  });
+  expect(opus?.accountId).toBe(a.account.id);
+  opus?.release();
+  await service.edit(a.account.id, { interactiveOnly: true });
+  const background = await service.reserve({
+    provider: "claude",
+    model: "claude-opus-5",
+    unattended: true,
+  });
+  expect(background?.accountId).toBe(b.account.id);
+  background?.release();
+  expect(service.preview("claude", undefined, "claude-opus-5").accountId).toBe(a.account.id);
+  const restricted = await service.reserve({
+    provider: "claude",
+    model: "claude-opus-5",
+    selection: { kind: "automatic", accountIds: [b.account.id] },
+    unattended: false,
+  });
+  expect(restricted?.accountId).toBe(b.account.id);
+  restricted?.release();
+});
+
+it("does not let exhausted Spark quota block a different Codex model", () => {
+  const usage: ProviderUsage = {
+    providerId: "codex",
+    displayName: "Account",
+    status: "available",
+    windows: [
+      { id: "codex:primary", label: "5-hour window · codex", usedPct: 10 },
+      { id: "spark:secondary", label: "Weekly · GPT-5.3-Codex-Spark", usedPct: 100 },
+      { id: "gpt-reserve:secondary", label: "Weekly · gpt-reserve", usedPct: 20 },
+    ],
+  };
+  expect(getAccountUsageWindows(usage, "gpt-6-astra").map((window) => window.id)).toEqual([
+    "codex:primary",
+    "gpt-reserve:secondary",
+  ]);
+  expect(getAccountUsageWindows(usage, "gpt-5.3-codex-spark")).toHaveLength(3);
+});
+
+it("does not move a background account because a usage refresh failed", async () => {
+  const { service, add } = await setup();
+  const a = await add("telemetry-a");
+  await add("telemetry-b");
+  await service.setPolicy({ unknownQuota: "pause-unattended" });
+  const input = { provider: "codex", model: "gpt-6-astra", unattended: true };
+  const initial = await service.reserve(input);
+  expect(initial?.accountId).toBe(a.account.id);
+  initial?.release();
+  a.backend.failUsage = true;
+  await service.usage(a.account.id, true);
+  await expect(service.reserve(input)).rejects.toThrow("wait");
+  a.backend.failUsage = false;
+  await service.usage(a.account.id, true);
+  const recovered = await service.reserve(input);
+  expect(recovered?.accountId).toBe(a.account.id);
+  recovered?.release();
 });

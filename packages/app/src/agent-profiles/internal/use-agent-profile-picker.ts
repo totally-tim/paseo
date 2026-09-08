@@ -16,7 +16,7 @@ import {
 import { buildAgentProfileTags } from "./profile-summary";
 import { useAgentProfiles } from "./use-agent-profiles";
 import { useProviderAccounts } from "@/provider-accounts/use-provider-accounts";
-import { accountUsageSummary, selectedAccount } from "@/provider-accounts/selection-summary";
+import { selectedAccount } from "@/provider-accounts/selection-summary";
 
 /** The draft composer owns profile application as one state transition. */
 export interface DraftAgentProfileControls {
@@ -72,11 +72,6 @@ export function useAgentProfilePicker(
   const { t } = useTranslation();
   const { profiles, isSupported } = useAgentProfiles(serverId);
   const accounts = useProviderAccounts(serverId ?? "");
-  const runtimeAccountId = useSessionStore((state) =>
-    target.kind === "agent"
-      ? state.sessions[serverId ?? ""]?.agents.get(target.agentId)?.accountId
-      : undefined,
-  );
   // Profiles are host config, so their labels read from the host-wide catalog
   // rather than a workspace's. That is also the key the settings section uses,
   // so every composer on a host shares one query instead of adding its own.
@@ -104,11 +99,11 @@ export function useAgentProfilePicker(
   const rows = useMemo<AgentProfilePickerRow[]>(
     () =>
       applicableProfiles.map((profile) => {
-        const account =
-          target.kind === "agent"
-            ? accounts.data?.accounts.find((entry) => entry.id === runtimeAccountId)
-            : selectedAccount(accounts.data, profile.provider, profile.accountSelection);
-        const usage = accounts.data?.usage.find((entry) => entry.accountId === account?.id);
+        const account = selectedAccount(accounts.data, profile.provider, profile.accountSelection);
+        const accountSummary =
+          !profile.accountSelection || profile.accountSelection.kind === "automatic"
+            ? t("providerAccounts.automatic")
+            : account?.label;
         return {
           id: profile.id,
           provider: profile.provider,
@@ -119,20 +114,10 @@ export function useAgentProfilePicker(
           summary: buildAgentProfileTags({ profile, entries, formatFeatureCount })
             .map((tag) => tag.label)
             .join(" · "),
-          accountSummary: account
-            ? `${account.label} · ${accountUsageSummary(usage?.usage) ?? t("providerAccounts.usageUnavailable")}${usage?.stale ? ` · ${t("providerAccounts.lastReported")}` : ""}`
-            : undefined,
+          accountSummary: target.kind === "draft" ? accountSummary : undefined,
         };
       }),
-    [
-      applicableProfiles,
-      entries,
-      formatFeatureCount,
-      accounts.data,
-      target.kind,
-      runtimeAccountId,
-      t,
-    ],
+    [applicableProfiles, entries, formatFeatureCount, accounts.data, target.kind, t],
   );
 
   const persistSelection = useCallback(

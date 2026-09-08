@@ -1,3 +1,4 @@
+import { getAccountUsageWindows as applicableWindows } from "@getpaseo/protocol/provider-accounts";
 import pLimit from "p-limit";
 import { randomUUID } from "node:crypto";
 import type {
@@ -76,6 +77,7 @@ export class ProviderAccountService {
   private closed = false;
   private usageRefresh: Promise<void> | null = null;
   private pendingAdds = 0;
+  private admissionQueue: Promise<unknown> = Promise.resolve();
   private readonly usageLimit = pLimit(2);
   private readonly updates = new Map<string, Promise<unknown>>();
   private identityQueue: Promise<unknown> = Promise.resolve();
@@ -126,7 +128,12 @@ export class ProviderAccountService {
 
   async add(provider: AccountProvider, label: string): Promise<ProviderAccount> {
     this.assertOpen();
-    if (this.list().length + this.pendingAdds >= 34)
+    if (
+      this.list().filter((account) => account.ownership === "managed" && !account.removedAt)
+        .length +
+        this.pendingAdds >=
+      32
+    )
       throw new AccountOperationError("At most 32 managed accounts can be added.");
     this.pendingAdds++;
     try {
@@ -151,6 +158,17 @@ export class ProviderAccountService {
       return await this.update(id, changes, true);
     } finally {
       this.busy.delete(id);
+    }
+  }
+
+  async reorder(accountIds: string[]): Promise<void> {
+    this.assertOpen();
+    try {
+      await this.store.reorder(accountIds);
+    } catch {
+      throw new AccountOperationError(
+        "Could not reorder accounts. Refresh the list and try again.",
+      );
     }
   }
 
@@ -309,7 +327,7 @@ export class ProviderAccountService {
       return this.update(account.id, {
         authState: "ready",
         identity,
-        enabled: account.identity ? account.enabled : true,
+        enabled: account.enabled,
         error: null,
       });
     });
@@ -335,12 +353,22 @@ export class ProviderAccountService {
 
   async restore(id: string): Promise<void> {
     this.assertMutable(id);
+    if (!this.store.get(id).removedAt) return;
+    if (
+      this.list().filter((account) => account.ownership === "managed" && !account.removedAt)
+        .length +
+        this.pendingAdds >=
+      32
+    )
+      throw new AccountOperationError("At most 32 managed accounts can be added.");
+    this.pendingAdds++;
     this.busy.add(id);
     try {
       const account = await this.update(id, { removedAt: undefined, enabled: false });
       // Another account may have taken this identity while this one was removed.
       if (account.identity) await this.quarantineDuplicate(account, account.identity);
     } finally {
+      this.pendingAdds--;
       this.busy.delete(id);
     }
   }
@@ -466,6 +494,18 @@ export class ProviderAccountService {
     }
   }
 
+  async rememberRecoveryAccount(
+    provider: AccountProvider,
+    accountIds: string[],
+    model: string | undefined,
+    accountId: string,
+  ): Promise<void> {
+    await this.store.rememberAutomaticAccount(
+      automaticAccountKey(provider, { kind: "automatic", accountIds }, true, model),
+      accountId,
+    );
+  }
+
   async recoveryChoice(input: {
     provider: AccountProvider;
     accountIds: string[];
@@ -509,9 +549,10 @@ export class ProviderAccountService {
         this.eligibility(account, true, false, input.model).accountId !== null
       );
     });
-    eligible.sort(
-      (a, b) => this.score(b, input.model) - this.score(a, input.model) || a.id.localeCompare(b.id),
+    const preferred = this.store.automaticAccount(
+      automaticAccountKey(input.provider, selection, true, input.model),
     );
+    eligible.sort((a, b) => Number(b.id === preferred) - Number(a.id === preferred));
     if (eligible[0])
       return {
         accountId: eligible[0].id,
@@ -591,11 +632,20 @@ export class ProviderAccountService {
       account,
       choice: this.eligibility(account, unattended, false, model),
     }));
+    const preferred = this.store.automaticAccount(
+      automaticAccountKey(provider, selection, unattended, model),
+    );
+    const retained = considered.find((entry) => entry.account.id === preferred);
+    if (retained && this.busy.has(retained.account.id))
+      return {
+        accountId: null,
+        reason: "The current account is being checked or edited. Try again when it finishes.",
+      };
+    if (retained && this.waitForCurrentReading(retained.account, unattended, model))
+      return retained.choice;
     const eligible = considered.filter((entry) => entry.choice.accountId !== null);
     eligible.sort(
-      (a, b) =>
-        this.score(b.account, model) - this.score(a.account, model) ||
-        a.account.id.localeCompare(b.account.id),
+      (a, b) => Number(b.account.id === preferred) - Number(a.account.id === preferred),
     );
     return (
       eligible[0]?.choice ?? {
@@ -605,6 +655,27 @@ export class ProviderAccountService {
           : "No enabled account is signed in. Check accounts in Settings.",
       }
     );
+  }
+
+  private waitForCurrentReading(
+    account: ProviderAccount,
+    unattended: boolean,
+    model?: string,
+  ): boolean {
+    if (!unattended || account.interactiveOnly) return false;
+    const usage = this.currentUsage(account);
+    const windows = applicableWindows(usage, model);
+    if (capacityRejection(account.capacityLimit, usage, windows.length, model, this.now()))
+      return false;
+    if (
+      windows.some(
+        (window) =>
+          typeof window.usedPct === "number" &&
+          100 - window.usedPct <= (account.reservePercent ?? 0),
+      )
+    )
+      return false;
+    return windows.length === 0 || windows.some((window) => typeof window.usedPct !== "number");
   }
 
   private automaticCandidates(
@@ -632,10 +703,14 @@ export class ProviderAccountService {
     );
   }
 
-  catalogChoice(provider: AccountProvider, selection?: AccountSelection): AccountChoice {
+  catalogChoice(
+    provider: AccountProvider,
+    selection?: AccountSelection,
+    model?: string,
+  ): AccountChoice {
     if (selection?.kind === "fixed")
       return { accountId: selection.accountId, reason: "Fixed account" };
-    const available = this.preview(provider, selection);
+    const available = this.preview(provider, selection, model);
     if (available.accountId || selection?.kind === "default") return available;
     // Reading model names does not consume a subscription's generation quota.
     const account = this.automaticCandidates(provider, selection ?? { kind: "automatic" }).find(
@@ -711,10 +786,27 @@ export class ProviderAccountService {
         await Promise.all(ids.slice(offset, offset + 2).map((id) => this.usage(id)));
       }
     }
-    this.assertOpen();
-    const chosen = this.choice(provider, selection, input.unattended, input.model);
-    if (!chosen.accountId) throw new AccountOperationError(chosen.reason);
-    return this.lease(chosen.accountId, chosen.reason);
+    const admit = async () => {
+      this.assertOpen();
+      const chosen = this.choice(provider, selection, input.unattended, input.model);
+      if (!chosen.accountId) throw new AccountOperationError(chosen.reason);
+      // Hold the lease across persistence so removal cannot invalidate this admission.
+      const lease = this.lease(chosen.accountId, chosen.reason);
+      try {
+        if (selection.kind === "automatic")
+          await this.store.rememberAutomaticAccount(
+            automaticAccountKey(provider, selection, input.unattended, input.model),
+            chosen.accountId,
+          );
+        return lease;
+      } catch (error) {
+        lease.release();
+        throw error;
+      }
+    };
+    const admission = this.admissionQueue.then(admit, admit);
+    this.admissionQueue = admission.catch(() => undefined);
+    return admission;
   }
 
   hasRuntime(id: string): boolean {
@@ -785,7 +877,9 @@ export class ProviderAccountService {
       if (policy.unknownQuota === "pause-unattended")
         return no("Scheduled and background agents wait until remaining usage can be checked.");
     }
-    let reason = fixed ? "Fixed account" : "Available capacity balanced with active agents";
+    let reason = fixed
+      ? "Fixed account"
+      : "Automatic selection keeps this account until its applicable capacity is unavailable";
     if (unknown)
       reason =
         "The provider has not reported remaining usage. You can still start an agent manually.";
@@ -797,15 +891,6 @@ export class ProviderAccountService {
     if (cached?.revision !== account.revision || this.now() - cached.at >= USAGE_TTL_MS)
       return null;
     return cached.usage;
-  }
-
-  private score(account: ProviderAccount, model?: string): number {
-    const usage = this.currentUsage(account);
-    const percentages = applicableWindows(usage, model)
-      .map((window) => window.usedPct)
-      .filter((value): value is number => typeof value === "number");
-    const remaining = percentages.length ? Math.max(0, 100 - Math.max(...percentages)) : 0;
-    return remaining / (1 + (this.leases.get(account.id) ?? 0));
   }
 
   private lease(id: string, reason: string): AccountLease {
@@ -898,23 +983,18 @@ export class ProviderAccountService {
   }
 }
 
-// The provider supplies model bucket labels, not a mapping to model IDs. Unknown
-// buckets remain visible but cannot reject a different model's admission.
-/** Provider bucket labels and model IDs differ in spacing and punctuation, not in words. */
-function modelKey(value: string): string {
-  return value.toLowerCase().replaceAll(/[^a-z0-9]/g, "");
-}
-
-function applicableWindows(usage: ProviderUsage | null, model?: string): ProviderUsage["windows"] {
-  if (usage?.status !== "available") return [];
-  const selected = model ? modelKey(model) : undefined;
-  return usage.windows.filter((window) => {
-    if (window.id === "seven_day_opus") return Boolean(selected?.includes("opus"));
-    if (window.id === "seven_day_sonnet") return Boolean(selected?.includes("sonnet"));
-    if (window.id.startsWith("model:"))
-      return Boolean(selected?.includes(modelKey(window.id.split(":").slice(2).join(":"))));
-    return true;
-  });
+function automaticAccountKey(
+  provider: AccountProvider,
+  selection: Extract<AccountSelection, { kind: "automatic" }>,
+  unattended: boolean,
+  model?: string,
+): string {
+  return JSON.stringify([
+    provider,
+    model?.trim().toLowerCase() ?? "",
+    unattended,
+    selection.accountIds ? [...new Set(selection.accountIds)].sort() : null,
+  ]);
 }
 
 function capacityRejection(

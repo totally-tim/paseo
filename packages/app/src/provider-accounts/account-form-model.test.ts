@@ -62,3 +62,22 @@ describe("account form", () => {
     expect(form.saveOperation()).toMatchObject({ changes: { reservePercent: 23 } });
   });
 });
+
+it("saves activation together with permitted use", () => {
+  const form = openAccountForm(account);
+  form.setInteractiveOnly(true);
+  form.setReserve("25");
+  expect(form.saveOperation()).toMatchObject({
+    changes: { enabled: true, interactiveOnly: true, reservePercent: 25 },
+  });
+  form.setEnabled(false);
+  expect(form.saveOperation()).toMatchObject({ changes: { enabled: false } });
+});
+
+it("keeps a disabled external account disabled when editing its label", () => {
+  const form = openAccountForm({ ...account, ownership: "external" });
+  form.setLabel("Host account");
+  expect(form.saveOperation()).toMatchObject({
+    changes: { label: "Host account", enabled: false },
+  });
+});

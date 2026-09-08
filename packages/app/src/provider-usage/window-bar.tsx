@@ -24,7 +24,13 @@ function fillToneStyle(tone: ProviderUsageTone) {
   }
 }
 
-export function ProviderUsageWindowBar({ window }: { window: ProviderUsageWindow }) {
+export function ProviderUsageWindowBar({
+  window,
+  showResetDate = false,
+}: {
+  window: ProviderUsageWindow;
+  showResetDate?: boolean;
+}) {
   const usedPct = resolveUsedPct(window);
   const tone = window.tone ?? deriveTone(usedPct);
 
@@ -47,11 +53,23 @@ export function ProviderUsageWindowBar({ window }: { window: ProviderUsageWindow
         </Text>
         <Text style={styles.value}>
           {usedPct != null ? formatPct(usedPct) : "—"}
-          {trailing ? (
+          {trailing && !showResetDate ? (
             <Text style={isAtRisk ? styles.atRisk : styles.reset}>{` · ${trailing}`}</Text>
           ) : null}
         </Text>
       </View>
+      {showResetDate && window.resetsAt ? (
+        <Text style={styles.reset}>
+          {trailing} ·{" "}
+          {new Date(window.resetsAt).toLocaleString(undefined, {
+            weekday: "short",
+            month: "short",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          })}
+        </Text>
+      ) : null}
       <View style={styles.track}>
         <View style={fillStyle} />
       </View>
@@ -80,6 +98,7 @@ const styles = StyleSheet.create((theme) => ({
     fontWeight: theme.fontWeight.medium,
   },
   reset: {
+    fontSize: theme.fontSize.sm,
     color: theme.colors.foregroundMuted,
     fontWeight: theme.fontWeight.normal,
   },

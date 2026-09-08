@@ -33,7 +33,7 @@ export class AccountCatalog {
     accounts: ProviderAccountService,
     client: (provider: string, accountId: string) => AgentClient,
   ): Promise<AccountCatalogResult> {
-    const choice = accounts.catalogChoice(input.provider, input.selection);
+    const choice = accounts.catalogChoice(input.provider, input.selection, input.model);
     if (!choice.accountId) return { ...choice, entry: null, error: choice.reason };
     const account = accounts.store.get(choice.accountId);
     if (account.provider !== input.provider) throw new Error("Account and provider do not match.");

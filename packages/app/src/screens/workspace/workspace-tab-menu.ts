@@ -73,6 +73,8 @@ interface BuildWorkspaceTabMenuEntriesInput {
   onCopyTerminalId: (terminalId: string) => Promise<void> | void;
   onCopyFilePath: (path: string) => Promise<void> | void;
   onReloadAgent: (agentId: string) => Promise<void> | void;
+  onContinueAgent?: (agentId: string) => void;
+  agentCanContinue?: boolean;
   onRenameTab: (tab: WorkspaceTabDescriptor) => void;
   onCloseTab: (tabId: string) => Promise<void> | void;
   onCloseTabsBefore: (tabId: string) => Promise<void> | void;
@@ -90,6 +92,8 @@ interface BuildWorkspaceDesktopTabActionsInput {
   onCopyTerminalId: (terminalId: string) => Promise<void> | void;
   onCopyFilePath: (path: string) => Promise<void> | void;
   onReloadAgent: (agentId: string) => Promise<void> | void;
+  onContinueAgent?: (agentId: string) => void;
+  agentCanContinue?: boolean;
   onRenameTab: (tab: WorkspaceTabDescriptor) => void;
   onCloseTab: (tabId: string) => Promise<void> | void;
   onCloseTabsToLeft: (tabId: string) => Promise<void> | void;
@@ -177,6 +181,8 @@ export function buildWorkspaceTabMenuEntries(
     onCopyTerminalId,
     onCopyFilePath,
     onReloadAgent,
+    onContinueAgent,
+    agentCanContinue,
     onRenameTab,
     onCloseTab,
     onCloseTabsBefore,
@@ -295,6 +301,14 @@ export function buildWorkspaceTabMenuEntries(
   });
   if (tab.target.kind === "agent") {
     const { agentId } = tab.target;
+    if (onContinueAgent && agentCanContinue)
+      entries.push({
+        kind: "item",
+        key: "continue-agent",
+        label: i18n.t("agentHandoff.action"),
+        testID: `${menuTestIDBase}-continue-agent`,
+        onSelect: () => onContinueAgent(agentId),
+      });
     entries.push({
       kind: "item",
       key: "reload-agent",
@@ -338,6 +352,8 @@ export function buildWorkspaceDesktopTabActions(
       onCopyTerminalId: input.onCopyTerminalId,
       onCopyFilePath: input.onCopyFilePath,
       onReloadAgent: input.onReloadAgent,
+      onContinueAgent: input.onContinueAgent,
+      agentCanContinue: input.agentCanContinue,
       onRenameTab: input.onRenameTab,
       onCloseTab: input.onCloseTab,
       onCloseTabsBefore: input.onCloseTabsToLeft,

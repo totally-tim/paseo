@@ -5,6 +5,7 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
 import type { AgentRequestUsage } from "@getpaseo/protocol/agent-types";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { AccountUsageTooltip } from "@/provider-accounts/usage-tooltip";
 import { ProviderUsageTooltipSection } from "@/provider-usage/tooltip-section";
 import { useProviderUsage } from "@/provider-usage/use-provider-usage";
 import type { Theme } from "@/styles/theme";
@@ -19,6 +20,8 @@ export interface ContextWindowMeterProps {
   serverId?: string;
   /** The Paseo provider key, e.g. "claude", "gemini", "codex" */
   provider?: string | null;
+  accountId?: string;
+  model?: string | null;
   /** Reserve the meter footprint and show a loading ring while usage is pending. */
   pending?: boolean;
   /** Optional glyph envelope for icon-toolbar alignment. */
@@ -195,6 +198,8 @@ export function ContextWindowMeter({
   showPercentage = false,
   serverId,
   provider,
+  accountId,
+  model,
   pending = false,
   glyphSize,
 }: ContextWindowMeterProps) {
@@ -202,60 +207,27 @@ export function ContextWindowMeter({
   const [isTooltipOpen, setIsTooltipOpen] = useState(false);
   const { view: providerUsageView, refresh: refreshProviderUsage } = useProviderUsage(
     serverId ?? null,
-    { enabled: isTooltipOpen },
+    { enabled: isTooltipOpen && !accountId },
   );
   const percentage =
     maxTokens !== null && usedTokens !== null ? getUsagePercentage(maxTokens, usedTokens) : null;
   const handleTooltipOpenChange = useCallback(
     (nextOpen: boolean) => {
       setIsTooltipOpen(nextOpen);
-      if (nextOpen) {
+      if (nextOpen && !accountId) {
         void refreshProviderUsage().catch(() => {});
       }
     },
-    [refreshProviderUsage],
+    [refreshProviderUsage, accountId],
   );
 
   const geometry = getMeterGeometry(showPercentage, glyphSize);
 
-  // No usage yet: reserve the footprint with a track-only ring while a session is
-  // active so the real ring fades in without shifting siblings. Render nothing when
-  // no usage is expected.
-  if (percentage === null || maxTokens === null || usedTokens === null) {
-    if (!pending) {
-      return null;
-    }
-    return (
-      <View style={geometry.containerStyle}>
-        <Svg
-          width={geometry.svgSize}
-          height={geometry.svgSize}
-          viewBox={`0 0 ${geometry.svgSize} ${geometry.svgSize}`}
-          style={styles.svg}
-          accessibilityElementsHidden
-          importantForAccessibility="no-hide-descendants"
-        >
-          <ThemedCircle
-            cx={geometry.center}
-            cy={geometry.center}
-            r={geometry.radius}
-            fill="none"
-            uniProps={trackStroke}
-            strokeWidth={geometry.strokeWidth}
-          />
-        </Svg>
-        {showPercentage ? <View style={styles.skeletonLabel} /> : null}
-      </View>
-    );
-  }
-
-  const clampedPercentage = clampPercentage(percentage);
-  const roundedPercentage = Math.round(percentage);
+  const clampedPercentage = clampPercentage(percentage ?? 0);
+  const roundedPercentage = Math.round(percentage ?? 0);
   const { svgSize, center, radius, strokeWidth, circumference, containerStyle } = geometry;
   const dashOffset = circumference - (clampedPercentage / 100) * circumference;
   const progressStroke = progressStrokeFor(clampedPercentage);
-  const formattedSessionCost =
-    typeof totalCostUsd === "number" ? formatSessionCost(totalCostUsd) : null;
 
   return (
     <Tooltip
@@ -269,10 +241,12 @@ export function ContextWindowMeter({
         <Pressable
           style={containerStyle}
           testID="context-window-meter"
-          accessibilityRole="image"
-          accessibilityLabel={t("contextWindow.accessibility", {
-            percentage: roundedPercentage,
-          })}
+          accessibilityRole="button"
+          accessibilityLabel={
+            percentage === null
+              ? t("contextWindow.title")
+              : t("contextWindow.accessibility", { percentage: roundedPercentage })
+          }
         >
           <Svg
             width={svgSize}
@@ -287,7 +261,7 @@ export function ContextWindowMeter({
               cy={center}
               r={radius}
               fill="none"
-              uniProps={trackStroke}
+              uniProps={percentage === null ? normalStroke : trackStroke}
               strokeWidth={strokeWidth}
             />
             <ThemedCircle
@@ -303,32 +277,74 @@ export function ContextWindowMeter({
             />
           </Svg>
           {showPercentage ? (
-            <Text style={styles.percentageLabel}>{`${roundedPercentage}%`}</Text>
+            <Text style={styles.percentageLabel}>
+              {percentage === null ? "—" : `${roundedPercentage}%`}
+            </Text>
           ) : null}
         </Pressable>
       </TooltipTrigger>
       <TooltipContent side="top" align="center" offset={8}>
         <View style={styles.tooltipContent}>
-          <Text style={styles.tooltipTitle}>{t("contextWindow.title")}</Text>
-          <Text style={styles.tooltipText}>
-            {t("contextWindow.used", { percentage: roundedPercentage })}
-          </Text>
-          <Text style={styles.tooltipDetail}>
-            {t("contextWindow.tokens", {
-              used: formatTokenCount(usedTokens),
-              max: formatTokenCount(maxTokens),
-            })}
-          </Text>
-          <RequestMetrics lastRequest={lastRequest} />
-          {formattedSessionCost ? (
-            <Text style={styles.tooltipDetail}>
-              {t("contextWindow.sessionCost", { cost: formattedSessionCost })}
-            </Text>
+          <ContextUsageDetails
+            percentage={percentage}
+            maxTokens={maxTokens}
+            usedTokens={usedTokens}
+            pending={pending}
+            totalCostUsd={totalCostUsd}
+          />
+          {accountId && serverId && isTooltipOpen ? (
+            <AccountUsageTooltip
+              serverId={serverId}
+              accountId={accountId}
+              provider={provider}
+              model={model}
+            />
           ) : null}
-          <ProviderUsageTooltipSection view={providerUsageView} activeProviderId={provider} />
+          {!accountId ? (
+            <ProviderUsageTooltipSection view={providerUsageView} activeProviderId={provider} />
+          ) : null}
+          <RequestMetrics lastRequest={lastRequest} />
         </View>
       </TooltipContent>
     </Tooltip>
+  );
+}
+
+function ContextUsageDetails({
+  percentage,
+  maxTokens,
+  usedTokens,
+  pending,
+  totalCostUsd,
+}: Pick<ContextWindowMeterProps, "maxTokens" | "usedTokens" | "pending" | "totalCostUsd"> & {
+  percentage: number | null;
+}) {
+  const { t } = useTranslation();
+  const roundedPercentage = Math.round(percentage ?? 0);
+  const formattedSessionCost =
+    typeof totalCostUsd === "number" ? formatSessionCost(totalCostUsd) : null;
+  return (
+    <>
+      <Text style={styles.tooltipTitle}>{t("contextWindow.title")}</Text>
+      <Text style={styles.tooltipText}>
+        {percentage === null
+          ? t(pending ? "common.loading" : "providerAccounts.contextUnavailable")
+          : t("contextWindow.used", { percentage: roundedPercentage })}
+      </Text>
+      {percentage !== null && usedTokens !== null && maxTokens !== null ? (
+        <Text style={styles.tooltipDetail}>
+          {t("contextWindow.tokens", {
+            used: formatTokenCount(usedTokens),
+            max: formatTokenCount(maxTokens),
+          })}
+        </Text>
+      ) : null}
+      {formattedSessionCost ? (
+        <Text style={styles.tooltipDetail}>
+          {t("contextWindow.sessionCost", { cost: formattedSessionCost })}
+        </Text>
+      ) : null}
+    </>
   );
 }
 
@@ -355,12 +371,6 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.base,
     fontWeight: theme.fontWeight.normal,
-  },
-  skeletonLabel: {
-    width: 22,
-    height: theme.fontSize.base,
-    borderRadius: theme.borderRadius.full,
-    backgroundColor: theme.colors.surface3,
   },
   tooltipContent: {
     gap: theme.spacing[1.5],

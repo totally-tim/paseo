@@ -30,6 +30,7 @@ export interface SelectFieldOption<TValue> {
   label: string;
   description?: string;
   kind?: ComboboxOption["kind"];
+  disabled?: boolean;
   testID?: string;
 }
 
@@ -219,7 +220,7 @@ export function SelectField<TValue>({
   const handleSelect = useCallback(
     (id: string) => {
       const option = optionById.get(id);
-      if (!option) {
+      if (!option || option.disabled) {
         return;
       }
       onChange(option.value, { label: option.label, description: option.description });
@@ -271,6 +272,7 @@ export function SelectField<TValue>({
       }
       return (
         <ComboboxItem
+          disabled={selectOption.disabled}
           testID={selectOption.testID}
           label={selectOption.label}
           description={selectOption.description}

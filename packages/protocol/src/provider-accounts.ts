@@ -1,3 +1,4 @@
+import type { ProviderUsage } from "./messages.js";
 import { z } from "zod";
 
 export const AccountProviderSchema = z.enum(["claude", "codex"]);
@@ -97,6 +98,7 @@ export const AccountOperationSchema = z.discriminatedUnion("kind", [
   }),
   z.object({ kind: z.literal("restore"), accountId: z.string() }),
   z.object({ kind: z.literal("policy"), policy: AccountPolicySchema }),
+  z.object({ kind: z.literal("reorder"), accountIds: z.array(z.string()).max(34) }),
 ]);
 export type AccountOperation = z.infer<typeof AccountOperationSchema>;
 
@@ -118,3 +120,27 @@ export const ProviderAccountCatalogRequestSchema = z.object({
   model: z.string().optional(),
   cwd: z.string().optional(),
 });
+
+/** Shared by admission and the running account tooltip; unidentified scopes stay conservative. */
+export function getAccountUsageWindows(
+  usage: ProviderUsage | null,
+  model?: string,
+): ProviderUsage["windows"] {
+  if (usage?.status !== "available") return [];
+  const key = (value: string) => value.toLowerCase().replaceAll(/[^a-z0-9]/g, "");
+  const selected = model ? key(model) : undefined;
+  return usage.windows.filter((window) => {
+    let scope: string | undefined;
+    if (window.id === "seven_day_opus") scope = "opus";
+    if (window.id === "seven_day_sonnet") scope = "sonnet";
+    if (window.id.startsWith("model:")) scope = window.id.split(":").slice(2).join(":");
+    if (usage.providerId === "codex") {
+      const bucket = window.id.replace(/:(primary|secondary|account_limit)$/, "");
+      if (/^gpt-\d/i.test(bucket)) scope = bucket;
+      const label = window.label.split(" · ").at(-1);
+      if (label && /^gpt-\d/i.test(label)) scope = label;
+    }
+    if (!scope) return true;
+    return selected ? selected.includes(key(scope)) : false;
+  });
+}

@@ -1,5 +1,5 @@
+import { MAX_CONTENT_WIDTH } from "@/constants/layout";
 import { AgentRecoveryStatus } from "./recovery-status";
-import { AgentAccountLabel } from "@/provider-accounts/agent-label";
 import { useCallback, useState, type ReactNode } from "react";
 import { useShallow } from "zustand/shallow";
 import { Text, View } from "react-native";
@@ -14,7 +14,6 @@ import { useHostFeature } from "@/runtime/host-features";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { Button } from "@/components/ui/button";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
-import { AgentHandoffSheet } from "./handoff-sheet";
 
 function RetryContinuation({
   serverId,
@@ -68,19 +67,15 @@ function RetryContinuation({
 export function AgentContinuationControls({
   serverId,
   agentId,
-  cwd,
   children,
 }: {
   serverId: string;
   agentId: string;
-  cwd: string;
   children: ReactNode;
 }) {
   const { t } = useTranslation();
   const supported = useHostFeature(serverId, "agentHandoff");
-  const connected = useHostRuntimeIsConnected(serverId);
-  const [open, setOpen] = useState(false);
-  const [from, to, archived, accountId] = useSessionStore(
+  const [from, to, archived] = useSessionStore(
     useShallow((state) => {
       const agent =
         state.sessions[serverId]?.agents.get(agentId) ??
@@ -89,7 +84,6 @@ export function AgentContinuationControls({
         agent?.labels[HANDOFF_FROM_AGENT_ID_LABEL],
         agent?.labels[HANDOFF_TO_AGENT_ID_LABEL],
         Boolean(agent?.archivedAt),
-        agent?.accountId,
       ] as const;
     }),
   );
@@ -108,62 +102,55 @@ export function AgentContinuationControls({
   const openSuccessor = useCallback(() => {
     if (to) navigateToAgent({ serverId, agentId: to });
   }, [to, serverId]);
-  const openSheet = useCallback(() => setOpen(true), []);
-  const closeSheet = useCallback(() => setOpen(false), []);
   if (!supported) return children;
   return (
     <>
       <AgentRecoveryStatus serverId={serverId} agentId={agentId} />
-      <View style={styles.row}>
-        {accountId ? <AgentAccountLabel serverId={serverId} accountId={accountId} /> : null}
-        {from ? (
-          <Button variant="ghost" size="sm" onPress={openSource} testID="agent-handoff-predecessor">
-            {t("agentHandoff.source")}
-          </Button>
-        ) : null}
-        {to ? (
-          <>
-            <Text style={styles.text}>{t("agentHandoff.stopped")}</Text>
+      {from || to ? (
+        <View style={styles.row}>
+          {from ? (
             <Button
-              variant="secondary"
+              variant="ghost"
               size="sm"
-              onPress={openSuccessor}
-              testID="agent-handoff-successor"
+              onPress={openSource}
+              testID="agent-handoff-predecessor"
             >
-              {t("agentHandoff.successor")}
+              {t("agentHandoff.source")}
             </Button>
-          </>
-        ) : null}
-        {to && targetProvider && !targetHasPrompt && !archived ? (
-          <RetryContinuation
-            serverId={serverId}
-            agentId={agentId}
-            provider={targetProvider}
-            accountId={targetAccountId}
-          />
-        ) : null}
-        {(!to || !targetProvider) && !archived ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={!connected}
-            onPress={openSheet}
-            testID="agent-handoff-open"
-          >
-            {t("agentHandoff.action")}
-          </Button>
-        ) : null}
-      </View>
-      {to ? null : children}
-      {open ? (
-        <AgentHandoffSheet serverId={serverId} agentId={agentId} cwd={cwd} onClose={closeSheet} />
+          ) : null}
+          {to ? (
+            <>
+              <Text style={styles.text}>{t("agentHandoff.stopped")}</Text>
+              <Button
+                variant="secondary"
+                size="sm"
+                onPress={openSuccessor}
+                testID="agent-handoff-successor"
+              >
+                {t("agentHandoff.successor")}
+              </Button>
+            </>
+          ) : null}
+          {to && targetProvider && !targetHasPrompt && !archived ? (
+            <RetryContinuation
+              serverId={serverId}
+              agentId={agentId}
+              provider={targetProvider}
+              accountId={targetAccountId}
+            />
+          ) : null}
+        </View>
       ) : null}
+      {to ? null : children}
     </>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
   row: {
+    width: "100%",
+    maxWidth: MAX_CONTENT_WIDTH,
+    alignSelf: "center",
     flexDirection: "row",
     flexWrap: "wrap",
     alignItems: "center",
