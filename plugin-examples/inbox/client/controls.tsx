@@ -1,6 +1,7 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 
-import { StyleSheet, Text, TextInput, View } from "react-native";
+import { TextInput } from "@getpaseo/plugin/client/react-native";
+import { StyleSheet, Text, View } from "react-native";
 import { useCallback, useMemo } from "react";
 import type { CardActions } from "./card";
 import { PermissionControls } from "./permission-card";

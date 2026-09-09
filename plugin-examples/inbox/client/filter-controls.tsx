@@ -1,8 +1,8 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 
-import { Modal } from "@getpaseo/plugin/client/react-native";
+import { Modal, TextInput } from "@getpaseo/plugin/client/react-native";
 import { useCallback, useMemo, useState } from "react";
-import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import { ALL_PROJECTS, type InboxFilters } from "./filters";
 import { ActionButton } from "./question-card";
 import type { InboxSnapshot, InboxStore } from "./store";
@@ -140,12 +140,14 @@ export function FilterControls({
         <ActionButton
           theme={theme}
           label={`Group: ${filters.projectGroup === null ? "All" : filters.projectGroup || "Ungrouped"}`}
+          testID="inbox-filter-group"
           onPress={openGroup}
           disabled={!snapshot.filtersReady}
         />
         <ActionButton
           theme={theme}
           label={`Project: ${filters.projectId ? projectLabel || "Unavailable project" : "All"}`}
+          testID="inbox-filter-project"
           onPress={openProject}
           disabled={!snapshot.filtersReady}
         />
@@ -173,6 +175,7 @@ export function FilterControls({
             <TextInput
               value={search}
               onChangeText={setSearch}
+              testID="inbox-filter-search"
               accessibilityLabel="Search filters"
               placeholder="Search…"
               placeholderTextColor={theme.colors.foregroundMuted}
