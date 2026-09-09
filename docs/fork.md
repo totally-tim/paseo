@@ -85,10 +85,12 @@ the delta's shape. GitHub only runs scheduled workflows from the default branch,
 ## Automation scope
 
 The fork automates only the product paths the team uses. GitHub Actions contains core CI,
-macOS desktop release and rollout, release-note sync, and the upstream drift check. The EAS
-tag workflows and the Android, web, website, relay, Docker, Nix, Linux desktop, and Windows
-desktop workflows are intentionally absent. Source support for those targets remains for
-upstream syncs and local use.
+macOS desktop release and rollout, the iOS TestFlight build, the nightly end-to-end suite,
+release-note sync, and the upstream drift check. The EAS tag workflows and the Android, web, website, relay, Docker, Nix, Linux
+desktop, and Windows desktop workflows are intentionally absent. iOS builds with `xcodebuild` on
+a GitHub runner rather than EAS. `packages/app/eas.json` and the `eas.projectId` in
+`app.config.js` stay for local use; what the fork drops is the EAS workflows. Source support for the
+other targets remains for upstream syncs and local use.
 
 Core CI routes pull requests and `main` pushes by changed path. A manual CI dispatch runs every
 retained contract. The macOS release builds both Apple silicon and Intel artifacts. The static
@@ -137,9 +139,14 @@ must say `owner: totally-tim`.
 
 ## Releasing
 
-Tag `main` and push the tag. `.github/workflows/desktop-release.yml` builds and notarizes macOS
-for Apple silicon and Intel, then publishes both artifacts to the repository it runs in. The
-feed points at that repository, so installed fork apps update themselves from the release.
+Tag `main` and push the tag. One `v*` tag ships both platforms.
+`.github/workflows/desktop-release.yml` builds and notarizes macOS for Apple silicon and Intel,
+then publishes both artifacts to the repository it runs in. The feed points at that repository,
+so installed fork apps update themselves from the release. `.github/workflows/ios-testflight.yml`
+runs off the same tag: it prebuilds the Expo project, archives with `xcodebuild`, and uploads the
+IPA to TestFlight. Ship one platform alone with a prefixed tag. `desktop-macos-v*` uploads into the
+release that version already has instead of creating one, and `ios-v*` creates no release at all,
+because TestFlight is not a GitHub release.
 
 ```bash
 git switch main && git pull
@@ -149,7 +156,11 @@ git push origin v1.0.1
 
 The five notarization secrets (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`,
 `APPLE_PASSWORD`, `APPLE_TEAM_ID`) are set on the fork repository. `electron-builder.yml` sets
-`notarize: true`, so nothing else is needed. The fork is a public repository, so a tagged release
+`notarize: true`, so nothing else is needed. iOS signs from its own six secrets
+(`IOS_DIST_CERTIFICATE`, `IOS_DIST_CERTIFICATE_PASSWORD`, `IOS_PROVISIONING_PROFILE`,
+`ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_PRIVATE_KEY`) plus the shared `APPLE_TEAM_ID`. A TestFlight build number cannot be reused,
+so `packages/app/native-release-version.js` derives a unique one per version; a rebuild of the
+same version needs a new version. The fork is a public repository, so a tagged release
 is downloadable by anyone who finds it.
 
 ## Building and installing locally

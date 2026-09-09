@@ -174,6 +174,68 @@ export async function openSidebarDisplayPage(page: Page, branchTestID: string): 
   await page.getByTestId(branchTestID).click();
 }
 
+// A drop no longer settles inside the browser. The new order goes to the host and the rows move
+// again when it answers (docs/data-model.md#sidebar-ordering), so a row measured too early is a
+// moving target and the next press lands on whatever slid under the pointer. A sample carries
+// every row's position and the inline transform dnd-kit animates with, so two identical samples
+// mean nothing is moving. It cannot see a write still in flight on the host; the callers' own
+// order assertions cover that.
+const DRAGGABLE_SIDEBAR_ROWS =
+  '[data-testid^="sidebar-project-row-"], [data-testid^="sidebar-workspace-row-"], [data-testid^="sidebar-project-group-header-"]';
+
+export async function waitForSidebarRowsSettled(page: Page): Promise<void> {
+  // A selector that matches nothing would sample the empty string twice and read as settled, so
+  // an empty sample is never accepted below.
+  const sample = () =>
+    page.locator(DRAGGABLE_SIDEBAR_ROWS).evaluateAll((elements) =>
+      elements
+        .map((element) => {
+          const moving =
+            element.closest<HTMLElement>('[style*="transform"]')?.style.transform ?? "";
+          return `${element.getAttribute("data-testid")}@${Math.round(
+            element.getBoundingClientRect().top,
+          )}/${moving}`;
+        })
+        .join("|"),
+    );
+  let previous: string | null = null;
+  await expect
+    .poll(
+      async () => {
+        const current = await sample();
+        const settled = current.length > 0 && previous === current;
+        previous = current;
+        return settled;
+      },
+      {
+        message: "sidebar rows never stopped moving",
+        timeout: 15_000,
+        intervals: [200],
+      },
+    )
+    .toBe(true);
+}
+
+// A host refuses every ordering write until one device imports its order, which is the
+// documented first-use step (docs/data-model.md#sidebar-ordering). Any spec that drags a
+// sidebar row, or drops a project on a group, has to take that step first.
+export async function importSidebarOrder(page: Page, serverId = getServerId()): Promise<void> {
+  await openSidebarDisplayPage(page, "sidebar-order-settings");
+  const host = page.getByTestId(`sidebar-order-host-${serverId}`);
+  // The row renders for every host status, so wait for one of the two states that answer the
+  // question before deciding. A host stuck loading or offline fails here naming what it said,
+  // rather than timing out on a bare boolean.
+  await expect(host).toContainText(/Order synced|Import the order from the device/, {
+    timeout: 30_000,
+  });
+  // The daemon outlives a single test, so the second sidebar spec in a worker finds the order
+  // already imported and is offered no button.
+  const importButton = page.getByTestId(`sidebar-order-import-${serverId}`);
+  if ((await importButton.count()) > 0) await importButton.click();
+  await expect(host).toContainText("Order synced", { timeout: 30_000 });
+  await closeSidebarDisplayPreferences(page);
+}
+
 // Project filters live a page below the display-preferences root, like the host filters.
 export async function openSidebarProjectFilter(page: Page): Promise<void> {
   await openSidebarDisplayPage(page, "sidebar-display-project-filter");

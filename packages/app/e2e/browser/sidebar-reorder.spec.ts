@@ -4,6 +4,7 @@ import { gotoAppShell } from "../support/helpers/app";
 import { projectEquivalenceViewKey } from "../support/helpers/project-view-key";
 import { getServerId } from "../support/helpers/server-id";
 import { seedWorkspace } from "../support/helpers/seed-client";
+import { importSidebarOrder, waitForSidebarRowsSettled } from "../support/helpers/sidebar";
 import { waitForSidebarHydration } from "../support/helpers/workspace-ui";
 
 async function rowTestIds(rows: Locator) {
@@ -38,6 +39,7 @@ async function quickDragFirstRowAfterSecond(
   pressRow: (rows: Locator) => Promise<void>,
 ) {
   await expect(rows).toHaveCount(2);
+  await waitForSidebarRowsSettled(rows.page());
   const before = await rowTestIds(rows);
   const sourceBox = await visibleBoundingBox(rows.nth(0));
   const targetBox = await visibleBoundingBox(rows.nth(1));
@@ -78,6 +80,7 @@ test("projects, workspaces, and pinned chats reorder with an immediate mouse dra
 
     await gotoAppShell(page);
     await waitForSidebarHydration(page);
+    await importSidebarOrder(page);
 
     const firstProjectTestId = `sidebar-project-row-${projectEquivalenceViewKey(firstProject.projectKey)}`;
     const secondProjectTestId = `sidebar-project-row-${projectEquivalenceViewKey(secondProject.projectKey)}`;

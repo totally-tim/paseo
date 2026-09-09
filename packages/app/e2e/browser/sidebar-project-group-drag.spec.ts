@@ -2,7 +2,11 @@ import { expect, type Locator, type Page } from "@playwright/test";
 import { test } from "../support/fixtures";
 import { gotoAppShell } from "../support/helpers/app";
 import { seedWorkspace } from "../support/helpers/seed-client";
-import { openProjectContextMenu } from "../support/helpers/sidebar";
+import {
+  importSidebarOrder,
+  openProjectContextMenu,
+  waitForSidebarRowsSettled,
+} from "../support/helpers/sidebar";
 import { waitForSidebarHydration } from "../support/helpers/workspace-ui";
 
 async function center(locator: Locator): Promise<{ x: number; y: number }> {
@@ -17,6 +21,7 @@ async function center(locator: Locator): Promise<{ x: number; y: number }> {
  * before the pointer aims anywhere.
  */
 async function dragProjectRowTo(page: Page, projectViewKey: string, target: Locator) {
+  await waitForSidebarRowsSettled(page);
   const source = await center(page.getByTestId(`sidebar-project-row-${projectViewKey}`));
   await page.mouse.move(source.x, source.y);
   await page.mouse.down();
@@ -76,6 +81,7 @@ async function expectGroupOrder(page: Page, groupKeys: string[]) {
  * so the dragged section's centre ends up above the target's and the target yields its place.
  */
 async function dragGroupHeaderAbove(page: Page, groupKey: string, targetGroupKey: string) {
+  await waitForSidebarRowsSettled(page);
   const source = await center(page.getByTestId(`sidebar-project-group-toggle-${groupKey}`));
   await page.mouse.move(source.x, source.y);
   await page.mouse.down();
@@ -107,6 +113,7 @@ test.describe("Project groups by drag and drop", () => {
     try {
       await gotoAppShell(page);
       await waitForSidebarHydration(page);
+      await importSidebarOrder(page);
       await expectProjectUngrouped(page, a.projectKey);
       await expectProjectUngrouped(page, b.projectKey);
       await expectProjectUngrouped(page, c.projectKey);
@@ -133,6 +140,7 @@ test.describe("Project groups by drag and drop", () => {
       });
 
       await test.step("dropping a grouped row on Remove from group ungroups it", async () => {
+        await waitForSidebarRowsSettled(page);
         const source = await center(page.getByTestId(`sidebar-project-row-${a.projectKey}`));
         await page.mouse.move(source.x, source.y);
         await page.mouse.down();
