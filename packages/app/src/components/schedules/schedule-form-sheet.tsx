@@ -1105,6 +1105,7 @@ function ScheduleAccountField({
     <AccountSelectionField
       serverId={state.selectedServerId}
       provider={state.selectedProvider}
+      model={state.selectedModel}
       value={state.accountSelection}
       onChange={model.setAccountSelection}
     />

@@ -228,6 +228,11 @@ export function SearchInput({
 export interface ComboboxItemProps {
   label: string;
   description?: string;
+  /**
+   * Secondary content stacked under the label, for rows whose detail is more than
+   * one line of text. The row switches to a column and stops clipping `description`.
+   */
+  body?: ReactNode;
   kind?: "directory" | "file";
   leadingSlot?: ReactNode;
   trailingSlot?: ReactNode;
@@ -244,6 +249,7 @@ export interface ComboboxItemProps {
 export function ComboboxItem({
   label,
   description,
+  body,
   kind,
   leadingSlot,
   trailingSlot,
@@ -274,20 +280,27 @@ export function ComboboxItem({
     );
   }
 
+  const stacked = body != null && body !== false;
+
   const itemPressableStyle = useCallback(
     ({ pressed, hovered = false }: PressableStateCallbackType & { hovered?: boolean }) => [
       styles.comboboxItem,
+      stacked && styles.comboboxItemStacked,
       hovered && (elevated ? styles.comboboxItemHoveredElevated : styles.comboboxItemHovered),
       pressed && (elevated ? styles.comboboxItemPressedElevated : styles.comboboxItemPressed),
       active && styles.comboboxItemActive,
       disabled && styles.comboboxItemDisabled,
     ],
-    [elevated, active, disabled],
+    [stacked, elevated, active, disabled],
   );
 
   const itemContentStyle = useMemo(
-    () => [styles.comboboxItemContent, description && styles.comboboxItemContentInline],
-    [description],
+    () => [
+      styles.comboboxItemContent,
+      Boolean(description) && !stacked && styles.comboboxItemContentInline,
+      stacked && styles.comboboxItemContentStacked,
+    ],
+    [stacked, description],
   );
 
   return (
@@ -305,13 +318,20 @@ export function ComboboxItem({
           {label}
         </Text>
         {description ? (
-          <Text numberOfLines={1} style={styles.comboboxItemDescription}>
+          <Text numberOfLines={stacked ? undefined : 1} style={styles.comboboxItemDescription}>
             {description}
           </Text>
         ) : null}
+        {body}
       </View>
       {selected || trailingSlot ? (
-        <View style={styles.comboboxItemTrailingContainer}>
+        <View
+          style={
+            stacked
+              ? styles.comboboxItemTrailingContainerStacked
+              : styles.comboboxItemTrailingContainer
+          }
+        >
           <View style={styles.comboboxItemTrailingSlot}>
             {selected ? <Check size={16} color={theme.colors.foregroundMuted} /> : null}
           </View>
@@ -1671,6 +1691,9 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.foreground,
     fontSize: theme.fontSize.base,
   },
+  comboboxItemStacked: {
+    alignItems: "flex-start",
+  },
   comboboxItem: {
     flexDirection: "row",
     alignItems: "center",
@@ -1715,6 +1738,13 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[1],
     marginLeft: "auto",
   },
+  comboboxItemTrailingContainerStacked: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+    marginLeft: "auto",
+    marginTop: 2,
+  },
   comboboxItemContent: {
     flex: 1,
     flexShrink: 1,
@@ -1723,6 +1753,9 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: "row",
     alignItems: "baseline",
     gap: theme.spacing[2],
+  },
+  comboboxItemContentStacked: {
+    gap: theme.spacing[1],
   },
   comboboxItemLeadingSlot: {
     width: 16,

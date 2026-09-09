@@ -1905,6 +1905,7 @@ export function DraftAgentControls({
         <AccountSelectionField
           serverId={modelSelectorServerId}
           provider={selectedProvider ?? ""}
+          model={selectedModel}
           value={accountSelection}
           onChange={onSelectAccount}
           disabled={disabled}

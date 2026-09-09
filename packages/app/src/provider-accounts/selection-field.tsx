@@ -2,16 +2,22 @@ import { useCallback, useMemo } from "react";
 import { Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { StyleSheet } from "react-native-unistyles";
-import type { AccountSelection, ProviderAccount } from "@getpaseo/protocol/provider-accounts";
-import { SelectField } from "@/components/ui/select-field";
+import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
+import { SelectField, type SelectFieldRenderOptionInput } from "@/components/ui/select-field";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { ProviderUsageCard } from "@/provider-usage/card";
 import { useProviderAccounts } from "./use-provider-accounts";
 import { selectedAccount } from "./selection-summary";
+import { AccountSelectionOption } from "./selection-option";
+import { buildAccountOptions, defaultAccountSelection } from "./selection-options";
+
+/** Wide enough for an email and a usage bar when the trigger itself is a toolbar chip. */
+const OPTION_MIN_WIDTH = 320;
 
 export function AccountSelectionField({
   serverId,
   provider,
+  model,
   value,
   onChange,
   disabled,
@@ -19,6 +25,8 @@ export function AccountSelectionField({
 }: {
   serverId: string;
   provider: string;
+  /** Narrows each row's quota windows to the ones that apply to the model being started. */
+  model?: string | null;
   value?: AccountSelection;
   onChange: (selection: AccountSelection) => void;
   disabled?: boolean;
@@ -27,46 +35,29 @@ export function AccountSelectionField({
   const { t } = useTranslation();
   const accounts = useProviderAccounts(serverId);
   const size = useIsCompactFormFactor() ? "md" : "sm";
-  const options = useMemo(
-    () => [
-      {
-        id: "automatic",
-        value: "automatic",
-        label: t("providerAccounts.automatic"),
-        description: t("providerAccounts.automaticHelp"),
-      },
-      {
-        id: "default",
-        value: "default",
-        label: t("providerAccounts.hostAccount"),
-        disabled:
-          accounts.data?.accounts.find((account) => account.id === `default:${provider}`)
-            ?.enabled === false,
-        description: t("providerAccounts.externalHelp"),
-      },
-      ...(accounts.data?.accounts ?? [])
-        .filter(
-          (account) =>
-            account.provider === provider && account.ownership === "managed" && !account.removedAt,
-        )
-        .map((account) => ({
-          id: account.id,
-          value: account.id,
-          label: account.label,
-          disabled: !account.enabled || account.authState !== "ready",
-          description:
-            account.authState === "ready" && account.enabled
-              ? (account.identity?.email ?? t("providerAccounts.auth.ready"))
-              : t(
-                  account.enabled
-                    ? `providerAccounts.auth.${account.authState}`
-                    : "providerAccounts.disabled",
-                ),
-        })),
-    ],
-    [accounts.data, provider, t],
+  const labels = useMemo(
+    () => ({
+      automatic: t("providerAccounts.automatic"),
+      automaticHelp: t("providerAccounts.automaticHelp"),
+      hostAccount: t("providerAccounts.hostAccount"),
+      hostHelp: t("providerAccounts.externalHelp"),
+    }),
+    [t],
   );
-  const defaultKind = defaultSelection(accounts.data?.accounts ?? [], provider);
+  const options = useMemo(
+    () => buildAccountOptions(accounts.data, provider, model, labels),
+    [accounts.data, labels, model, provider],
+  );
+  const renderOption = useCallback(
+    (input: SelectFieldRenderOptionInput<string>) => (
+      <AccountSelectionOption
+        {...input}
+        detail={options.find((option) => option.id === input.option.id)?.detail}
+      />
+    ),
+    [options],
+  );
+  const defaultKind = defaultAccountSelection(accounts.data?.accounts ?? [], provider);
   const selection = useMemo(() => value ?? { kind: defaultKind }, [value, defaultKind]);
   const selected = value?.kind === "fixed" ? value.accountId : (value?.kind ?? defaultKind);
   const display = useMemo(
@@ -94,6 +85,8 @@ export function AccountSelectionField({
         selectedDisplay={display}
         options={options}
         onChange={change}
+        renderOption={renderOption}
+        desktopMinWidth={OPTION_MIN_WIDTH}
         placeholder={t("providerAccounts.account")}
         emptyText={t("common.empty.noResults")}
         disabled={disabled || !accounts.connected}
@@ -146,18 +139,6 @@ const styles = StyleSheet.create((theme) => ({
   text: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
   error: { color: theme.colors.statusDanger, fontSize: theme.fontSize.sm },
 }));
-
-function defaultSelection(accounts: ProviderAccount[], provider: string): "automatic" | "default" {
-  return accounts.some(
-    (account) =>
-      account.provider === provider &&
-      account.ownership === "managed" &&
-      account.enabled &&
-      !account.removedAt,
-  )
-    ? "automatic"
-    : "default";
-}
 
 function supportsProvider(supported: boolean, provider: string): boolean {
   return supported && (provider === "claude" || provider === "codex");

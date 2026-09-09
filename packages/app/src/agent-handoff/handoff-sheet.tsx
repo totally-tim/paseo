@@ -257,6 +257,7 @@ export function AgentHandoffSheet({
         <AccountSelectionField
           serverId={serverId}
           provider={state.selection.provider}
+          model={state.selection.modelId}
           value={state.selection.accountSelection}
           onChange={form.selectAccount}
           disabled={state.pending}
