@@ -1,7 +1,8 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 
 import { useCallback, useMemo, useState } from "react";
-import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { TextInput } from "@getpaseo/plugin/client/react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import { buildAnswers, isAnswered, parseQuestions, type Question } from "./question-form";
 import type { PermissionRequest, PermissionResponse } from "./types";
 
@@ -249,6 +250,7 @@ export function ActionButton({
   primary = false,
   danger = false,
   disabled = false,
+  testID,
 }: {
   theme: PluginTheme;
   label: string;
@@ -256,6 +258,7 @@ export function ActionButton({
   primary?: boolean;
   danger?: boolean;
   disabled?: boolean;
+  testID?: string;
 }) {
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
@@ -291,6 +294,7 @@ export function ActionButton({
     <Pressable
       accessibilityRole="button"
       accessibilityState={accessibilityState}
+      testID={testID}
       onPress={onPress}
       onHoverIn={enter}
       onHoverOut={leave}

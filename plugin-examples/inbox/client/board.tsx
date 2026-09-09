@@ -4,7 +4,8 @@ import type { PluginSurfaceProps, PluginWorkspacePanelProps } from "@getpaseo/pl
 import { usePaseo } from "@getpaseo/plugin/client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { TextInput } from "@getpaseo/plugin/client/react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { type CardActions, InboxCardView } from "./card";
 import { keyToAction, resolveKeyAction } from "./keyboard";
 import { type InboxCard, type Lane, type Lanes } from "./lanes";
