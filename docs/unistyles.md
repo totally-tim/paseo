@@ -192,6 +192,18 @@ const { theme } = useUnistyles();
 
 Use this sparingly. It works because React re-renders the prop, but it gives up the main Unistyles native-update path for that value.
 
+## SVG children
+
+Wrap the complete SVG component with `withUnistyles`, then pass themed colors to its
+plain `Circle`, `Path`, or other SVG children. Never wrap those children individually:
+on web, `withUnistyles` inserts a `<div style={{display: 'contents'}}>`. Inside an
+`<svg>`, that wrapper prevents the shapes from painting even when their computed
+stroke colors are correct. The context window meter once had an invisible ring
+with a working hover target for this reason.
+
+Browser checks must verify the shapes have visible bounds before hover; checking
+stroke colors or the outer button's visibility does not catch this failure.
+
 ## `withUnistyles` And The `> *` Child-Selector Leak
 
 `withUnistyles` on a component with a theme-dependent `style` prop works by wrapping the component in a `<div style={{display: 'contents'}} className={hash}>` and emitting the style under a `.hash > *` child selector so the styles cascade onto the wrapped component. This is how auto-mapping for `style` and `contentContainerStyle` works on web.
