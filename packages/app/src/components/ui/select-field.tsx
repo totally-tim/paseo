@@ -57,6 +57,8 @@ export interface SelectFieldProps<TValue> {
   searchPlaceholder?: string;
   title?: string;
   size?: FieldControlSize;
+  /** Minimum width for the desktop popover, when the trigger is narrower than the rows need. */
+  desktopMinWidth?: number;
   getValueKey?: (value: TValue) => string;
   renderOption?: (input: SelectFieldRenderOptionInput<TValue>) => ReactElement;
   triggerLeading?: ReactNode;
@@ -187,6 +189,7 @@ export function SelectField<TValue>({
   searchPlaceholder,
   title,
   size = "md",
+  desktopMinWidth,
   getValueKey,
   renderOption,
   triggerLeading,
@@ -327,6 +330,7 @@ export function SelectField<TValue>({
         open={open}
         onOpenChange={setOpen}
         anchorRef={anchorRef}
+        desktopMinWidth={desktopMinWidth}
         renderOption={renderComboboxOption}
       />
     </>

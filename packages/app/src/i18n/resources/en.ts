@@ -30,6 +30,8 @@ export const en = {
     removalHelp:
       "Close this account's agents before removing it. History stays linked to this account. Restore it to resume old agents.",
     stale: "Waiting for a fresh usage reading",
+    capacityExhausted: "Account capacity exhausted",
+    capacityLimitModel: "Capacity limit for {{model}}",
     usageUnavailable: "The provider has not reported usage yet",
     lastReported: "Last reported",
     noAutomaticAccount: "No account available for automatic selection",

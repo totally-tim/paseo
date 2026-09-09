@@ -26,7 +26,7 @@ Use the unmodified provider binaries and the user's own provider login. Anthropi
 
 Use the account row arrows to set the order in settings and account selectors. Automatic selection uses this order when it needs another account. Reordering does not interrupt the current choice. Ordering needs a host with `server_info.features.providerAccountOrdering`.
 
-The model picker describes profile configuration and account choice. Detailed quota windows belong to account settings and the account field, where each provider-reported window stays separate and unknown readings remain visible.
+The model picker describes profile configuration and account choice. Detailed quota windows belong to account settings and the account field, where each provider-reported window stays separate and unknown readings remain visible. Each row of the account field carries the account's own label, its verified email, and the windows that apply to the model the agent will start on, so two logins on one address stay apart. The host CLI row uses the label you gave that account and says in its help line that the login belongs to the host CLI. A remembered capacity rejection is drawn on the row until its reported reset, or for the daemon's undated cooldown, matching the rule admission applies.
 
 A profile, new-agent form, schedule, or continuation can request a fixed account, the host CLI account, or automatic selection. With no explicit choice, new agents use automatic selection when enabled managed accounts exist; otherwise they preserve the host CLI behavior. An incomplete account stays outside the pool until its identity is verified.
 

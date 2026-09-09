@@ -279,6 +279,7 @@ function OpenAgentProfileEditModal({
         <AccountSelectionField
           serverId={serverId}
           provider={state.provider}
+          model={state.modelId}
           value={state.accountSelection}
           onChange={model.setAccountSelection}
           disabled={state.isSubmitting}
