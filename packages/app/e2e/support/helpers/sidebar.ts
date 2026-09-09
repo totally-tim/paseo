@@ -174,6 +174,60 @@ export async function openSidebarDisplayPage(page: Page, branchTestID: string): 
   await page.getByTestId(branchTestID).click();
 }
 
+// A drop no longer settles inside the browser. The new order goes to the host and the rows move
+// again when it answers (docs/data-model.md#sidebar-ordering), so a row measured too early is a
+// moving target and the next press lands on whatever slid under the pointer. Two identical
+// samples mean the list has stopped moving.
+const DRAGGABLE_SIDEBAR_ROWS =
+  '[data-testid^="sidebar-project-row-"], [data-testid^="sidebar-workspace-row-"], [data-testid^="sidebar-project-group-header-"]';
+
+export async function waitForSidebarRowsSettled(page: Page): Promise<void> {
+  const sample = () =>
+    page
+      .locator(DRAGGABLE_SIDEBAR_ROWS)
+      .evaluateAll((elements) =>
+        elements
+          .map(
+            (element) =>
+              `${element.getAttribute("data-testid")}@${Math.round(element.getBoundingClientRect().top)}`,
+          )
+          .join("|"),
+      );
+  let previous: string | null = null;
+  await expect
+    .poll(
+      async () => {
+        const current = await sample();
+        const settled = previous === current;
+        previous = current;
+        return settled;
+      },
+      { timeout: 15_000, intervals: [200] },
+    )
+    .toBe(true);
+}
+
+// A host refuses every ordering write until one device imports its order, which is the
+// documented first-use step (docs/data-model.md#sidebar-ordering). Any spec that drags a
+// sidebar row, or drops a project on a group, has to take that step first.
+export async function importSidebarOrder(page: Page, serverId = getServerId()): Promise<void> {
+  await openSidebarDisplayPage(page, "sidebar-order-settings");
+  const host = page.getByTestId(`sidebar-order-host-${serverId}`);
+  const importButton = page.getByTestId(`sidebar-order-import-${serverId}`);
+  // The daemon outlives a single test, so the second sidebar spec in a worker finds the order
+  // already imported and is offered no button. Wait for either resolution before deciding.
+  await expect
+    .poll(
+      async () =>
+        (await importButton.count()) > 0 || (await host.innerText()).includes("Order synced"),
+      { timeout: 30_000, intervals: [250] },
+    )
+    .toBe(true);
+  if ((await importButton.count()) > 0) await importButton.click();
+  await expect(host).toContainText("Order synced");
+  await closeSidebarDisplayPreferences(page);
+}
+
 // Project filters live a page below the display-preferences root, like the host filters.
 export async function openSidebarProjectFilter(page: Page): Promise<void> {
   await openSidebarDisplayPage(page, "sidebar-display-project-filter");
