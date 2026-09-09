@@ -65,17 +65,70 @@ function formatSessionCost(value: number): string | null {
   return `$${value.toFixed(2)}`;
 }
 
-const ThemedCircle = withUnistyles(Circle);
-const trackStroke = (theme: Theme) => ({ stroke: theme.colors.surface3 });
-const normalStroke = (theme: Theme) => ({ stroke: theme.colors.foregroundMuted });
-const warningStroke = (theme: Theme) => ({ stroke: theme.colors.palette.amber[500] });
-const criticalStroke = (theme: Theme) => ({ stroke: theme.colors.destructive });
-
-function progressStrokeFor(percentage: number) {
-  if (percentage > 90) return criticalStroke;
-  if (percentage >= 70) return warningStroke;
-  return normalStroke;
+interface ContextRingProps {
+  geometry: ReturnType<typeof getMeterGeometry>;
+  percentage: number | null;
+  trackColor: string;
+  normalColor: string;
+  warningColor: string;
+  criticalColor: string;
 }
+
+function ContextRing({
+  geometry,
+  percentage,
+  trackColor,
+  normalColor,
+  warningColor,
+  criticalColor,
+}: ContextRingProps) {
+  const { svgSize, center, radius, strokeWidth, circumference } = geometry;
+  const clampedPercentage = clampPercentage(percentage ?? 0);
+  let progressColor = normalColor;
+  if (clampedPercentage > 90) {
+    progressColor = criticalColor;
+  } else if (clampedPercentage >= 70) {
+    progressColor = warningColor;
+  }
+  return (
+    <Svg
+      width={svgSize}
+      height={svgSize}
+      viewBox={`0 0 ${svgSize} ${svgSize}`}
+      style={styles.svg}
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+    >
+      <Circle
+        cx={center}
+        cy={center}
+        r={radius}
+        fill="none"
+        stroke={percentage === null ? normalColor : trackColor}
+        strokeWidth={strokeWidth}
+      />
+      <Circle
+        cx={center}
+        cy={center}
+        r={radius}
+        fill="none"
+        stroke={progressColor}
+        strokeWidth={strokeWidth}
+        strokeLinecap="round"
+        strokeDasharray={circumference}
+        strokeDashoffset={circumference - (clampedPercentage / 100) * circumference}
+      />
+    </Svg>
+  );
+}
+
+// Keep the web theme wrapper outside the SVG: its HTML div hides SVG children.
+const ThemedContextRing = withUnistyles(ContextRing, (theme: Theme) => ({
+  trackColor: theme.colors.surface3,
+  normalColor: theme.colors.foregroundMuted,
+  warningColor: theme.colors.palette.amber[500],
+  criticalColor: theme.colors.destructive,
+}));
 
 function getMeterGeometry(showPercentage: boolean, glyphSize?: number) {
   if (showPercentage) {
@@ -223,11 +276,8 @@ export function ContextWindowMeter({
 
   const geometry = getMeterGeometry(showPercentage, glyphSize);
 
-  const clampedPercentage = clampPercentage(percentage ?? 0);
   const roundedPercentage = Math.round(percentage ?? 0);
-  const { svgSize, center, radius, strokeWidth, circumference, containerStyle } = geometry;
-  const dashOffset = circumference - (clampedPercentage / 100) * circumference;
-  const progressStroke = progressStrokeFor(clampedPercentage);
+  const { containerStyle } = geometry;
 
   return (
     <Tooltip
@@ -248,34 +298,7 @@ export function ContextWindowMeter({
               : t("contextWindow.accessibility", { percentage: roundedPercentage })
           }
         >
-          <Svg
-            width={svgSize}
-            height={svgSize}
-            viewBox={`0 0 ${svgSize} ${svgSize}`}
-            style={styles.svg}
-            accessibilityElementsHidden
-            importantForAccessibility="no-hide-descendants"
-          >
-            <ThemedCircle
-              cx={center}
-              cy={center}
-              r={radius}
-              fill="none"
-              uniProps={percentage === null ? normalStroke : trackStroke}
-              strokeWidth={strokeWidth}
-            />
-            <ThemedCircle
-              cx={center}
-              cy={center}
-              r={radius}
-              fill="none"
-              uniProps={progressStroke}
-              strokeWidth={strokeWidth}
-              strokeLinecap="round"
-              strokeDasharray={circumference}
-              strokeDashoffset={dashOffset}
-            />
-          </Svg>
+          <ThemedContextRing geometry={geometry} percentage={percentage} />
           {showPercentage ? (
             <Text style={styles.percentageLabel}>
               {percentage === null ? "—" : `${roundedPercentage}%`}
