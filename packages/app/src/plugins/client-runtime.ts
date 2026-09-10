@@ -8,7 +8,7 @@ import {
 import { createPluginClientStateSource } from "./client-state/source";
 import type { PluginClientRuntime } from "./evaluate";
 import { createPluginNavigation } from "./navigation";
-import { pluginComposerPillStore } from "./composer-pills/store";
+import { pluginButtonStore } from "./buttons";
 import { createPluginSurfaceRuntime } from "./surface-runtime";
 import type { InstalledPlugin } from "./types";
 import { createPluginClientStorage } from "./client-storage";
@@ -29,7 +29,10 @@ export function createPluginClientRuntime(
     ...capabilities,
     storage: createPluginClientStorage(installation.serverId, installation.id),
     addComposerPill(contribution) {
-      return pluginComposerPillStore.add(installation, contribution);
+      return pluginButtonStore.addComposerPill(installation, contribution);
+    },
+    addHeaderButton(contribution) {
+      return pluginButtonStore.addHeaderButton(installation, contribution);
     },
     openPanel(panelId, options) {
       openClientPanel({ installation, runtime, state, panelId, options });

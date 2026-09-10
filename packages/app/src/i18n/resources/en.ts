@@ -1141,6 +1141,16 @@ export const en = {
       updateHost: "Update this host to manage labels.",
     },
   },
+  changelog: {
+    title: "What's new",
+    installed: "Installed",
+    showMore: "Show more",
+    openWebsite: "Full changelog",
+    error: {
+      title: "Unable to load the changelog",
+      description: "Check your connection and try again.",
+    },
+  },
   sidebar: {
     display: {
       trigger: "Display preferences",
@@ -2298,6 +2308,7 @@ export const en = {
     about: {
       title: "About",
       appVersion: "App version",
+      whatsNewHint: "Release notes for every version",
       thisDevice: "This device",
       connectedHosts: "Connected hosts",
       offline: "Offline",
