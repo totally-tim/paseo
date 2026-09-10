@@ -8,6 +8,10 @@ import { describe, expect, test } from "vitest";
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import type { AgentStreamEvent } from "./agent-sdk-types.js";
 import { PluginAgentClientRegistry } from "./plugin-provider.js";
+import {
+  isStaleProviderSessionError,
+  StaleProviderSessionError,
+} from "./stale-provider-session-error.js";
 
 const CAPABILITIES = [
   "prompt.message",
@@ -29,6 +33,10 @@ interface ProviderHarnessOptions {
 function createProviderHarness(options: ProviderHarnessOptions = {}) {
   let listener: ((event: ProviderEvent) => void) | null = null;
   let closeCount = 0;
+  let resolveClosed!: () => void;
+  const closed = new Promise<void>((resolve) => {
+    resolveClosed = resolve;
+  });
   const inputs: ProviderInput[] = [];
   const emit = (event: ProviderEvent) => listener?.(event);
   const capabilities = options.capabilities ?? CAPABILITIES;
@@ -186,6 +194,7 @@ function createProviderHarness(options: ProviderHarnessOptions = {}) {
     },
     async close() {
       closeCount += 1;
+      resolveClosed();
     },
   };
 
@@ -197,7 +206,13 @@ function createProviderHarness(options: ProviderHarnessOptions = {}) {
     },
   };
 
-  return { registration, inputs, emit, closeCount: () => closeCount };
+  return {
+    registration,
+    inputs,
+    emit,
+    closeCount: () => closeCount,
+    waitForClose: () => closed,
+  };
 }
 
 function eventsOfType(events: AgentStreamEvent[], type: AgentStreamEvent["type"]) {
@@ -227,7 +242,11 @@ describe("PluginAgentClientRegistry", () => {
       try {
         await expect.poll(() => harness.inputs.some(isHeldInput)).toBe(true);
         registry.replace([]);
-        await expect(outcome).resolves.toMatch(/Provider.*closed/);
+        // Prompt failures on a closed runtime surface as StaleProviderSessionError so the
+        // prompt layer can reload and retry; other inputs still report the closed connection.
+        await expect(outcome).resolves.toMatch(
+          holdInput === "session.prompt" ? /stale/ : /Provider.*closed/,
+        );
       } finally {
         gate.resolve();
         await outcome;
@@ -416,6 +435,84 @@ describe("PluginAgentClientRegistry", () => {
       unsubscribe();
       await original.close();
       registry.replace([]);
+    }
+  });
+
+  test("closes a stale session after its plugin provider is replaced", async () => {
+    const old = createProviderHarness();
+    const next = createProviderHarness();
+    const registry = new PluginAgentClientRegistry(createTestLogger());
+
+    try {
+      registry.replace([old.registration]);
+
+      const stale = await registry.clients()[old.registration.id]!.createSession({
+        provider: old.registration.id,
+        cwd: "/workspace",
+      });
+      const persistence = stale.describePersistence();
+      expect(persistence).not.toBeNull();
+
+      registry.replace([next.registration]);
+      await old.waitForClose();
+      expect(old.closeCount()).toBe(1);
+
+      await expect(stale.close()).resolves.toBeUndefined();
+
+      const replacement = registry.clients()[next.registration.id];
+      expect(replacement).toBeDefined();
+      const resumed = await replacement!.resumeSession(persistence!, {
+        cwd: "/workspace",
+      });
+
+      await expect(
+        resumed.startTurn("after reload", { clientMessageId: "after-reload" }),
+      ).resolves.toEqual({ turnId: "turn-1" });
+
+      expect(next.inputs).toContainEqual(
+        expect.objectContaining({
+          type: "session.open",
+          history: "replay",
+          persistence: {
+            version: 1,
+            data: { token: "root" },
+          },
+        }),
+      );
+
+      await resumed.close();
+    } finally {
+      await registry.shutdown();
+    }
+  });
+
+  test("prompting a stale session raises StaleProviderSessionError", async () => {
+    const old = createProviderHarness();
+    const registry = new PluginAgentClientRegistry(createTestLogger());
+
+    try {
+      registry.replace([old.registration]);
+      const stale = await registry.clients()[old.registration.id]!.createSession({
+        provider: old.registration.id,
+        cwd: "/workspace",
+      });
+
+      registry.replace([]);
+      await old.waitForClose();
+      expect(old.closeCount()).toBe(1);
+
+      const failure = await stale
+        .startTurn("after reload", { clientMessageId: "after-reload" })
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+      expect(failure).toBeInstanceOf(StaleProviderSessionError);
+      expect(isStaleProviderSessionError(failure)).toBe(true);
+      expect(isStaleProviderSessionError(new Error("Provider connection is closed"))).toBe(false);
+      expect(isStaleProviderSessionError(new Error("boom"))).toBe(false);
+    } finally {
+      await registry.shutdown();
     }
   });
 

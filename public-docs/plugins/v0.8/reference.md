@@ -8,7 +8,7 @@ category: Plugins
 
 # Plugin reference
 
-> **For the upcoming Paseo v0.8 release.** Return to the [v0.8 quickstart](/docs/plugins/v0.8).
+> **For Paseo v0.8 beta.** Return to the [v0.8 quickstart](/docs/plugins/v0.8).
 
 Migrating an existing plugin? Follow the standalone [runtime-entry migration guide](/docs/plugins/v0.8/migration).
 
@@ -55,15 +55,13 @@ range. An omitted `requirements.paseo` means `<0.8.0`: the plugin predates the f
 plugin release. Paseo 0.8 and later reject it with a link to the [migration guide](migration).
 Empty strings, invalid ranges, and unknown manifest requirement keys are rejected.
 
-| Range            | Compatible releases                                                 |
-| ---------------- | ------------------------------------------------------------------- |
-| `>=0.8.0`        | 0.8.0 and later stable releases, including future breaking releases |
-| `^0.8.0`         | 0.8.x stable releases only                                          |
-| `>=0.8.3 <0.9.0` | 0.8.3 through the last 0.8 patch                                    |
-| `>=0.8.0-beta.1` | Betas from 0.8.0-beta.1, then 0.8.0 and later stable releases       |
+| Range            | Compatible releases                                                          |
+| ---------------- | ---------------------------------------------------------------------------- |
+| `>=0.8.0`        | 0.8.0 and later releases, including prereleases and future breaking releases |
+| `^0.8.0`         | 0.8.x releases, including prereleases                                        |
+| `>=0.8.3 <0.9.0` | 0.8.3 through the last 0.8 patch, including prereleases                      |
 
-Standard npm prerelease rules apply: `>=0.8.0` excludes `0.8.0-beta.1`. A prerelease must be
-explicitly included for its major/minor/patch tuple; no version tags are stripped.
+Prerelease Paseo versions also satisfy a range their stable core (`major.minor.patch`) satisfies, so `0.8.0-beta.1` satisfies `>=0.8.0` but not `<0.8.0`.
 
 `paseo plugin init` writes `>=` followed by the current CLI version and pins the matching SDK
 for typechecking. Raise the minimum when adopting a newer API. Add an upper bound when a later
@@ -81,10 +79,10 @@ and cannot show this new diagnostic.
 
 ### Runtime entries
 
-| Entry              | Runtime               | Receives              | Required                                                          |
-| ------------------ | --------------------- | --------------------- | ----------------------------------------------------------------- |
-| `index.client.tsx` | Paseo app, per client | `PluginClientContext` | When the plugin has any UI, callback, theme, or attachment source |
-| `index.server.ts`  | Daemon subprocess     | `PluginServerContext` | When the plugin handles RPCs                                      |
+| Entry              | Runtime               | Receives              | Required                                                                        |
+| ------------------ | --------------------- | --------------------- | ------------------------------------------------------------------------------- |
+| `index.client.tsx` | Paseo app, per client | `PluginClientContext` | When the plugin has any UI, callback, theme, or attachment source               |
+| `index.server.ts`  | Daemon subprocess     | `PluginServerContext` | When the plugin contributes handlers, hooks, settings persistence, or providers |
 
 At least one entry is required; both accept `.ts` or `.tsx`. A directory that still has only the
 old `index.ts` fails to load and points at the [migration guide](/docs/plugins/v0.8/migration).
@@ -225,8 +223,8 @@ SVG or URL.
 ## Entry point and cleanup
 
 Each present entry default-exports one contribution function and returns cleanup. Client entries
-receive `PluginClientContext`; server entries receive `PluginServerContext`. Every client `add*`
-returns an idempotent remover. The entry cleanup runs before Paseo removes remaining registrations.
+receive `PluginClientContext`; server entries receive `PluginServerContext`. Client registration methods return idempotent removers, except header buttons and composer pills,
+which return `{ update, remove }` handles. The entry cleanup runs before Paseo removes remaining registrations.
 
 ```ts
 import type { PluginClientContext } from "@getpaseo/plugin/client";
@@ -346,7 +344,9 @@ and directory lookup/import operations are unaffected.
 ### Send a follow-up when a turn ends
 
 Copy [server/inspect.ts](https://github.com/getpaseo/paseo/blob/main/plugin-examples/lifecycle-actions/server/inspect.ts)
-into your plugin. `latestOutputText` joins text chunks after the latest user message.
+into your plugin. The helper imports types from `@getpaseo/protocol/agent-types`; add
+`@getpaseo/protocol` at the same version as your plugin SDK to your development dependencies
+and install them before loading the plugin. `latestOutputText` joins text chunks after the latest user message.
 
 ```ts
 import type { PluginServerContext } from "@getpaseo/plugin/server";
@@ -1240,7 +1240,7 @@ import { z } from "zod";
 
 const refreshReview = defineRpc({
   name: "review.refresh",
-  input: z.object({ agentId: z.string() }),
+  input: z.object({ agentId: z.string(), scope: z.string().optional() }),
   output: z.object({ refreshed: z.boolean() }),
 });
 
@@ -1320,91 +1320,175 @@ Precedence is built-in client commands, plugin commands, then provider commands.
 collision is omitted. Built-in aliases also reserve their names. The first plugin in stable catalog
 order wins a collision between plugins. Commands do not run while the composer has attachments.
 
-## Composer pills
+## Header buttons
 
-The client entry owns pill creation and removal. This can live directly in `index.client.tsx` or in
-a function it imports from `client/`:
+Try the [button example](https://github.com/getpaseo/paseo/tree/main/plugin-examples/buttons) for
+actions, menus, custom icons and content, and visibility updates in both the header and composer.
+It switches one header button between modes; additional actions use a named Tools menu.
+
+`client.addHeaderButton({ id, workspaceId, button })` adds a button before the built-in actions on
+the workspace header's right side. It returns a registration with `update(patch)` and `remove()`.
 
 ```tsx
-import { Icon } from "@getpaseo/plugin/client/react-native";
-import {
-  type PluginClientContext,
-  type PluginComposerPillProps,
-  useAgent,
-} from "@getpaseo/plugin/client";
-import { Text } from "react-native";
+const review = client.addHeaderButton({
+  id: "review",
+  workspaceId,
+  button: {
+    title: "Open review",
+    icon: "Scan",
+    label: "Review",
+    behavior: {
+      kind: "action",
+      onPress() {
+        client.openPanel("review", { workspaceId });
+      },
+    },
+  },
+});
 
-function ReviewPill({ theme, agentId }: PluginComposerPillProps) {
-  const agent = useAgent(agentId, ({ title }) => ({ title }));
-  return (
-    <>
-      <Icon name="Scan" size={14} color={theme.colors.foregroundMuted} />
-      <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, flexShrink: 1 }}>
-        {agent?.title ?? "Review"}
-      </Text>
-    </>
-  );
-}
-
-export default function contribute(client: PluginClientContext) {
-  const pills = new Map<string, () => void>();
-  const unsubscribe = client.paseo.agents.subscribe((update) => {
-    if (update.kind !== "upsert" || !update.agent.workspaceId) return;
-    const { id: agentId, workspaceId } = update.agent;
-    pills.get(agentId)?.();
-    pills.set(
-      agentId,
-      client.addComposerPill({
-        id: "review",
-        title: "Open review",
-        workspaceId,
-        agentId,
-        Component: ReviewPill,
-        async onPress() {
-          await client.rpc(refreshReview, { agentId });
-          client.openPanel("review", { workspaceId, agentId });
-        },
-      }),
-    );
-  });
-  return () => {
-    unsubscribe();
-    for (const remove of pills.values()) remove();
-  };
-}
+review.update({ label: "Review · 3" });
+review.update({ visible: false });
+review.update({ visible: true });
+review.remove();
 ```
 
-`addComposerPill` fields:
+Omit `label` for an icon-only header button. Menus and popovers show a chevron on wide layouts.
+Compact header buttons use icons without labels or chevrons. Paseo moves excess contributions
+into a shared overflow menu. Placement and overflow are host decisions.
 
-| Field         | Required | Meaning                                                    |
-| ------------- | -------- | ---------------------------------------------------------- |
-| `id`          | Yes      | Plugin-local ID within the target agent.                   |
-| `title`       | Yes      | Accessible button label.                                   |
-| `workspaceId` | Yes      | Workspace whose composer track owns the pill.              |
-| `agentId`     | Yes      | Agent whose composer track owns the pill.                  |
-| `Component`   | Yes      | React Native component rendering the pill's icon and text. |
-| `onPress`     | Yes      | Client-side callback.                                      |
+## Composer pills
 
-The client entry runs once per plugin installation in each connected app. Its context exposes
-`paseo`, typed `rpc`, `openSurface`, explicit-context `openPanel`, and every client registration.
-`addComposerPill` returns an idempotent removal function. Paseo also removes every outstanding pill
-when the plugin installation or host connection is torn down.
+`client.addComposerPill({ id, workspaceId, agentId, button })` uses the same [button descriptor](#button-descriptor)
+and returns the same registration. It targets one agent's composer track alongside Tasks and
+Subagents. Composer pills always show the icon and `label` (or `title` when `label` is omitted).
+They never show a chevron, including for menus and popovers.
 
-Paseo owns the pressable, shared pill chrome, pending state, error reporting, and track-bar
-placement. The component receives `theme`, `host`, `layout`, `workspaceId`, and `agentId`. Read
-current values with `useWorkspace` and `useAgent`. The plugin owns when the pill exists, its icon
-and text, and the callback. `openPanel(id, { workspaceId, agentId? })` opens or focuses a panel
-registered by the same plugin.
+```tsx
+const pill = client.addComposerPill({
+  id: "review",
+  workspaceId,
+  agentId,
+  button: {
+    title: "Open review",
+    icon: "Scan",
+    label: "Review",
+    behavior: {
+      kind: "action",
+      onPress() {
+        client.openPanel("review", { workspaceId, agentId });
+      },
+    },
+  },
+});
+```
+
+## Button descriptor
+
+These contracts are exported from `@getpaseo/plugin/client`.
+
+| Field      | Required | Meaning                                                                 |
+| ---------- | -------- | ----------------------------------------------------------------------- |
+| `title`    | Yes      | Non-empty accessible label, tooltip, and sheet title.                   |
+| `icon`     | Yes      | Lucide name or `ComponentType<PluginButtonIconProps>`.                  |
+| `label`    | No       | Non-empty display text. Omit to use the placement's default.            |
+| `visible`  | No       | Defaults to `true`. False removes the trigger and its layout space.     |
+| `disabled` | No       | Defaults to `false`. Keeps the button visible and prevents interaction. |
+| `behavior` | Yes      | One of the three shapes below.                                          |
+
+```tsx
+type PluginButtonBehavior =
+  | { kind: "action"; onPress(): void | Promise<void> }
+  | { kind: "menu"; items: readonly PluginButtonMenuEntry[] }
+  | { kind: "popover"; Content: React.ComponentType<PluginButtonContentProps> };
+```
+
+An action runs on the client. Paseo marks the button busy until its promise settles, blocks repeated
+presses, and shows failures in a toast. A failed action can be retried. Use the client's `paseo` for
+ordinary operations and `rpc` for plugin-specific backend work.
+
+Menus and popovers open anchored surfaces on wide layouts and bottom sheets on compact layouts.
+The whole trigger opens the surface; there is no split-button behavior.
+
+### Menu entries
+
+A menu contains items and separators. IDs use lowercase letters, digits, and hyphens, start with
+a letter, and are unique within that menu.
+
+```tsx
+const behavior: PluginButtonBehavior = {
+  kind: "menu",
+  items: [
+    {
+      kind: "item",
+      id: "refresh",
+      title: "Refresh review",
+      icon: "RefreshCw",
+      behavior: { kind: "action", onPress: refreshReview },
+    },
+    { kind: "separator", id: "details-divider" },
+    {
+      kind: "item",
+      id: "details",
+      title: "Review details",
+      behavior: { kind: "popover", Content: ReviewDetails },
+    },
+  ],
+};
+```
+
+An item requires `kind: "item"`, `id`, `title`, and `behavior`. Its optional `icon`, `visible`, and
+`disabled` follow the button rules. A separator contains only `kind: "separator"` and `id`.
+Paseo removes leading, trailing, and consecutive separators after filtering hidden items.
+
+Items can use all three behaviors. Nested menus open flyouts on wide layouts and pages with back
+navigation within the same compact sheet. Custom content pages open on selection, never hover.
+Choosing an action closes the menu; opening another page keeps it open.
+
+### Custom icons and popover content
+
+`PluginButtonIconProps` contains `theme`, `host`, `layout`, `size`, `color`, and the target context.
+Render a React Native icon or indicator within the supplied size. Paseo bounds the icon slot and
+owns all pointer interaction. The icon component can use plugin hooks.
+
+`PluginButtonContentProps` contains `theme`, `host`, `layout`, the target context, and `close()`.
+Render the body only; Paseo owns anchoring, scrolling, padding, and sheet presentation. Content can
+use `usePaseo`, `useRpc`, `useWorkspace`, `useAgent`, and the installation's React Query cache.
+
+The target context is one of:
+
+```ts
+{ context: "workspace", workspaceId: string } // Header button
+{ context: "agent", workspaceId: string, agentId: string } // Composer pill
+```
+
+### Updates and lifecycle
+
+Each registration belongs to one plugin installation, placement, workspace, and (for pills) agent.
+`id` is plugin-local within that target and uses the same format as menu IDs. The same ID may be
+used in different targets or placements. Duplicate registration in the same target throws.
+
+`update(patch: Partial<PluginButton>)` changes the descriptor in place, preserving identity and
+order. When changing `behavior`, supply the complete new behavior object. Invalid updates throw
+without changing the existing button. Subscribe to your own model or the client API and call
+`update` to publish reactive changes; mutating the original descriptor does not update the UI.
+
+Hiding or disabling a button closes its surface. Updating its behavior also closes the surface.
+Hiding preserves the registration, so showing it again restores its position. It does not cancel
+an action already in progress.
+
+`remove()` is idempotent. Updates after removal do nothing. Paseo removes outstanding buttons when
+the plugin installation or host connection is torn down. Return cleanup from the client entry for
+your subscriptions, timers, and other resources.
 
 ## Use the Paseo SDK
 
 Use `usePaseo()` for ordinary Paseo operations from a surface. It borrows the selected host's existing connection; do not create another client.
 
 ```tsx
-import { usePaseo } from "@getpaseo/plugin/client";
+import { type PluginSurfaceProps, usePaseo } from "@getpaseo/plugin/client";
 import { Pressable, Text } from "react-native";
 
-function PullRequestAction() {
+function PullRequestAction({ theme }: PluginSurfaceProps) {
   const paseo = usePaseo();
 
   async function createReviewWorkspace() {
@@ -1425,7 +1509,7 @@ function PullRequestAction() {
 
   return (
     <Pressable accessibilityRole="button" onPress={() => void createReviewWorkspace()}>
-      <Text>Create review workspace</Text>
+      <Text style={{ color: theme.colors.foreground }}>Create review workspace</Text>
     </Pressable>
   );
 }
@@ -1503,7 +1587,7 @@ export default function contribute(server: PluginServerContext) {
 
 Inputs and outputs are validated on both sides. RPC names start with a lowercase letter and contain lowercase letters, numbers, dots, hyphens, or underscores. `useRpc()` returns a typed async function. Use TanStack Query for request state, caching, and mutations.
 
-Backend handlers receive the same `PaseoApi` as `{ paseo }`. Their connection belongs to the subprocess and closes when the plugin stops. Backend code can use Node APIs and dependencies installed in the plugin directory.
+Backend handlers receive the same `PaseoApi` as `{ paseo }`. Their connection belongs to the subprocess and closes when the plugin stops. It does not subscribe to timelines or catalog events until plugin code subscribes. Follow the [SDK event contract](../../sdk/events.md) for cleanup and timeline replacements. Backend code can use Node APIs and dependencies installed in the plugin directory.
 
 ## Debug backend output
 
@@ -1684,7 +1768,7 @@ compilation, activation, or replacement. A failing command reports its output, d
 candidate, and leaves the installed/running version intact. The daemon log records each command and
 output; with the global `--host` option, execution is on that daemon host.
 
-Run `npm run typecheck` before install or reload. Never edit the daemon config directly.
+Run `npm run typecheck` before install or reload. Manage plugin source entries with the CLI or Settings.
 
 The daemon-wide **Enable plugins** switch lives under **Settings → Plugins**. A configured plugin remains `disabled` until that switch and the plugin's own enabled state are both on.
 
@@ -1698,8 +1782,8 @@ Use `paseo plugin ls` to read the current status and error.
 | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `This plugin was made for an older version of Paseo`                  | The directory has only an `index.ts` entry. Follow the [migration guide](/docs/plugins/v0.8/migration).                                 |
 | `Plugin entry points are missing`                                     | Neither `index.client.tsx` nor `index.server.ts` exists with that exact name.                                                           |
-| `server-only module cannot be imported into the plugin client bundle` | Client code imports `server/` or a `*.server.*` file. Move the work behind an RPC and import its contract from `shared/`.               |
-| `client-only module cannot be imported into the plugin server bundle` | Server code imports `client/` or a `*.client.*` file. Register that contribution from `index.client.tsx` instead.                       |
+| `server-only module cannot be imported into the plugin client bundle` | Client code imports `server/`. Move the work behind an RPC and import its contract from `shared/`.                                      |
+| `client-only module cannot be imported into the plugin server bundle` | Server code imports `client/`. Register that contribution from `index.client.tsx` instead.                                              |
 | `Node module cannot be imported into the plugin client bundle`        | Client code imports `node:*`. Move the operation to `server/` and call it through an RPC.                                               |
 | Sidebar item is missing                                               | The plugin is `running`, the item references an existing surface, the icon name is valid, and the client is on the installation's host. |
 | Client module is unavailable                                          | Import only the host-provided client modules listed above.                                                                              |

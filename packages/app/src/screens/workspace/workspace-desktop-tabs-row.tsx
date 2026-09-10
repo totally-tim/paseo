@@ -1504,9 +1504,7 @@ function ResolvedDesktopTabChip({
   );
 
   const rawTooltipLabel =
-    presentation.titleState === "loading"
-      ? t("workspace.tabs.loadingAgentTitle")
-      : presentation.tooltip;
+    presentation.titleState === "loading" ? t("common.states.loading") : presentation.tooltip;
   const accessibilityLabel =
     item.tab.target.kind === "agent"
       ? normalizeAgentTooltipTitle(rawTooltipLabel)
