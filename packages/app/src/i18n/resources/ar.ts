@@ -29,6 +29,7 @@ export const ar: TranslationResources = {
       copy: "ينسخ",
       copyLine: "نسخ السطر",
       dismiss: "رفض",
+      reload: "إعادة التحميل",
       retry: "أعد المحاولة",
       search: "يبحث",
       select: "يختار",
@@ -1315,6 +1316,7 @@ export const ar: TranslationResources = {
       detail: "إيقاف البرنامج الخفي المحلي.",
     },
     daemon: {
+      lifecycle: en.desktop.daemon.lifecycle,
       title: "Daemon",
       status: {
         title: "حالة",

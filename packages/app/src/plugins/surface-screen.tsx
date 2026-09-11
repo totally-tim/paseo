@@ -23,7 +23,7 @@ import { useInstalledPlugin, usePluginInstallations } from "./registry";
 import { buildPluginSurfaceRoute } from "./routes";
 import { rememberPluginContributionHost } from "./contribution-host";
 import { SurfaceErrorBoundary } from "./surface-error-boundary";
-import { createPluginSurfaceRuntime } from "./surface-runtime";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { PluginRuntimeBoundary } from "./runtime-boundary";
 import {
   getPluginSurfaceContributionServerIds,
@@ -57,14 +57,14 @@ const ThemedPluginHeaderIcon = withUnistyles(PluginHeaderIcon);
 
 function SurfaceRenderer({
   Surface,
-  runtime,
+  client,
   plugin,
   layout,
   host,
   theme,
 }: {
   Surface: ComponentType<PluginSurfaceProps>;
-  runtime: NonNullable<ReturnType<typeof createPluginSurfaceRuntime>>;
+  client: DaemonClient;
   plugin: NonNullable<ReturnType<typeof useInstalledPlugin>>;
   layout: PluginSurfaceProps["layout"];
   host: PluginSurfaceProps["host"];
@@ -75,7 +75,7 @@ function SurfaceRenderer({
   const isCenterActive = useIsMobilePanelActive("agent");
   const isActive = isFocused && (!layout.compact || isCenterActive);
   return (
-    <PluginRuntimeBoundary plugin={plugin} runtime={runtime}>
+    <PluginRuntimeBoundary plugin={plugin} client={client}>
       <Surface
         theme={theme}
         host={host}
@@ -173,7 +173,6 @@ export function PluginSurfaceScreen() {
   const installations = usePluginInstallations(pluginId);
   const hosts = useHosts();
   const client = useHostRuntimeClient(serverId);
-  const runtime = useMemo(() => createPluginSurfaceRuntime(client, pluginId), [client, pluginId]);
   const compact = useIsCompactFormFactor();
   const { sidebarItem, surface } = useMemo(
     () => resolvePluginSurfaceContribution(plugin, identity),
@@ -236,7 +235,7 @@ export function PluginSurfaceScreen() {
     <View style={styles.screen}>
       <ScreenHeader left={headerLeft} right={headerRight} />
       <View style={styles.body}>
-        {plugin && surface && runtime ? (
+        {plugin && surface && client ? (
           <SurfaceErrorBoundary
             key={`${serverId}/${pluginId}/${identity?.kind}/${contributionId}`}
             installation={plugin}
@@ -244,7 +243,7 @@ export function PluginSurfaceScreen() {
           >
             <ThemedSurfaceRenderer
               Surface={surface.Component}
-              runtime={runtime}
+              client={client}
               plugin={plugin}
               host={host}
               layout={layout}
