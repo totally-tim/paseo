@@ -1940,7 +1940,6 @@ export class VoiceAssistantWebSocketServer {
     this.sessions.delete(ws);
     connection.sockets.delete(ws);
     connection.session.clearAgentTimelineSubscription(ws);
-    connection.session.clearSidebarOrderSubscription(ws);
     this.socketIdentities.delete(ws);
 
     if (connection.sockets.size === 0) {

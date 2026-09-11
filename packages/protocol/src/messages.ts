@@ -1133,7 +1133,7 @@ export const SidebarOrderUpdateResponseSchema = z.object({
 });
 export const SidebarOrderChangedSchema = z.object({
   type: z.literal("sidebar.order.changed"),
-  payload: SidebarOrderSnapshotSchema,
+  payload: SidebarOrderSnapshotSchema.extend({ subscriptionId: z.string().optional() }),
 });
 
 export const WorkspaceLabelListRequestSchema = z.object({

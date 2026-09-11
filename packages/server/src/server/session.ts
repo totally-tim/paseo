@@ -715,7 +715,6 @@ export class Session {
   private readonly sessionLogger: pino.Logger;
   private readonly paseoHome: string;
   private readonly sidebarOrderStore?: SidebarOrderStore;
-  private readonly sidebarOrderSubscriptions = new Map<object | undefined, () => void>();
   private readonly projectIcons: ProjectIconReader;
   private readonly worktreesRoot: string | undefined;
   private readonly rewindInitiators = new Map<string, object | undefined>();
@@ -1250,11 +1249,6 @@ export class Session {
         }
       }
     }
-  }
-
-  clearSidebarOrderSubscription(source?: object): void {
-    this.sidebarOrderSubscriptions.get(source)?.();
-    this.sidebarOrderSubscriptions.delete(source);
   }
 
   clearAgentTimelineSubscription(source: object): void {
@@ -2948,14 +2942,18 @@ export class Session {
       const store = this.sidebarOrderStore;
       if (!store) throw new Error("Sidebar ordering unavailable");
       if (request.type === "sidebar.order.get.request") {
-        this.clearSidebarOrderSubscription(source);
+        const socket = this.delivery.currentSource;
+        for (const id of socket ? this.delivery.subscriptionIds(socket, "sidebar_order") : []) {
+          await this.delivery.release(id);
+        }
         if (request.subscribe && !this.isCleanedUp) {
-          this.sidebarOrderSubscriptions.set(
-            source,
-            store.subscribe((snapshot) =>
-              this.emitForSource({ type: "sidebar.order.changed", payload: snapshot }, source),
-            ),
-          );
+          let unsubscribe: () => void = () => {};
+          const owner = this.delivery.begin("sidebar_order", undefined, () => unsubscribe());
+          unsubscribe = store.subscribe((snapshot) => {
+            if (!owner.signal.aborted) {
+              owner.emit({ type: "sidebar.order.changed", payload: snapshot });
+            }
+          });
         }
         const snapshot = await store.get();
         this.emitForSource(
@@ -8550,8 +8548,6 @@ export class Session {
     this.unsubscribePluginChanges = null;
     this.unsubscribeWorkspaceMutations?.();
     this.unsubscribeWorkspaceMutations = null;
-    for (const unsubscribe of this.sidebarOrderSubscriptions.values()) unsubscribe();
-    this.sidebarOrderSubscriptions.clear();
     this.agentUpdates.dispose();
     await this.hubExecutionController?.cleanup();
     if (this.unsubscribeTerminalWorkspaceContributionEvents) {
