@@ -27,13 +27,6 @@ export interface ResolveOrCreateWorkspaceIdInput {
   initialTitle: string | null;
 }
 
-export interface CreateAgentWorkspacePlacement {
-  workspaceId: string;
-  // True only when this call minted the workspace; a reused record keeps its
-  // own title and is not auto-named from the new agent's prompt.
-  createdWorkspace: boolean;
-}
-
 export interface ImportWorkspaceInput {
   cwd: string;
   requestedWorkspaceId?: string;
@@ -63,15 +56,7 @@ export interface WorkspaceProvisioningService {
     operation: (workspace: PersistedWorkspaceRecord) => Promise<T>,
   ): Promise<ImportWorkspaceResult<T>>;
   findOrCreateWorkspaceForDirectory(cwd: string): Promise<PersistedWorkspaceRecord>;
-  resolveOrCreateWorkspaceIdForCreateAgent(
-    input: ResolveOrCreateWorkspaceIdInput,
-  ): Promise<CreateAgentWorkspacePlacement>;
-  openWorkspaceForDirectory(
-    cwd: string,
-    title?: string | null,
-    projectId?: string,
-    context?: { expectsInitialAgent?: boolean },
-  ): Promise<{ workspace: PersistedWorkspaceRecord; created: boolean }>;
+  resolveOrCreateWorkspaceIdForCreateAgent(input: ResolveOrCreateWorkspaceIdInput): Promise<string>;
   createWorkspaceForDirectory(
     cwd: string,
     title?: string | null,
@@ -217,8 +202,6 @@ export function createWorkspaceProvisioningService(deps: {
     return project;
   }
 
-  // Always mints. Scheduled runs and Hub creates rely on owning the record they
-  // get back, because they archive it when the run finishes.
   async function createWorkspaceForDirectory(
     cwd: string,
     title?: string | null,
@@ -227,59 +210,6 @@ export function createWorkspaceProvisioningService(deps: {
   ): Promise<PersistedWorkspaceRecord> {
     const normalizedCwd = resolve(cwd);
     const checkout = await workspaceGitService.getCheckout(normalizedCwd);
-    return mintWorkspaceForDirectory(normalizedCwd, checkout, title, projectId, context);
-  }
-
-  // A user-facing directory open (workspace.create with a directory source,
-  // which is also what a bare `paseo run` sends first). A Paseo-owned worktree
-  // reopens as the workspace that already has that exact cwd; an ordinary
-  // directory always gets a fresh record so two workspaces may share one cwd.
-  async function openWorkspaceForDirectory(
-    cwd: string,
-    title?: string | null,
-    projectId?: string,
-    context?: { expectsInitialAgent?: boolean },
-  ): Promise<{ workspace: PersistedWorkspaceRecord; created: boolean }> {
-    const normalizedCwd = resolve(cwd);
-    if (projectId) await requireActiveProject(projectId);
-    const checkout = await workspaceGitService.getCheckout(normalizedCwd);
-    const owner = await findPaseoWorktreeOwner(normalizedCwd, checkout);
-    // A request that names a different project is honored as a fresh record
-    // rather than silently rehomed onto the owner.
-    if (owner && (!projectId || owner.projectId === projectId)) {
-      return { workspace: owner, created: false };
-    }
-    return {
-      workspace: await mintWorkspaceForDirectory(
-        normalizedCwd,
-        checkout,
-        title,
-        projectId,
-        context,
-      ),
-      created: true,
-    };
-  }
-
-  // The workspace that already runs at this exact cwd, only inside a
-  // Paseo-owned worktree. Ordinary directories never reuse: scheduled runs and
-  // Hub creates mint throwaway records at arbitrary cwds and archive them, with
-  // every agent inside, when the run ends, so a bare create must not join one.
-  async function findPaseoWorktreeOwner(
-    normalizedCwd: string,
-    checkout: WorkspaceCheckout,
-  ): Promise<PersistedWorkspaceRecord | null> {
-    if (!isPaseoWorktreeCheckout(checkout)) return null;
-    return findWorkspaceForDirectory(normalizedCwd);
-  }
-
-  async function mintWorkspaceForDirectory(
-    normalizedCwd: string,
-    checkout: WorkspaceCheckout,
-    title: string | null | undefined,
-    projectId: string | undefined,
-    context: { expectsInitialAgent?: boolean } | undefined,
-  ): Promise<PersistedWorkspaceRecord> {
     const project = projectId
       ? await refreshProjectKind(await requireActiveProject(projectId), normalizedCwd, checkout)
       : // COMPAT(workspaceCreateMissingProjectId): added in v0.1.107, remove after 2027-01-15.
@@ -362,18 +292,6 @@ export function createWorkspaceProvisioningService(deps: {
   }
 
   async function allocateProjectForRepoRoot(repoRoot: string): Promise<PersistedProjectRecord> {
-    // Git reports the main checkout as a realpath while the selected project
-    // root keeps the user's spelling; exact-root allocation is string-only, so
-    // look for a filesystem-equivalent active project before minting one.
-    const matchesRepoRoot = createRealpathAwarePathMatcher(repoRoot);
-    const equivalent = (await projectRegistry.list())
-      .filter((project) => !project.archivedAt && matchesRepoRoot(project.rootPath))
-      .sort(
-        (left, right) =>
-          Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
-          left.projectId.localeCompare(right.projectId),
-      )[0];
-    if (equivalent) return refreshProjectKind(equivalent);
     const checkout = await workspaceGitService.getCheckout(repoRoot);
     const project = await projectRegistry.getOrCreateActiveByRoot({
       rootPath: repoRoot,
@@ -392,10 +310,11 @@ export function createWorkspaceProvisioningService(deps: {
   }
 
   // A Paseo-owned worktree is never a project root. The daemon minted the
-  // directory for one workspace of the main checkout's project, so a path under
-  // the worktrees root resolves to that project instead of allocating a sidebar
-  // project named after the worktree slug. Hand-made linked worktrees are not
-  // covered: those can legitimately be their own project.
+  // directory for a workspace of the main checkout's project, so a bare path
+  // under the worktrees root (what `paseo run` sends from inside a worktree)
+  // resolves to that project instead of allocating a sidebar project named
+  // after the worktree slug. Hand-made linked worktrees are not covered: those
+  // can legitimately be their own project.
   function isPaseoWorktreeCheckout(
     checkout: WorkspaceCheckout,
   ): checkout is WorkspaceCheckout & { worktreeRoot: string; mainRepoRoot: string } {
@@ -411,29 +330,41 @@ export function createWorkspaceProvisioningService(deps: {
     worktreeRoot: string;
     mainRepoRoot: string;
   }): Promise<PersistedProjectRecord> {
-    const workspaces = await workspaceRegistry.list();
     const matchesWorktreeRoot = createRealpathAwarePathMatcher(checkout.worktreeRoot);
-    const ownsWorktree = (workspace: PersistedWorkspaceRecord) =>
-      workspace.worktreeRoot !== null && matchesWorktreeRoot(workspace.worktreeRoot);
-    const owner =
-      workspaces.find((workspace) => !workspace.archivedAt && ownsWorktree(workspace)) ??
-      workspaces.find(ownsWorktree);
-    if (owner) {
-      const project = await projectRegistry.get(owner.projectId);
-      if (project && !project.archivedAt) return refreshProjectKind(project);
+    const matchesMainRepoRoot = createRealpathAwarePathMatcher(checkout.mainRepoRoot);
+    // Active first, then oldest: the worktree flow minted the first record on
+    // this worktree. A later same-cwd sibling may have been homed elsewhere by
+    // an explicit project id, so a project rooted at the main checkout wins
+    // over registry order.
+    const candidates = (await workspaceRegistry.list())
+      .filter(
+        (workspace) =>
+          workspace.worktreeRoot !== null && matchesWorktreeRoot(workspace.worktreeRoot),
+      )
+      .sort(
+        (left, right) =>
+          Number(Boolean(left.archivedAt)) - Number(Boolean(right.archivedAt)) ||
+          Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
+          left.workspaceId.localeCompare(right.workspaceId),
+      );
+    const projects = new Map<string, PersistedProjectRecord>();
+    for (const candidate of candidates) {
+      const project = await projectRegistry.get(candidate.projectId);
+      if (project && !project.archivedAt) projects.set(project.projectId, project);
     }
+    const owned = [...projects.values()];
+    const project = owned.find((candidate) => matchesMainRepoRoot(candidate.rootPath)) ?? owned[0];
+    if (project) return refreshProjectKind(project);
     return allocateProjectForRepoRoot(checkout.mainRepoRoot);
   }
 
-  // Exact cwd only, never an enclosing directory: a workspace's cwd is its
-  // execution directory, and a subdirectory is a different placement.
-  async function findWorkspaceForDirectory(
-    normalizedCwd: string,
-  ): Promise<PersistedWorkspaceRecord | null> {
-    const matchesCwd = createRealpathAwarePathMatcher(normalizedCwd);
+  async function findOrCreateWorkspaceForDirectory(cwd: string): Promise<PersistedWorkspaceRecord> {
+    const normalizedCwd = resolve(cwd);
     const workspaces = await workspaceRegistry.list();
     const active = workspaces
-      .filter((workspace) => !workspace.archivedAt && matchesCwd(workspace.cwd))
+      .filter(
+        (workspace) => !workspace.archivedAt && areEquivalentPaths(workspace.cwd, normalizedCwd),
+      )
       .sort(
         (left, right) =>
           Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
@@ -441,7 +372,9 @@ export function createWorkspaceProvisioningService(deps: {
       )[0];
     if (active) return refreshWorkspaceRecord(active);
     const archived = workspaces
-      .filter((workspace) => workspace.archivedAt && matchesCwd(workspace.cwd))
+      .filter(
+        (workspace) => workspace.archivedAt && areEquivalentPaths(workspace.cwd, normalizedCwd),
+      )
       .sort(
         (left, right) =>
           Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
@@ -451,39 +384,19 @@ export function createWorkspaceProvisioningService(deps: {
       const project = await projectRegistry.get(archived.projectId);
       if (project && !project.archivedAt) return ensureWorkspaceRecordUnarchived(archived);
     }
-    return null;
-  }
-
-  async function findOrCreateWorkspaceForDirectory(cwd: string): Promise<PersistedWorkspaceRecord> {
-    const normalizedCwd = resolve(cwd);
-    return (
-      (await findWorkspaceForDirectory(normalizedCwd)) ?? createWorkspaceForDirectory(normalizedCwd)
-    );
+    return createWorkspaceForDirectory(normalizedCwd);
   }
 
   async function resolveOrCreateWorkspaceIdForCreateAgent(
     input: ResolveOrCreateWorkspaceIdInput,
-  ): Promise<CreateAgentWorkspacePlacement> {
-    if (input.createdWorktree) {
-      return { workspaceId: input.createdWorktree.workspace.workspaceId, createdWorkspace: false };
-    }
-    if (input.requestedWorkspaceId) {
-      return { workspaceId: input.requestedWorkspaceId, createdWorkspace: false };
-    }
-    // An unaddressed agent create inside a Paseo-owned worktree is a placement
-    // question, not a create verb: it lands in the worktree's own workspace.
-    const normalizedCwd = resolve(input.cwd);
-    const checkout = await workspaceGitService.getCheckout(normalizedCwd);
-    const owner = await findPaseoWorktreeOwner(normalizedCwd, checkout);
-    if (owner) return { workspaceId: owner.workspaceId, createdWorkspace: false };
-    const created = await mintWorkspaceForDirectory(
-      normalizedCwd,
-      checkout,
-      input.initialTitle,
-      undefined,
-      { expectsInitialAgent: true },
-    );
-    return { workspaceId: created.workspaceId, createdWorkspace: true };
+  ): Promise<string> {
+    if (input.createdWorktree) return input.createdWorktree.workspace.workspaceId;
+    if (input.requestedWorkspaceId) return input.requestedWorkspaceId;
+    return (
+      await createWorkspaceForDirectory(input.cwd, input.initialTitle, undefined, {
+        expectsInitialAgent: true,
+      })
+    ).workspaceId;
   }
 
   async function resolveRestoredAutoArchiveChangeRequestUrl(
@@ -605,7 +518,6 @@ export function createWorkspaceProvisioningService(deps: {
     runInImportWorkspace,
     findOrCreateWorkspaceForDirectory,
     resolveOrCreateWorkspaceIdForCreateAgent,
-    openWorkspaceForDirectory,
     createWorkspaceForDirectory,
     createWorkspaceForWorktree,
     findOrCreateProjectForDirectory,

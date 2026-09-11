@@ -9,11 +9,11 @@ import { DaemonClient } from "./test-utils/index.js";
 import { createTestPaseoDaemon } from "./test-utils/paseo-daemon.js";
 
 // A Paseo-owned worktree is never a project root (docs/data-model.md). Both
-// ways a client can hand the daemon a bare worktree path must land on the
-// workspace that owns the worktree: workspace.create with a directory source
-// (what a bare `paseo run` does first) and createAgent with only a cwd (old
-// clients, agent-scoped creates that lost their caller id). Before this
-// contract, each of those minted a second workspace on the worktree and a
+// ways a client can hand the daemon a bare worktree path must land under the
+// main checkout's project: workspace.create with a directory source (what a
+// bare `paseo run` does first) and createAgent with only a cwd (old clients,
+// agent-scoped creates that lost their caller id). Each still gets its own
+// sibling workspace on the worktree; before this contract each also minted a
 // sidebar project rooted at the worktree directory.
 
 function createGitRepo(): { repoDir: string; tempRoot: string } {
@@ -78,7 +78,7 @@ test("a bare path inside a Paseo worktree resolves to the worktree's workspace a
       source: { kind: "directory", path: worktreeDir },
     });
     expect(reopened.error).toBeNull();
-    expect(reopened.workspace?.id).toBe(worktreeWorkspaceId);
+    expect(reopened.workspace?.id).not.toBe(worktreeWorkspaceId);
 
     const agent = await client.createAgent({
       provider: "mock",
@@ -86,16 +86,22 @@ test("a bare path inside a Paseo worktree resolves to the worktree's workspace a
       model: "ten-second-stream",
       title: "[Review] external gate",
     });
-    expect(agent.workspaceId).toBe(worktreeWorkspaceId);
+    expect(agent.workspaceId).not.toBe(worktreeWorkspaceId);
 
     const projectsAfter = (await client.listProjects()).projects;
     expect(projectsAfter.map((project) => project.projectId)).toEqual(
       projectsBefore.map((project) => project.projectId),
     );
     const workspaces = await client.fetchWorkspaces();
-    expect(
-      workspaces.entries.filter((entry) => entry.workspaceDirectory === worktreeDir),
-    ).toHaveLength(1);
+    const onWorktree = workspaces.entries.filter(
+      (entry) => entry.workspaceDirectory === worktreeDir,
+    );
+    expect(onWorktree.map((entry) => entry.id).sort()).toEqual(
+      [worktreeWorkspaceId, reopened.workspace?.id, agent.workspaceId].sort(),
+    );
+    for (const entry of onWorktree) {
+      expect(entry.projectId).toBe(projectsBefore[0]?.projectId);
+    }
   } finally {
     await client.close().catch(() => undefined);
     await daemon.close();
