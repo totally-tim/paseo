@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  applyAgentSpawnIsolation,
+  resolveAgentSpawnIsolation,
   resolveExistingRunWorkspace,
   resolveRunCallerAgentId,
+  resolveRunWorkspace,
   runRunCommand,
   type AgentRunOptions,
 } from "./run";
@@ -47,6 +50,110 @@ describe("existing run workspace resolution", () => {
         message: "Workspace not found: missing",
       },
     );
+  });
+});
+
+describe("agent-spawned workspace isolation", () => {
+  const originalEnv: Array<
+    ["PASEO_AGENT_ID" | "PASEO_WORKSPACE_ID" | "PASEO_AGENT_SPAWN_ISOLATION", string | undefined]
+  > = [
+    ["PASEO_AGENT_ID", process.env.PASEO_AGENT_ID],
+    ["PASEO_WORKSPACE_ID", process.env.PASEO_WORKSPACE_ID],
+    ["PASEO_AGENT_SPAWN_ISOLATION", process.env.PASEO_AGENT_SPAWN_ISOLATION],
+  ];
+  let stderr: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    process.env.PASEO_AGENT_ID = "caller-agent";
+    delete process.env.PASEO_WORKSPACE_ID;
+    delete process.env.PASEO_AGENT_SPAWN_ISOLATION;
+    stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    for (const [name, value] of originalEnv) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    stderr.mockRestore();
+  });
+
+  it("enables isolation only for the worktree value", () => {
+    expect(resolveAgentSpawnIsolation({ PASEO_AGENT_SPAWN_ISOLATION: " worktree " })).toBe(
+      "worktree",
+    );
+    expect(resolveAgentSpawnIsolation({})).toBeUndefined();
+    expect(resolveAgentSpawnIsolation({ PASEO_AGENT_SPAWN_ISOLATION: "  " })).toBeUndefined();
+    expect(stderr).not.toHaveBeenCalled();
+  });
+
+  it("warns on stderr when the isolation value is not recognised", () => {
+    expect(
+      resolveAgentSpawnIsolation({ PASEO_AGENT_SPAWN_ISOLATION: "container" }),
+    ).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining("Ignoring PASEO_AGENT_SPAWN_ISOLATION=container"),
+    );
+  });
+
+  it("mints a worktree workspace instead of sharing the caller checkout", async () => {
+    process.env.PASEO_AGENT_SPAWN_ISOLATION = "worktree";
+    const createWorkspace = vi.fn().mockResolvedValue({
+      workspace: { id: "ws-wt", name: "run", workspaceDirectory: "/wt/run" },
+    });
+
+    await expect(
+      resolveRunWorkspace(
+        { createWorkspace, fetchWorkspaces: vi.fn() },
+        applyAgentSpawnIsolation({}),
+        "/repo/main",
+      ),
+    ).resolves.toEqual({ id: "ws-wt", cwd: "/wt/run" });
+    expect(createWorkspace).toHaveBeenCalledWith({
+      source: { kind: "worktree", cwd: "/repo/main", action: "branch-off" },
+    });
+  });
+
+  it("keeps explicit placement ahead of the isolation default", () => {
+    process.env.PASEO_AGENT_SPAWN_ISOLATION = "worktree";
+    expect(applyAgentSpawnIsolation({ workspace: "ws-1" })).toEqual({ workspace: "ws-1" });
+    expect(applyAgentSpawnIsolation({ newWorkspace: "local" })).toEqual({ newWorkspace: "local" });
+    expect(applyAgentSpawnIsolation({ worktree: "slug" })).toEqual({ worktree: "slug" });
+  });
+
+  it("applies the isolation default only to agent-spawned runs", () => {
+    process.env.PASEO_AGENT_SPAWN_ISOLATION = "worktree";
+    expect(applyAgentSpawnIsolation({ branch: "feature/x" })).toEqual({
+      branch: "feature/x",
+      newWorkspace: "worktree",
+    });
+    delete process.env.PASEO_AGENT_ID;
+    expect(applyAgentSpawnIsolation({ branch: "feature/x" })).toEqual({ branch: "feature/x" });
+  });
+
+  it("shares the caller checkout and names the alternative by default", async () => {
+    const createWorkspace = vi.fn();
+
+    await expect(
+      resolveRunWorkspace({ createWorkspace, fetchWorkspaces: vi.fn() }, {}, "/repo/main"),
+    ).resolves.toEqual({ cwd: "/repo/main" });
+    expect(createWorkspace).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining("--new-workspace worktree"));
+  });
+
+  it("leaves an explicit --new-workspace ahead of the caller checkout", async () => {
+    const createWorkspace = vi.fn().mockResolvedValue({
+      workspace: { id: "ws-local", name: "run", workspaceDirectory: "/repo/main" },
+    });
+
+    await resolveRunWorkspace(
+      { createWorkspace, fetchWorkspaces: vi.fn() },
+      { newWorkspace: "local" } as AgentRunOptions,
+      "/repo/main",
+    );
+    expect(createWorkspace).toHaveBeenCalledWith({
+      source: { kind: "directory", path: "/repo/main" },
+    });
   });
 });
 
@@ -97,6 +204,36 @@ describe("runRunCommand option validation", () => {
         {} as never,
       ),
     ).rejects.not.toMatchObject({ code: "INVALID_OPTIONS" });
+  });
+
+  it("accepts worktree options when the isolation default supplies the kind", async () => {
+    const saved = [process.env.PASEO_AGENT_ID, process.env.PASEO_AGENT_SPAWN_ISOLATION];
+    process.env.PASEO_AGENT_ID = "caller-agent";
+    process.env.PASEO_AGENT_SPAWN_ISOLATION = "worktree";
+    try {
+      // Clears validation and fails later (no daemon), which proves the
+      // worktree options were not rejected for lack of --new-workspace.
+      await expect(
+        runRunCommand(
+          "do something",
+          { worktreeMode: "checkout-branch", branch: "feature/x" },
+          {} as never,
+        ),
+      ).rejects.not.toMatchObject({ code: "INVALID_OPTIONS" });
+      delete process.env.PASEO_AGENT_SPAWN_ISOLATION;
+      await expectInvalidOptions(
+        { worktreeMode: "checkout-branch", branch: "feature/x" },
+        /Worktree options require --new-workspace worktree/,
+      );
+    } finally {
+      for (const [name, value] of [
+        ["PASEO_AGENT_ID", saved[0]],
+        ["PASEO_AGENT_SPAWN_ISOLATION", saved[1]],
+      ] as const) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
   });
 
   it("rejects unknown new workspace kinds", async () => {
