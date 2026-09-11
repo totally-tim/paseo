@@ -6,6 +6,7 @@ export interface WebKeyEvent {
   metaKey: boolean;
   ctrlKey: boolean;
   altKey: boolean;
+  shiftKey: boolean;
   defaultPrevented: boolean;
   repeat: boolean;
   isComposing: boolean;

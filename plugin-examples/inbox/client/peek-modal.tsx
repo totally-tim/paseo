@@ -98,6 +98,8 @@ function ChangedFiles({
     queryKey: ["inbox", "files", cwd],
     enabled: active && supported && cwd !== null,
     staleTime: 30_000,
+    retry: 1,
+    refetchOnWindowFocus: false,
     queryFn: async () => {
       if (!cwd || !checkout) throw new Error("Checkout diffs unavailable");
       return checkout.diff(cwd, { mode: "base" });
@@ -116,7 +118,10 @@ function ChangedFiles({
         <Text style={styles.subtitle}>Diff too large to list.</Text>
       ) : null}
       {list.length === 0 && !files.isPending && !failed ? (
-        <Text style={styles.subtitle}>No changes vs base.</Text>
+        // error is null and files is [] both when the workspace has no changes and when the
+        // daemon can't resolve a base ref to diff against (getCheckoutDiff early-returns
+        // { diff: "" } for that case), so this copy can't tell the two apart.
+        <Text style={styles.subtitle}>No changes found vs base.</Text>
       ) : null}
       {shown.map((file) => (
         <View key={file.path} style={styles.row}>

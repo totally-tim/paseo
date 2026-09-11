@@ -483,10 +483,11 @@ export interface PaseoCheckoutActions {
   ): Promise<PaseoCheckoutDiffResult>;
 }
 
-export type PaseoScheduleListResult = Extract<
-  SessionOutboundMessage,
-  { type: "schedule/list/response" }
->["payload"];
+/** `schedules.list` throws on the daemon's `error`, so the result never carries one. */
+export type PaseoScheduleListResult = Omit<
+  Extract<SessionOutboundMessage, { type: "schedule/list/response" }>["payload"],
+  "error"
+>;
 export type PaseoScheduleSummary = PaseoScheduleListResult["schedules"][number];
 export interface PaseoScheduleActions {
   list(requestId?: string): Promise<PaseoScheduleListResult>;
@@ -518,13 +519,19 @@ export function createPaseoClient(config: PaseoClientConfig): PaseoClient {
     clientId: config.clientId ?? createGeneratedClientId(),
     clientType: "cli",
   });
-  return {
-    ...createPaseoApi(daemonClient),
-    connect: () => daemonClient.connect(),
-    close: () => daemonClient.close(),
-    ensureConnected: () => daemonClient.ensureConnected(),
-    getConnectionState: () => daemonClient.getConnectionState(),
-  };
+  // Object spread would evaluate the checkout/schedules getters on createPaseoApi's
+  // result once, at construction time, and freeze whatever they returned then -
+  // almost always undefined, since server_info hasn't arrived yet. Copying property
+  // descriptors instead keeps those getters live on the returned client.
+  return Object.defineProperties(
+    {
+      connect: () => daemonClient.connect(),
+      close: () => daemonClient.close(),
+      ensureConnected: () => daemonClient.ensureConnected(),
+      getConnectionState: () => daemonClient.getConnectionState(),
+    },
+    Object.getOwnPropertyDescriptors(createPaseoApi(daemonClient)),
+  ) as PaseoClient;
 }
 
 export function createPaseoApi(daemonClient: DaemonClient): PaseoApi {
@@ -561,6 +568,18 @@ export function createPaseoApi(daemonClient: DaemonClient): PaseoApi {
     return workspace.workspaceDirectory;
   });
   const createWorkspaceHandle = createWorkspaceHandleFactory(daemonClient, createAgent, terminals);
+  const checkoutActions: PaseoCheckoutActions = {
+    status: (cwd, requestId) => daemonClient.getCheckoutStatus(cwd, { requestId }),
+    prStatus: (cwd, requestId) => daemonClient.checkoutPrStatus(cwd, requestId),
+    diff: (cwd, compare, requestId) => daemonClient.getCheckoutDiff(cwd, compare, requestId),
+  };
+  const scheduleActions: PaseoScheduleActions = {
+    list: async (requestId) => {
+      const payload = await daemonClient.scheduleList(requestId);
+      if (payload.error) throw new Error(payload.error);
+      return payload;
+    },
+  };
 
   return {
     terminals,
@@ -621,13 +640,17 @@ export function createPaseoApi(daemonClient: DaemonClient): PaseoApi {
       get: (requestId) => daemonClient.getDaemonConfig(requestId),
       patch: (patch, requestId) => daemonClient.patchDaemonConfig(patch, requestId),
     },
-    checkout: {
-      status: (cwd, requestId) => daemonClient.getCheckoutStatus(cwd, { requestId }),
-      prStatus: (cwd, requestId) => daemonClient.checkoutPrStatus(cwd, requestId),
-      diff: (cwd, compare, requestId) => daemonClient.getCheckoutDiff(cwd, compare, requestId),
+    // COMPAT(sdk-checkout-schedules): added in v0.8.0 (fork), remove after 2026-12-01.
+    // Before server_info arrives the host is unknown, so the group stays available and its RPCs fail loudly like every other call; only a host that has reported its features without the flag hides the group.
+    get checkout() {
+      const info = daemonClient.getLastServerInfoMessage();
+      return info && info.features?.checkoutInspection !== true ? undefined : checkoutActions;
     },
-    schedules: {
-      list: (requestId) => daemonClient.scheduleList(requestId),
+    // COMPAT(sdk-checkout-schedules): added in v0.8.0 (fork), remove after 2026-12-01.
+    // Before server_info arrives the host is unknown, so the group stays available and its RPCs fail loudly like every other call; only a host that has reported its features without the flag hides the group.
+    get schedules() {
+      const info = daemonClient.getLastServerInfoMessage();
+      return info && info.features?.scheduleList !== true ? undefined : scheduleActions;
     },
   };
 }

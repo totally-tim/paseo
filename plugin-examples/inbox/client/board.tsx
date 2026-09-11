@@ -20,11 +20,14 @@ import { keyToAction, resolveKeyAction } from "./keyboard";
 import { type InboxCard, type Lane, type Lanes, laneFlexGrow, type NeedsReason } from "./lanes";
 import { PeekModal } from "./peek-modal";
 import {
+  archiveKey,
   EMPTY_SNAPSHOT,
   getInboxStore,
   type InboxSnapshot,
   type InboxStore,
   READ_ALL_KEY,
+  readKey,
+  responseKey,
 } from "./store";
 import type { PaseoApi } from "./types";
 import { ActionButton } from "./question-card";
@@ -40,7 +43,7 @@ import {
 import { isTextTarget, subscribeKeydown, type WebKeyEvent } from "./web";
 
 const KEY_HINT =
-  "j/k move · Enter preview · O agent · 1-9 answer · y/n allow/deny · m read · x archive · s snooze · ? help";
+  "j/k move · Enter preview · Shift+O agent · 1-9 answer · y/n allow/deny · m read · x archive · s snooze · ? help";
 const LANE_ORDER: readonly Lane[] = ["needsYou", "working", "done"];
 const LANE_TITLE: Record<Lane, string> = {
   needsYou: "Needs you",
@@ -414,7 +417,7 @@ function emptyLanesText(
   return text;
 }
 
-interface BoardKeyboardInput {
+export interface BoardKeyboardInput {
   actions: CardActions;
   isActive: boolean;
   filtersOpen: boolean;
@@ -434,18 +437,31 @@ interface BoardKeyboardInput {
   closePeek(): void;
 }
 
-/** Dispatches a resolved effect; keep the keydown listener free of branch logic. */
-function applyKeyEffect(
+/** The operation key a dismiss/answer effect will land on, or null when the effect doesn't touch one. */
+function operationKeyForEffect(
+  effect: NonNullable<ReturnType<typeof resolveKeyAction>>,
+): string | null {
+  switch (effect.kind) {
+    case "markRead":
+      return readKey(effect.card.subject.id);
+    case "archive":
+      return archiveKey(effect.card.subject.id);
+    case "respond":
+      return responseKey(effect.card.subject.id, effect.request.id);
+    default:
+      return null;
+  }
+}
+
+/** A card-focused dismiss/answer's outcome handler: restores focus only on a genuine failure. */
+type FocusRestorer = (card: InboxCard) => (ok: boolean) => void;
+
+/** The switch on `effect.kind`, split out of `applyKeyEffect` to keep its own complexity down. */
+function dispatchKeyEffect(
   effect: NonNullable<ReturnType<typeof resolveKeyAction>>,
   input: BoardKeyboardInput,
+  restoreFocusOnFailure: FocusRestorer,
 ): void {
-  if (
-    (effect.kind === "archive" && !input.canArchive) ||
-    ((effect.kind === "markRead" || effect.kind === "respond") && !input.canRespond)
-  ) {
-    return;
-  }
-  input.interactionRevision.current += 1;
   switch (effect.kind) {
     case "focus":
       input.setFocusedId(effect.agentId);
@@ -467,23 +483,62 @@ function applyKeyEffect(
       break;
     case "markRead":
       input.setFocusedId(effect.nextFocusAgentId);
-      input.actions.onMarkRead(effect.card.subject.id);
+      void input.actions
+        .onMarkRead(effect.card.subject.id)
+        .then(restoreFocusOnFailure(effect.card));
       break;
     case "archive":
       input.setFocusedId(effect.nextFocusAgentId);
-      input.actions.onArchive(effect.card.subject.id);
+      void input.actions.onArchive(effect.card.subject.id).then(restoreFocusOnFailure(effect.card));
       break;
     case "snooze":
       input.setFocusedId(effect.nextFocusAgentId);
       input.actions.onSnooze(effect.card);
       break;
     case "respond":
-      if (effect.card.request) {
-        input.setFocusedId(effect.nextFocusAgentId);
-        input.actions.onRespond(effect.card.subject.id, effect.card.request.id, effect.response);
-      }
+      input.setFocusedId(effect.nextFocusAgentId);
+      void input.actions
+        .onRespond(
+          effect.card.subject.id,
+          effect.request.id,
+          effect.response,
+          effect.nextFocusAgentId,
+        )
+        .then(restoreFocusOnFailure(effect.card));
       break;
   }
+}
+
+/** Dispatches a resolved effect; keep the keydown listener free of branch logic. */
+export function applyKeyEffect(
+  effect: NonNullable<ReturnType<typeof resolveKeyAction>>,
+  input: BoardKeyboardInput,
+): void {
+  if (
+    (effect.kind === "archive" && !input.canArchive) ||
+    ((effect.kind === "markRead" || effect.kind === "respond") && !input.canRespond)
+  ) {
+    return;
+  }
+  // An operation already in flight for this key resolves `false` on its own
+  // completion (see `run` in store.ts) even though nothing actually failed —
+  // that would snap focus back onto a card mid-dismissal. Leave it alone.
+  const operationKey = operationKeyForEffect(effect);
+  if (operationKey && input.actions.operations.get(operationKey)?.status === "pending") {
+    return;
+  }
+  input.interactionRevision.current += 1;
+  // Captured after the bump above: a later interaction (opening a different
+  // card, say) advances this and tells the restore below to stand down.
+  const revisionAtDispatch = input.interactionRevision.current;
+  // A failed dismiss/answer must not leave focus on the neighbor it jumped to
+  // pre-emptively — land back on the card that is still actually there.
+  const restoreFocusOnFailure: FocusRestorer = (card) => (ok) => {
+    if (!ok && input.interactionRevision.current === revisionAtDispatch) {
+      input.setFocusedId(card.agent.id);
+    }
+  };
+  dispatchKeyEffect(effect, input, restoreFocusOnFailure);
 }
 
 function useBoardKeyboard(input: BoardKeyboardInput): void {
@@ -600,9 +655,9 @@ interface LaneViewProps {
 
 function CompactLanes(props: LaneViewProps) {
   return (
-    <ScrollView contentContainerStyle={props.styles.compactContent}>
+    <ScrollView testID="inbox-lanes" contentContainerStyle={props.styles.compactContent}>
       {LANE_ORDER.map((lane) => (
-        <View key={lane}>
+        <View key={lane} testID={`inbox-lane-${lane}`}>
           <LaneHeader
             lane={lane}
             count={props.lanes[lane].length}
@@ -653,9 +708,9 @@ function CompactLanes(props: LaneViewProps) {
 
 function DesktopLanes(props: LaneViewProps) {
   return (
-    <View style={props.styles.lanes}>
+    <View testID="inbox-lanes" style={props.styles.lanes}>
       {LANE_ORDER.map((lane) => (
-        <View key={lane} style={props.laneStyles[lane]}>
+        <View key={lane} testID={`inbox-lane-${lane}`} style={props.laneStyles[lane]}>
           <LaneHeader
             lane={lane}
             count={props.lanes[lane].length}
@@ -751,32 +806,40 @@ function useCardActions(input: CardActionsInput): CardActions {
       onRetryDrafts: () => store?.retryDrafts(),
       operations: snapshot.operations,
       onDraft: (agentId, text) => store?.setDraft(agentId, text),
-      onRespond: (agentId, requestId, response) => {
-        if (!store || !isActive || !canRespond) return;
+      onRespond: (agentId, requestId, response, nextFocusAgentId) => {
+        if (!store || !isActive || !canRespond) return Promise.resolve(false);
         const revision = interactionRevision.current;
-        void store.respond(agentId, requestId, response).then((sent) => {
+        return store.respond(agentId, requestId, response).then((sent) => {
           // A slow response must not pull the user away from a card they opened meanwhile.
-          if (!sent || revision !== interactionRevision.current) return undefined;
+          if (!sent || revision !== interactionRevision.current) return sent;
+          // The keyboard path already knows its intended next focus and must
+          // land there instead of jumping to the queue head; it does not touch the peek.
+          if (nextFocusAgentId !== undefined) {
+            setFocusedId(nextFocusAgentId);
+            return sent;
+          }
           const card = candidates()[0];
           setFocusedId(card?.agent.id ?? null);
           if (openCardId) {
             setOpenCardId(card?.agent.id ?? null);
             setPeekAgentId(card?.subject.id ?? null);
           }
-          return undefined;
+          return sent;
         });
       },
       onReply: (agentId) => {
         if (isActive) void store?.sendReply(agentId);
       },
       onMarkRead: (agentId) => {
-        if (isActive) void store?.markRead(agentId);
+        if (!isActive || !store) return Promise.resolve(false);
+        return store.markRead(agentId);
       },
       onMarkAllRead: (agentIds) => {
         if (isActive && canRespond) void store?.markAllRead(agentIds);
       },
       onArchive: (agentId) => {
-        if (isActive && canArchive) void store?.archive(agentId);
+        if (!isActive || !canArchive || !store) return Promise.resolve(false);
+        return store.archive(agentId);
       },
       onSnooze: (card) => {
         if (isActive) store?.snooze(card);
@@ -959,6 +1022,14 @@ export function InboxBoard({
   const clearSearch = useCallback(() => changeSearch(""), [changeSearch]);
   useEffect(() => {
     interactionRevision.current += 1;
+    // The peek's `open` prop tracks `actions.active`, not `openCardId`, so leaving it
+    // set here would reopen the peek on the same card the moment the surface reactivates.
+    if (!isActive) {
+      setOpenCardId(null);
+      setPeekAgentId(null);
+      setHelpOpen(false);
+      setFiltersOpen(false);
+    }
   }, [isActive]);
   const pendingOpenAgentId = snapshot.pendingOpenAgentId;
   useEffect(() => {

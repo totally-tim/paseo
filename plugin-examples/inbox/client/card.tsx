@@ -4,11 +4,18 @@ import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { activityInFlight, formatSince, type InboxCard, quietText, urgencyLevel } from "./lanes";
+import {
+  activityInFlight,
+  canSnooze,
+  formatSince,
+  type InboxCard,
+  quietText,
+  urgencyLevel,
+} from "./lanes";
 import { ActionButton } from "./question-card";
 import { PrChip, prChipModel, useCheckoutPrStatus } from "./pr-status";
 import { lastAssistantLine, latestActivity } from "./timeline-text";
-import type { Agent, PaseoApi, PermissionResponse } from "./types";
+import type { Agent, PaseoApi, PermissionResponse, TimelineEntry } from "./types";
 
 import { OperationFeedback, ReplyComposer, RequestControls } from "./controls";
 import { archiveKey, readKey, type Operation } from "./store";
@@ -24,11 +31,26 @@ export interface CardActions {
   onRetryDrafts(): void;
   operations: ReadonlyMap<string, Operation>;
   onDraft(agentId: string, text: string): void;
-  onRespond(agentId: string, requestId: string, response: PermissionResponse): void;
+  /**
+   * `nextFocusAgentId` is the keyboard path's already-computed next focus
+   * (the neighbor in `ordered`). When supplied, the post-answer focus goes
+   * there instead of `candidates()[0]` and the peek is left alone — only the
+   * keyboard caller knows which card the user meant to land on next. The
+   * peek/mouse path omits it and keeps today's candidates()[0] + peek-follow
+   * behavior.
+   */
+  onRespond(
+    agentId: string,
+    requestId: string,
+    response: PermissionResponse,
+    nextFocusAgentId?: string | null,
+  ): Promise<boolean>;
   onReply(agentId: string): void;
-  onMarkRead(agentId: string): void;
+  /** Resolves false when the read never sent — the keyboard path restores focus on that. */
+  onMarkRead(agentId: string): Promise<boolean>;
   onMarkAllRead(agentIds: readonly string[]): void;
-  onArchive(agentId: string): void;
+  /** Resolves false when the archive never sent — the keyboard path restores focus on that. */
+  onArchive(agentId: string): Promise<boolean>;
   onSnooze(card: InboxCard): void;
   onUnsnooze(agentId: string): void;
   onOpen(card: InboxCard): void;
@@ -44,6 +66,9 @@ export function useLastAssistantLine(paseo: PaseoApi, agent: Agent, enabled: boo
     queryKey: ["inbox", "tail", agent.id, agent.updatedAt],
     enabled,
     staleTime: Number.POSITIVE_INFINITY,
+    retry: 1,
+    // Keyed on updatedAt with no interval, so a failed fetch on a finished
+    // agent only recovers on window focus; leave that default on.
     queryFn: async () => {
       const page = await paseo.agents
         .ref(agent.id)
@@ -55,12 +80,39 @@ export function useLastAssistantLine(paseo: PaseoApi, agent: Agent, enabled: boo
 
 export interface WorkingActivity {
   text: string | null;
-  /** Sequence of the newest timeline row; a stall means the agent produced nothing. */
-  lastSeq: number | null;
   /** When the newest row landed — the quiet clock anchors here, not at first poll. */
   lastAt: string | null;
   /** The newest row is a tool or compaction still running — silence is expected. */
   inFlight: boolean;
+}
+
+function timestampSortKey(entry: TimelineEntry): number {
+  const time = Date.parse(entry.timestamp);
+  // A finite floor keeps the comparator finite when two rows are unparsable.
+  return Number.isNaN(time) ? Number.MIN_SAFE_INTEGER : time;
+}
+
+/**
+ * Sorts entries by timestamp ascending once and reads the quiet-clock and
+ * in-flight fields from the newest row of any type; the activity text is the
+ * newest assistant or tool row in that same order, so a trailing reasoning
+ * row can anchor the clock without changing the text. The daemon's projection (`collapseByIdentity`)
+ * merges a later tool-call update into the slot of its first occurrence, so
+ * the newest row by time can sit earlier in the page than a stale trailing
+ * entry — scanning raw page order (what `latestActivity` does on its own)
+ * picks the wrong one. `inFlight` reads only the newest row: a stale running
+ * tool call elsewhere in the tail must not suppress "quiet" forever.
+ */
+export function newestActivity(entries: readonly TimelineEntry[]): WorkingActivity {
+  const sorted = [...entries].sort((a, b) => timestampSortKey(a) - timestampSortKey(b));
+  const newest = sorted.at(-1) ?? null;
+  // An unparsable timestamp must not anchor the quiet clock on epoch.
+  const lastAt = newest && !Number.isNaN(Date.parse(newest.timestamp)) ? newest.timestamp : null;
+  return {
+    text: latestActivity(sorted.map((entry) => entry.item)),
+    lastAt,
+    inFlight: activityInFlight(newest?.item),
+  };
 }
 
 /**
@@ -73,17 +125,14 @@ export function useWorkingActivity(paseo: PaseoApi, agent: Agent, enabled: boole
     queryKey: ["inbox", "activity", agent.id],
     enabled,
     refetchInterval: enabled ? 4000 : false,
+    retry: 1,
+    refetchOnWindowFocus: false,
     queryFn: async (): Promise<WorkingActivity> => {
+      // Merged tool-call rows keep their early position, so a small window can miss the newest row.
       const page = await paseo.agents
         .ref(agent.id)
-        .timeline.refetch({ direction: "tail", limit: 8, projection: "projected" });
-      const newest = page.entries.at(-1);
-      return {
-        text: latestActivity(page.entries.map((entry) => entry.item)),
-        lastSeq: newest?.seqEnd ?? null,
-        lastAt: newest?.timestamp ?? null,
-        inFlight: activityInFlight(newest?.item),
-      };
+        .timeline.refetch({ direction: "tail", limit: 20, projection: "projected" });
+      return newestActivity(page.entries);
     },
   });
 }
@@ -225,14 +274,16 @@ function CardBody({
           <Text style={styles.error}>Could not load the result. Open the card to retry.</Text>
         ) : null}
         <ReplyComposer agent={card.subject} theme={theme} actions={actions} />
-        <View style={styles.actions}>
-          <ActionButton
-            theme={theme}
-            label={readOperation?.status === "pending" ? "Marking read…" : "Mark read"}
-            onPress={markRead}
-            disabled={readOperation?.status === "pending"}
-          />
-        </View>
+        {actions.canRespond ? (
+          <View style={styles.actions}>
+            <ActionButton
+              theme={theme}
+              label={readOperation?.status === "pending" ? "Marking read…" : "Mark read"}
+              onPress={markRead}
+              disabled={readOperation?.status === "pending"}
+            />
+          </View>
+        ) : null}
         <OperationFeedback theme={theme} operation={readOperation} />
       </View>
     );
@@ -268,7 +319,7 @@ function CardActionRow({
       {actions.onOpenAgent ? (
         <ActionButton theme={theme} label="Open agent" onPress={openAgent} />
       ) : null}
-      {card.lane === "needsYou" ? (
+      {card.lane === "needsYou" && canSnooze(card) ? (
         <ActionButton theme={theme} label="Snooze" onPress={snooze} />
       ) : null}
       {card.lane === "done" && actions.canArchive ? (

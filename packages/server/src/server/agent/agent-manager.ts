@@ -406,6 +406,12 @@ interface ManagedAgentBase {
   features?: AgentFeature[];
   currentModeId: string | null;
   pendingPermissions: Map<string, AgentPermissionRequest>;
+  /**
+   * Arrival stamp per pending permission request id, kept independently of
+   * pendingPermissions so refreshSessionState's catch path (which clears
+   * pendingPermissions) can't lose the original requestedAt on the next rebuild.
+   */
+  permissionRequestedAt: Map<string, string>;
   bufferedPermissionResolutions: Map<
     string,
     Extract<AgentStreamEvent, { type: "permission_resolved" }>
@@ -2318,6 +2324,7 @@ export class AgentManager {
         features: record.features,
         currentModeId: record.lastModeId ?? null,
         pendingPermissions: new Map(),
+        permissionRequestedAt: new Map(),
         bufferedPermissionResolutions: new Map(),
         inFlightPermissionResponses: new Set(),
         pendingReplacement: false,
@@ -3418,6 +3425,11 @@ export class AgentManager {
     try {
       const result = await agent.session.respondToPermission(requestId, response);
       agent.pendingPermissions.delete(requestId);
+      // Clear the side-map stamp here rather than relying on refreshSessionState's
+      // prune below - that prune is best-effort (its own getPendingPermissions
+      // call can throw), so a resolved id must not linger and get handed to a
+      // future request that reuses the same id.
+      agent.permissionRequestedAt.delete(requestId);
 
       try {
         await this.refreshSessionState(agent);
@@ -4059,6 +4071,7 @@ export class AgentManager {
       availableModes: [],
       currentModeId: null,
       pendingPermissions: new Map<string, AgentPermissionRequest>(),
+      permissionRequestedAt: new Map<string, string>(),
       bufferedPermissionResolutions: new Map(),
       inFlightPermissionResponses: new Set(),
       pendingReplacement: false,
@@ -4121,6 +4134,7 @@ export class AgentManager {
       activeTurnId: null,
       activeTurnStartedAt: null,
       pendingPermissions: new Map(),
+      permissionRequestedAt: new Map(),
       bufferedPermissionResolutions: new Map(),
       inFlightPermissionResponses: new Set(),
       pendingReplacement: false,
@@ -4332,9 +4346,38 @@ export class AgentManager {
 
     try {
       const pending = agent.session.getPendingPermissions();
-      agent.pendingPermissions = new Map(pending.map((request) => [request.id, request]));
+      // The session's own list never carries requestedAt - providers hold the
+      // unstamped originals. Carry forward whatever stamp permissionRequestedAt
+      // already has for this request id, so a still-pending request doesn't get
+      // re-stamped to "now" every time this runs (e.g. once per
+      // respondToPermission call). Only a request we're seeing for the first
+      // time gets the restore time.
+      const restoredAt = new Date().toISOString();
+      agent.pendingPermissions = new Map(
+        pending.map((request) => {
+          const requestedAt =
+            request.requestedAt ?? agent.permissionRequestedAt.get(request.id) ?? restoredAt;
+          agent.permissionRequestedAt.set(request.id, requestedAt);
+          return [request.id, { ...request, requestedAt }];
+        }),
+      );
     } catch {
       agent.pendingPermissions.clear();
+    }
+    // permissionRequestedAt is a subset of pendingPermissions at all times, so
+    // prune any id that's no longer pending regardless of whether the block
+    // above succeeded or threw. A transient failure clears pendingPermissions
+    // and, with it, the arrival stamps for requests that are actually still
+    // pending - the next successful rebuild mints fresh restoredAt stamps for
+    // them. That errs toward a permission card resurfacing with a new arrival
+    // time rather than a stale stamp silently hiding a new request that later
+    // reuses the same id. Both readers of this map - the carry-forward above
+    // and onStreamPermissionRequested - therefore only ever see a stamp for an
+    // id that was pending.
+    for (const id of agent.permissionRequestedAt.keys()) {
+      if (!agent.pendingPermissions.has(id)) {
+        agent.permissionRequestedAt.delete(id);
+      }
     }
 
     this.syncFeaturesFromSession(agent);
@@ -5009,6 +5052,25 @@ export class AgentManager {
     event: Extract<AgentStreamEvent, { type: "permission_requested" }>,
   ): void {
     const hadPendingPermissions = agent.pendingPermissions.size > 0;
+    // A replayed/duplicate request for an id we've already stamped must keep that
+    // stamp - fall back to the side map before minting a fresh "now" so a
+    // duplicate dispatch doesn't reset requestedAt. Only trust the side map when
+    // the id is currently pending: that's what makes this a true replay of the
+    // same still-open request. If the id isn't pending, the side map entry (if
+    // any survived some other path) belongs to an earlier, already-resolved
+    // request that happens to reuse this id, and it must not leak into the new
+    // one's arrival time.
+    const requestedAt =
+      event.request.requestedAt ??
+      (agent.pendingPermissions.has(event.request.id)
+        ? agent.permissionRequestedAt.get(event.request.id)
+        : undefined) ??
+      new Date().toISOString();
+    agent.permissionRequestedAt.set(event.request.id, requestedAt);
+    // Replace event.request (not just the stored copy) so the stream event this
+    // handler's caller dispatches to clients carries the same stamp as the
+    // snapshot - see handleStreamEvent's dispatchStream call after this returns.
+    event.request = { ...event.request, requestedAt };
     agent.pendingPermissions.set(event.request.id, event.request);
     this.refreshSessionPersistence(agent);
     if (!hadPendingPermissions && !agent.internal) {
@@ -5025,6 +5087,7 @@ export class AgentManager {
   }): void {
     const { agent, event, options, flags } = params;
     agent.pendingPermissions.delete(event.requestId);
+    agent.permissionRequestedAt.delete(event.requestId);
     this.refreshSessionPersistence(agent);
     if (!options?.fromHistory && agent.inFlightPermissionResponses.has(event.requestId)) {
       agent.bufferedPermissionResolutions.set(event.requestId, event);
@@ -5042,6 +5105,7 @@ export class AgentManager {
   ): void {
     for (const [requestId] of agent.pendingPermissions) {
       agent.pendingPermissions.delete(requestId);
+      agent.permissionRequestedAt.delete(requestId);
       if (!options?.fromHistory) {
         this.dispatchStream(agent.id, {
           type: "permission_resolved",
@@ -5051,6 +5115,10 @@ export class AgentManager {
         });
       }
     }
+    // Defence in depth: this loop denies everything pending, so nothing should
+    // remain in the side map either way. Clear it outright rather than trusting
+    // the per-id deletes above to have covered every entry.
+    agent.permissionRequestedAt.clear();
   }
 
   private recordAndDispatchTimelineItem(

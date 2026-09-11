@@ -66,12 +66,19 @@ function groupByRoot(agents: readonly Agent[]): Map<string, Agent[]> {
   return groups;
 }
 
+/** When a request entered its wait, from the request's own timestamp. */
+// COMPAT(permission-requested-at): added in v0.8.0 (fork), remove after 2026-12-01
+function requestSince(agent: Agent, request: PermissionRequest | null | undefined): string {
+  return request?.requestedAt ?? agent.attentionTimestamp ?? activityAt(agent);
+}
+
 function firstRequest(
   agents: readonly Agent[],
 ): { request: PermissionRequest; agent: Agent } | null {
   const ordered = [...agents].sort(
     (a, b) =>
-      time(a.attentionTimestamp ?? activityAt(a)) - time(b.attentionTimestamp ?? activityAt(b)),
+      time(requestSince(a, a.pendingPermissions[0])) -
+      time(requestSince(b, b.pendingPermissions[0])),
   );
   for (const agent of ordered) {
     const request = agent.pendingPermissions[0];
@@ -99,7 +106,7 @@ function toCard(
       reason: pending.request.kind === "question" ? "question" : "permission",
       request: pending.request,
       subject: pending.agent,
-      since: pending.agent.attentionTimestamp ?? activityAt(pending.agent),
+      since: requestSince(pending.agent, pending.request),
     };
   }
   const errored = members.find(
@@ -208,9 +215,39 @@ export function formatDuration(seconds: number): string {
   return `${Math.round(hours / 24)}d`;
 }
 
-/** What a snooze records; the card resurfaces when its wait state changes. */
+/**
+ * What a snooze records. A needs-you card with a request resurfaces when the
+ * request id changes (a withdrawn request replaced by a new one) or when the
+ * same id comes back with a new `requestedAt` (provider request ids are not
+ * guaranteed unique across turns, so the id alone can't tell a retried turn
+ * from the one that was snoozed). An error card has no request, so it
+ * resurfaces when its error timestamp or message changes; `card.since` falls
+ * back to `updatedAt` for an error card, which moves on unrelated activity,
+ * so it is a last resort, not the primary key.
+ */
 export function snoozeStamp(card: InboxCard): string {
-  return card.since ?? "";
+  if (card.request) return `${card.request.id}@${card.request.requestedAt ?? card.since ?? ""}`;
+  return card.subject.attentionTimestamp ?? card.subject.lastError ?? card.since ?? "";
+}
+
+/**
+ * Whether snoozing this card can actually stick. A request card's stamp keys
+ * on `request.requestedAt` (see `snoozeStamp`); without it the stamp falls
+ * back to `since`, which is the agent's own activity and moves on every
+ * broadcast, so the card would resurface immediately after being snoozed.
+ * An error card's stamp keys on `attentionTimestamp`/`lastError`; without
+ * either it falls back to the same unstable `since`, so it can snooze only
+ * when one of those fields is actually set.
+ */
+export function canSnooze(card: InboxCard): boolean {
+  if (card.reason === "error")
+    return (
+      typeof card.subject.attentionTimestamp === "string" ||
+      typeof card.subject.lastError === "string"
+    );
+  if (card.reason === "question" || card.reason === "permission")
+    return typeof card.request?.requestedAt === "string";
+  return false;
 }
 
 export type Urgency = "normal" | "warn" | "danger";

@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { keyToAction, optionResponse, permissionResponse, resolveKeyAction } from "./keyboard";
 import type { InboxCard } from "./lanes";
+import type { WebKeyEvent } from "./web";
+
+function keyEvent(
+  key: string,
+  overrides: Partial<Omit<WebKeyEvent, "key">> = {},
+): Pick<WebKeyEvent, "key" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey"> {
+  return { key, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...overrides };
+}
 
 function card(input: Partial<InboxCard>): InboxCard {
   return {
@@ -19,30 +27,45 @@ function card(input: Partial<InboxCard>): InboxCard {
 
 describe("keyToAction", () => {
   it("maps plain keys and ignores modifiers", () => {
-    expect(keyToAction({ key: "j", metaKey: false, ctrlKey: false, altKey: false })).toEqual({
-      kind: "move",
-      delta: 1,
-    });
-    expect(keyToAction({ key: "3", metaKey: false, ctrlKey: false, altKey: false })).toEqual({
-      kind: "option",
-      index: 2,
-    });
-    expect(keyToAction({ key: "k", metaKey: true, ctrlKey: false, altKey: false })).toBeNull();
-    expect(keyToAction({ key: "x", metaKey: false, ctrlKey: false, altKey: false })).toEqual({
-      kind: "archive",
-    });
-    expect(keyToAction({ key: "O", metaKey: false, ctrlKey: false, altKey: false })).toEqual({
-      kind: "openAgent",
-    });
-    expect(keyToAction({ key: "s", metaKey: false, ctrlKey: false, altKey: false })).toEqual({
-      kind: "snooze",
-    });
-    expect(keyToAction({ key: "m", metaKey: false, ctrlKey: false, altKey: false })).toEqual({
-      kind: "markRead",
-    });
-    expect(keyToAction({ key: "?", metaKey: false, ctrlKey: false, altKey: false })).toEqual({
-      kind: "help",
-    });
+    expect(keyToAction(keyEvent("j"))).toEqual({ kind: "move", delta: 1 });
+    expect(keyToAction(keyEvent("3"))).toEqual({ kind: "option", index: 2 });
+    expect(keyToAction(keyEvent("k", { metaKey: true }))).toBeNull();
+    expect(keyToAction(keyEvent("x"))).toEqual({ kind: "archive" });
+    expect(keyToAction(keyEvent("s"))).toEqual({ kind: "snooze" });
+    expect(keyToAction(keyEvent("m"))).toEqual({ kind: "markRead" });
+    expect(keyToAction(keyEvent("?"))).toEqual({ kind: "help" });
+  });
+
+  it("tolerates CapsLock: an uppercase letter with shiftKey false still maps", () => {
+    // CapsLock flips the reported key's case without setting shiftKey.
+    expect(keyToAction(keyEvent("J"))).toEqual({ kind: "move", delta: 1 });
+    expect(keyToAction(keyEvent("X"))).toEqual({ kind: "archive" });
+  });
+
+  it("uses shiftKey, not key case, to tell O (openAgent) from o (open)", () => {
+    expect(keyToAction(keyEvent("o"))).toEqual({ kind: "open" });
+    // CapsLock+Shift together report the lowercase letter with shiftKey true.
+    expect(keyToAction(keyEvent("o", { shiftKey: true }))).toEqual({ kind: "openAgent" });
+  });
+
+  it("ignores Shift+<letter> for every shortcut except O, so it does not fire destructive actions", () => {
+    expect(keyToAction(keyEvent("X", { shiftKey: true }))).toBeNull();
+    expect(keyToAction(keyEvent("s", { shiftKey: true }))).toBeNull();
+    expect(keyToAction(keyEvent("n", { shiftKey: true }))).toBeNull();
+    expect(keyToAction(keyEvent("m", { shiftKey: true }))).toBeNull();
+    expect(keyToAction(keyEvent("y", { shiftKey: true }))).toBeNull();
+    expect(keyToAction(keyEvent("j", { shiftKey: true }))).toBeNull();
+    expect(keyToAction(keyEvent("k", { shiftKey: true }))).toBeNull();
+  });
+
+  it("ignores Shift+Enter and Shift+ArrowUp/Down so the browser default runs instead", () => {
+    expect(keyToAction(keyEvent("Enter", { shiftKey: true }))).toBeNull();
+    expect(keyToAction(keyEvent("ArrowUp", { shiftKey: true }))).toBeNull();
+    expect(keyToAction(keyEvent("ArrowDown", { shiftKey: true }))).toBeNull();
+  });
+
+  it("keeps ? working even though it arrives with shiftKey true on US layouts", () => {
+    expect(keyToAction(keyEvent("?", { shiftKey: true }))).toEqual({ kind: "help" });
   });
 });
 
@@ -142,32 +165,80 @@ describe("resolveKeyAction respond", () => {
     );
     expect(effect).toMatchObject({ kind: "respond", nextFocusAgentId: "b" });
   });
+
+  it("does not hand focus to a working card when it is the only needs-you card left", () => {
+    const workingCard = card({ agent: { id: "w" }, lane: "working", reason: "working" } as never);
+    const soloOrdered = [
+      card({ agent: { id: "a" }, reason: "permission", request } as never),
+      workingCard,
+    ];
+    const effect = resolveKeyAction(
+      { kind: "allow" },
+      { ordered: soloOrdered, focusedId: "a", openCardId: null },
+    );
+    expect(effect).toMatchObject({ kind: "respond", nextFocusAgentId: null });
+  });
 });
 
 describe("resolveKeyAction card commands", () => {
-  const done = card({ agent: { id: "a" }, lane: "done", reason: "finished" } as never);
+  const doneA = card({ agent: { id: "a" }, lane: "done", reason: "finished" } as never);
+  const doneC = card({ agent: { id: "c" }, lane: "done", reason: "finished" } as never);
   const waiting = card({
     agent: { id: "b" },
-    subject: { id: "b" },
+    // A stable attentionTimestamp keeps this error card's snooze stamp from
+    // degrading to `since` — see canSnooze in lanes.ts.
+    subject: { id: "b", attentionTimestamp: "2026-09-04T09:00:00.000Z" },
     lane: "needsYou",
+    reason: "error",
   } as never);
-  const ordered = [done, waiting];
+  const ordered = [doneA, waiting, doneC];
 
-  it("marks read and archives only done cards, moving focus to the next card", () => {
+  it("marks read and archives only done cards, moving focus to the next same-lane card", () => {
     for (const kind of ["markRead", "archive"] as const) {
       expect(
         resolveKeyAction({ kind }, { ordered, focusedId: "a", openCardId: null }),
-      ).toMatchObject({ kind, nextFocusAgentId: "b" });
+      ).toMatchObject({ kind, nextFocusAgentId: "c" });
       expect(resolveKeyAction({ kind }, { ordered, focusedId: "b", openCardId: null })).toBeNull();
     }
   });
 
+  it("does not cross lanes when dismissing the only card left in its lane", () => {
+    // "a" is the only done card once "c" is out of the ordered list.
+    const onlyOneDone = [doneA, waiting];
+    expect(
+      resolveKeyAction(
+        { kind: "markRead" },
+        { ordered: onlyOneDone, focusedId: "a", openCardId: null },
+      ),
+    ).toMatchObject({ kind: "markRead", nextFocusAgentId: null });
+  });
+
   it("snoozes only needs-you cards", () => {
+    // "b" is the only needs-you card, so no same-lane neighbor exists to focus.
     expect(
       resolveKeyAction({ kind: "snooze" }, { ordered, focusedId: "b", openCardId: null }),
-    ).toMatchObject({ kind: "snooze", nextFocusAgentId: "a" });
+    ).toMatchObject({ kind: "snooze", nextFocusAgentId: null });
     expect(
       resolveKeyAction({ kind: "snooze" }, { ordered, focusedId: "a", openCardId: null }),
+    ).toBeNull();
+  });
+
+  it("does not snooze a needs-you card whose stamp can't survive a broadcast", () => {
+    // A question/permission card with no requestedAt degrades to `since`,
+    // which moves on every unrelated broadcast; firing a snooze that can
+    // never stick would just look broken.
+    const unstamped = card({
+      agent: { id: "d" },
+      subject: { id: "d" },
+      lane: "needsYou",
+      reason: "question",
+      request: { id: "p", kind: "question" } as unknown as InboxCard["request"],
+    } as never);
+    expect(
+      resolveKeyAction(
+        { kind: "snooze" },
+        { ordered: [...ordered, unstamped], focusedId: "d", openCardId: null },
+      ),
     ).toBeNull();
   });
 

@@ -31,7 +31,10 @@ available after you mark the parent read.
 **Snooze** hides a needs-you card until its wait state changes — a new request or a renewed
 error brings it back. Snoozed cards leave the sidebar badge and the review queue; **Show
 snoozed** at the bottom of the lane reveals dimmed rows you can preview or unsnooze. Snoozes
-persist locally per host.
+persist locally per host. Snoozing a question or approval needs a host that stamps requests
+with their arrival time; older hosts show no Snooze on those cards. A daemon restart, or a
+provider that briefly stops reporting its pending requests, re-stamps those requests, so
+snoozed questions and approvals come back after either.
 
 A successful answer advances an open review to the next waiting request, including another
 child under the same parent. Failed answers stay in place with a retryable error. If you

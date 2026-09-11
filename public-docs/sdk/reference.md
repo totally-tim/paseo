@@ -195,7 +195,7 @@ Use `workspace.terminals.create(options?)` and `workspace.terminals.list(options
 
 ## `client.checkout`
 
-Checkout operations inspect the git checkout at a directory — usually `workspace.workspaceDirectory`. They require a daemon that serves checkout requests; feature-detect `typeof client.checkout?.diff === "function"` on hosts that may predate the group.
+Checkout operations inspect the git checkout at a directory — usually `workspace.workspaceDirectory`. `client.checkout` is `undefined` once the host reports features without `checkoutInspection`; check for that before using the group. Each method resolves with `error` embedded in its payload instead of throwing, unlike `client.schedules.list`, which throws when the daemon reports an error.
 
 | Method                           | Result                                 | Behavior                                                                                                                                                                                                                                                                    |
 | -------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -205,11 +205,11 @@ Checkout operations inspect the git checkout at a directory — usually `workspa
 
 ## `client.schedules`
 
-| Method             | Result                             | Behavior                                                        |
-| ------------------ | ---------------------------------- | --------------------------------------------------------------- |
-| `list(requestId?)` | `Promise<PaseoScheduleListResult>` | Returns `{ schedules }`: every schedule summary on this daemon. |
+| Method             | Result                             | Behavior                                                                                                 |
+| ------------------ | ---------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `list(requestId?)` | `Promise<PaseoScheduleListResult>` | Returns `{ schedules }`: every schedule summary on this daemon. Throws when the daemon reports an error. |
 
-Each summary carries `id`, `name`, `prompt`, `cadence`, `target`, `status`, `nextRunAt`, and `lastRunAt`. Feature-detect `typeof client.schedules?.list === "function"` on hosts that may predate the group.
+Each summary carries `id`, `name`, `prompt`, `cadence`, `target`, `status`, `nextRunAt`, and `lastRunAt`. `client.schedules` is `undefined` once the host reports features without `scheduleList`; check for that before using the group. Before the first `server_info` arrives, both `client.checkout` and `client.schedules` are defined on every host and their calls fail like any other pre-connect request, so feature-detect after `connect()` resolves.
 
 ## Errors and cleanup
 

@@ -9,8 +9,10 @@ import {
 import { EMPTY_SNAPSHOT } from "./store";
 import type { InboxCard } from "./lanes";
 
+const agent = { id: "a", workspaceId: "ws", attentionTimestamp: null };
 const card = {
-  agent: { id: "a", workspaceId: "ws" },
+  agent,
+  subject: agent,
   workspace: { projectId: "project" },
   since: "2026-09-04T10:00:00.000Z",
 } as InboxCard;

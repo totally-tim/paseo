@@ -82,6 +82,8 @@ export function useCheckoutPrStatus(paseo: PaseoApi, cwd: string | null, enabled
     enabled: enabled && supported && Boolean(cwd),
     staleTime: 30_000,
     refetchInterval: 60_000,
+    retry: 1,
+    refetchOnWindowFocus: false,
     queryFn: async () => {
       if (!checkout || !cwd) throw new Error("PR status unavailable");
       return checkout.prStatus(cwd);

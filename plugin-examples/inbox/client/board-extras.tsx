@@ -204,6 +204,8 @@ export function SchedulesStrip({
     enabled: active && supported,
     staleTime: 30_000,
     refetchInterval: 60_000,
+    retry: 1,
+    refetchOnWindowFocus: false,
     queryFn: async () => {
       if (!schedules) throw new Error("Schedules unavailable");
       return schedules.list();
@@ -233,12 +235,15 @@ export function SchedulesStrip({
 const SHORTCUTS: readonly [string, string][] = [
   ["j / k", "Move focus between cards"],
   ["Enter / o", "Preview the focused card"],
-  ["O", "Open the focused card's agent"],
+  ["Shift+O", "Open the focused card's agent"],
   ["1–9", "Answer a single-choice question"],
   ["y / n", "Allow or deny a permission"],
   ["m", "Mark the focused done card read"],
   ["x", "Archive the focused done card's agent"],
-  ["s", "Snooze the focused needs-you card"],
+  [
+    "s",
+    "Snooze the focused needs-you card (questions and approvals need a host that stamps request arrival)",
+  ],
   ["Esc", "Close the preview, then clear focus"],
   ["?", "Show this list"],
 ];

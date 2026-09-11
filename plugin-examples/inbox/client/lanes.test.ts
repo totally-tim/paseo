@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   activityInFlight,
+  canSnooze,
   formatSince,
   formatUntil,
   type InboxCard,
   laneFlexGrow,
   projectLanes,
   quietText,
+  snoozeStamp,
   urgencyLevel,
 } from "./lanes";
 import type { Agent, PermissionRequest, Workspace } from "./types";
@@ -178,6 +180,42 @@ describe("projectLanes", () => {
     expect(lanes.done.map((card) => card.agent.id)).toEqual(["done-new", "done-old"]);
   });
 
+  it("ages a request from its own requestedAt, not the agent's later activity", () => {
+    const lanes = projectLanes(
+      [
+        agent({
+          id: "a",
+          updatedAt: "2026-09-04T11:00:00.000Z",
+          pendingPermissions: [{ ...question, requestedAt: "2026-09-04T09:00:00.000Z" }],
+        }),
+      ],
+      workspaces,
+    );
+    expect(lanes.needsYou[0].since).toBe("2026-09-04T09:00:00.000Z");
+  });
+
+  it("orders pending requests by requestedAt ahead of agent activity", () => {
+    const lanes = projectLanes(
+      [
+        agent({
+          id: "newer-activity-older-request",
+          updatedAt: "2026-09-04T11:00:00.000Z",
+          pendingPermissions: [{ ...question, requestedAt: "2026-09-04T08:00:00.000Z" }],
+        }),
+        agent({
+          id: "older-activity-newer-request",
+          updatedAt: "2026-09-04T07:00:00.000Z",
+          pendingPermissions: [{ ...question, requestedAt: "2026-09-04T09:00:00.000Z" }],
+        }),
+      ],
+      workspaces,
+    );
+    expect(lanes.needsYou.map((card) => card.agent.id)).toEqual([
+      "newer-activity-older-request",
+      "older-activity-newer-request",
+    ]);
+  });
+
   it("filters to one workspace when asked", () => {
     const lanes = projectLanes(
       [
@@ -229,6 +267,103 @@ describe("urgencyLevel", () => {
       "danger",
     );
     expect(urgencyLevel({ ...base, lane: "working" } as InboxCard, now)).toBe("normal");
+  });
+});
+
+describe("snoozeStamp", () => {
+  const subject = agent({ id: "s", attentionTimestamp: null });
+  const base = { since: "2026-09-04T10:00:00.000Z", request: null, subject } as InboxCard;
+  it("keys a request card on the request id, not the shared since", () => {
+    const first = { ...base, request: { ...question, id: "req_1" } } as InboxCard;
+    const replaced = { ...base, request: { ...question, id: "req_2" } } as InboxCard;
+    expect(snoozeStamp(first)).not.toBe(snoozeStamp(replaced));
+    expect(snoozeStamp({ ...first, request: { ...question, id: "req_1" } } as InboxCard)).toBe(
+      snoozeStamp(first),
+    );
+  });
+  it("keys a request card on requestedAt too, so a reused id from a later turn is a different stamp", () => {
+    const original = {
+      ...base,
+      request: { ...question, id: "req_1", requestedAt: "2026-09-04T09:00:00.000Z" },
+    } as InboxCard;
+    const retried = {
+      ...base,
+      request: { ...question, id: "req_1", requestedAt: "2026-09-04T11:00:00.000Z" },
+    } as InboxCard;
+    expect(snoozeStamp(original)).not.toBe(snoozeStamp(retried));
+  });
+  it("keys an error card, which has no request, on its subject's attentionTimestamp", () => {
+    const error = {
+      ...base,
+      request: null,
+      subject: agent({ id: "s", attentionTimestamp: "2026-09-04T09:00:00.000Z" }),
+    } as InboxCard;
+    expect(snoozeStamp(error)).toBe("2026-09-04T09:00:00.000Z");
+  });
+  it("falls back to lastError, then since, when an error card has no attentionTimestamp", () => {
+    const withLastError = {
+      ...base,
+      request: null,
+      subject: agent({ id: "s", attentionTimestamp: null, lastError: "boom" }),
+    } as InboxCard;
+    expect(snoozeStamp(withLastError)).toBe("boom");
+    const withNeither = {
+      ...base,
+      request: null,
+      subject: agent({ id: "s", attentionTimestamp: null }),
+    } as InboxCard;
+    expect(snoozeStamp(withNeither)).toBe("2026-09-04T10:00:00.000Z");
+  });
+  it("keeps an error card's stamp when its updatedAt changes but the error doesn't", () => {
+    const errored = agent({
+      id: "err",
+      status: "error",
+      attentionTimestamp: null,
+      lastError: "boom",
+      updatedAt: "2026-09-04T10:00:00.000Z",
+    });
+    const before = projectLanes([errored], workspaces).needsYou[0];
+    const after = projectLanes([{ ...errored, updatedAt: "2026-09-04T12:00:00.000Z" }], workspaces)
+      .needsYou[0];
+    expect(snoozeStamp(before)).toBe("boom");
+    expect(snoozeStamp(before)).toBe(snoozeStamp(after));
+  });
+});
+
+describe("canSnooze", () => {
+  const subject = agent({ id: "s" });
+  it("is true for an error card whose subject has an attentionTimestamp", () => {
+    const errored = agent({ id: "s", attentionTimestamp: "2026-09-04T09:00:00.000Z" });
+    const card = { reason: "error", request: null, subject: errored } as InboxCard;
+    expect(canSnooze(card)).toBe(true);
+  });
+  it("is true for an error card whose subject has lastError but no attentionTimestamp", () => {
+    const errored = agent({ id: "s", attentionTimestamp: null, lastError: "boom" });
+    const card = { reason: "error", request: null, subject: errored } as InboxCard;
+    expect(canSnooze(card)).toBe(true);
+  });
+  it("is false for an error card whose subject has neither field", () => {
+    // Without attentionTimestamp or lastError, snoozeStamp falls back to
+    // `since`, which tracks the agent's own activity and moves on every
+    // broadcast — the card would resurface immediately after being snoozed.
+    const errored = agent({ id: "s", attentionTimestamp: null });
+    const card = { reason: "error", request: null, subject: errored } as InboxCard;
+    expect(canSnooze(card)).toBe(false);
+  });
+  it("is true for a question or permission card whose request carries requestedAt", () => {
+    const stamped = { ...question, requestedAt: "2026-09-04T09:00:00.000Z" };
+    expect(canSnooze({ reason: "question", request: stamped, subject } as InboxCard)).toBe(true);
+    expect(canSnooze({ reason: "permission", request: stamped, subject } as InboxCard)).toBe(true);
+  });
+  it("is false for a question or permission card whose request has no requestedAt", () => {
+    // Without requestedAt the stamp falls back to `since`, which tracks the
+    // agent's own activity and moves on every broadcast — the card would
+    // resurface immediately after being snoozed.
+    expect(canSnooze({ reason: "question", request: question, subject } as InboxCard)).toBe(false);
+  });
+  it("is false for working and finished cards", () => {
+    expect(canSnooze({ reason: "working", request: null, subject } as InboxCard)).toBe(false);
+    expect(canSnooze({ reason: "finished", request: null, subject } as InboxCard)).toBe(false);
   });
 });
 

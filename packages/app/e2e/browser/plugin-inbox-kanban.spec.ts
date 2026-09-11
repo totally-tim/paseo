@@ -1,4 +1,7 @@
 import type { TestInfo } from "@playwright/test";
+import { execFileSync } from "node:child_process";
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
 import { expect, test, type Page } from "../support/fixtures";
 import { gotoAppShell } from "../support/helpers/app";
 import { connectNewWorkspaceDaemonClient } from "../support/helpers/new-workspace";
@@ -32,13 +35,39 @@ function cardScope(page: Page, title: string) {
     .last();
 }
 
+/**
+ * Opens the needs-you lane's snoozed section if it is currently collapsed.
+ * Call only when the caller knows a snoozed card exists — this waits for the
+ * toggle to render instead of racing it with an instant count check.
+ */
+async function revealSnoozed(page: Page) {
+  const toggle = page.getByRole("button", { name: /^(Show \d+ snoozed|Hide snoozed)$/ });
+  await expect(toggle).toBeVisible();
+  const label = await toggle.textContent();
+  if (label?.startsWith("Show")) await toggle.click();
+}
+
+/** Blurs whatever is focused, or no-ops when nothing is — a bare `:focus` locator throws instead. */
+function blurActiveElement(page: Page) {
+  return page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+}
+
 test.describe("inbox kanban board", () => {
   test.describe.configure({ timeout: 300_000 });
 
   test("triages questions, approvals, errors, working and finished agents", async ({
     page,
   }, testInfo) => {
-    const workspace = await seedWorkspace({ repoPrefix: "kanban-e2e-", title: "Kanban e2e" });
+    // A base-mode diff compares the current branch against its origin tracking
+    // branch (see getCheckoutDiff in checkout-git.ts) — it never includes
+    // uncommitted or untracked changes. `withRemote` gives this repo a
+    // resolvable origin/main so a later local-only commit has something to
+    // diff against.
+    const workspace = await seedWorkspace({
+      repoPrefix: "kanban-e2e-",
+      title: "Kanban e2e",
+      repo: { withRemote: true },
+    });
     const otherWorkspace = await seedWorkspace({
       repoPrefix: "kanban-other-",
       title: "Kanban other",
@@ -132,6 +161,12 @@ test.describe("inbox kanban board", () => {
         await expect(previewButton(page, "Kanban error")).toBeVisible();
         await expect(previewButton(page, "Kanban working")).toBeVisible();
         await expect(previewButton(page, "Kanban done")).toBeVisible();
+        // Establishes the 4th needs-you card before the queue-position check below
+        // counts on it — this one comes from a different workspace/project, so it
+        // can lag the others.
+        await expect(previewButton(page, "Kanban other project")).toBeVisible({
+          timeout: 30_000,
+        });
         await expect(page.getByText(/Scheduled · Kanban nightly review/).first()).toBeVisible();
         await capture(page, testInfo, "01-lanes");
       });
@@ -146,9 +181,19 @@ test.describe("inbox kanban board", () => {
       });
 
       await test.step("preview shows queue position, conversation, and changed files", async () => {
+        // A committed-but-unpushed file is what a base-mode diff picks up: it's
+        // ahead of origin/main, which the diff resolves to as the base ref.
+        await writeFile(path.join(workspace.repoPath, "kanban-e2e-change.txt"), "e2e change\n");
+        execFileSync("git", ["add", "kanban-e2e-change.txt"], { cwd: workspace.repoPath });
+        execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "kanban e2e change"], {
+          cwd: workspace.repoPath,
+        });
         await previewButton(page, "Kanban question").click();
-        await expect(page.getByText(/Card \d+ of \d+/)).toBeVisible();
+        // 4 needs-you cards are seeded: question, approval, error, and the
+        // other-project question — the queue position counts across all of them.
+        await expect(page.getByText(/^Card \d+ of 4$/)).toBeVisible();
         await expect(page.getByText("Changed files", { exact: true })).toBeVisible();
+        await expect(page.getByText("kanban-e2e-change.txt", { exact: true })).toBeVisible();
         await expect(
           page.getByText("Which surface should this apply to?", { exact: true }).first(),
         ).toBeVisible();
@@ -171,12 +216,39 @@ test.describe("inbox kanban board", () => {
         await expect(page.getByText("Kanban shortcuts", { exact: true })).toHaveCount(0);
       });
 
+      await test.step("j then s snoozes the focused needs-you card via keyboard", async () => {
+        await page.getByRole("textbox", { name: "Search Kanban" }).fill("Kanban question");
+        await expect(previewButton(page, "Kanban question")).toBeVisible();
+        // The filter must have actually applied before "j" moves focus — otherwise
+        // "j" could land on a card the search was meant to hide.
+        await expect(previewButton(page, "Kanban error")).toHaveCount(0);
+        // Blur the search field first — the keydown listener ignores keys targeting text fields.
+        await blurActiveElement(page);
+        await page.keyboard.press("j");
+        await page.keyboard.press("s");
+        await expect(previewButton(page, "Kanban question")).toHaveCount(0);
+        await page.getByRole("textbox", { name: "Search Kanban" }).fill("");
+        await expect(previewButton(page, "Kanban approval")).toBeVisible();
+        await expect(previewButton(page, "Kanban question")).toHaveCount(0);
+        await revealSnoozed(page);
+        const snoozedPreview = page.getByRole("button", {
+          name: "Preview snoozed Kanban question",
+          exact: true,
+        });
+        await expect(snoozedPreview).toBeVisible();
+        await snoozedPreview.click();
+        await expect(page.getByText("Changed files", { exact: true })).toBeVisible();
+        await page.keyboard.press("Escape");
+        await page.getByRole("button", { name: "Unsnooze", exact: true }).click();
+        await expect(previewButton(page, "Kanban question")).toBeVisible();
+      });
+
       await test.step("snooze hides a waiting card until unsnoozed", async () => {
         await cardScope(page, "Kanban error")
           .getByRole("button", { name: "Snooze", exact: true })
           .click();
         await expect(previewButton(page, "Kanban error")).toHaveCount(0);
-        await page.getByRole("button", { name: /Show \d+ snoozed/ }).click();
+        await revealSnoozed(page);
         await expect(
           page.getByRole("button", { name: "Preview snoozed Kanban error", exact: true }),
         ).toBeVisible();
@@ -206,7 +278,7 @@ test.describe("inbox kanban board", () => {
         await expect(previewButton(page, "Kanban done")).toHaveCount(0, { timeout: 30_000 });
       });
 
-      await test.step("archive dismisses a finished agent", async () => {
+      await test.step("x archives a finished agent out of Done via keyboard", async () => {
         const archivedAgent = await spawn(workspace, {
           provider: "mock",
           cwd: workspace.repoPath,
@@ -218,11 +290,53 @@ test.describe("inbox kanban board", () => {
         });
         await workspace.client.waitForFinish(archivedAgent.id, 30_000);
         const card = previewButton(page, "Kanban archived");
-        await expect(card).toBeVisible({ timeout: 30_000 });
-        await cardScope(page, "Kanban archived")
-          .getByRole("button", { name: "Archive", exact: true })
-          .click();
+        // A finished agent must land in Done, not just somewhere on the board,
+        // before archiving it proves anything about the Done-lane action.
+        await expect(
+          page
+            .getByTestId("inbox-lane-done")
+            .getByRole("button", { name: "Preview Kanban archived", exact: true }),
+        ).toBeVisible({ timeout: 30_000 });
+        await page.getByRole("textbox", { name: "Search Kanban" }).fill("Kanban archived");
+        await expect(card).toBeVisible();
+        // The filter must have actually applied before "j" moves focus — otherwise
+        // "j" could land on a card the search was meant to hide.
+        await expect(previewButton(page, "Kanban working")).toHaveCount(0);
+        // Blur the search field first — the keydown listener ignores keys targeting text fields.
+        await blurActiveElement(page);
+        await page.keyboard.press("j");
+        await page.keyboard.press("x");
         await expect(card).toHaveCount(0, { timeout: 30_000 });
+        await page.getByRole("textbox", { name: "Search Kanban" }).fill("");
+      });
+
+      await test.step("j then m marks a focused done card read via keyboard", async () => {
+        const readAgent = await spawn(workspace, {
+          provider: "mock",
+          cwd: workspace.repoPath,
+          workspaceId: workspace.workspaceId,
+          title: "Kanban keyboard read",
+          model: "e2e-fast-stream",
+          modeId: "load-test",
+          initialPrompt: "Say hello and finish.",
+        });
+        await workspace.client.waitForFinish(readAgent.id, 30_000);
+        await expect(previewButton(page, "Kanban keyboard read")).toBeVisible({
+          timeout: 30_000,
+        });
+        await page.getByRole("textbox", { name: "Search Kanban" }).fill("Kanban keyboard read");
+        await expect(previewButton(page, "Kanban keyboard read")).toBeVisible();
+        // The filter must have actually applied before "j" moves focus — otherwise
+        // "j" could land on a card the search was meant to hide.
+        await expect(previewButton(page, "Kanban working")).toHaveCount(0);
+        // Blur the search field first — the keydown listener ignores keys targeting text fields.
+        await blurActiveElement(page);
+        await page.keyboard.press("j");
+        await page.keyboard.press("m");
+        await expect(previewButton(page, "Kanban keyboard read")).toHaveCount(0, {
+          timeout: 30_000,
+        });
+        await page.getByRole("textbox", { name: "Search Kanban" }).fill("");
       });
 
       await test.step("search filters every lane", async () => {
@@ -236,12 +350,14 @@ test.describe("inbox kanban board", () => {
       await test.step("group by project sections the lanes", async () => {
         await page.getByRole("button", { name: "Group by project", exact: true }).click();
         // Card context lines render "project / workspace" as one node, so exact
-        // display-name matches are the group headers (plus the sidebar row).
+        // display-name matches are the group headers. Scope to the lanes wrapper —
+        // the sidebar also shows project names and would otherwise match first.
+        const lanes = page.getByTestId("inbox-lanes");
         await expect(
-          page.getByText(workspace.projectDisplayName, { exact: true }).first(),
+          lanes.getByText(workspace.projectDisplayName, { exact: true }).first(),
         ).toBeVisible();
         await expect(
-          page.getByText(otherWorkspace.projectDisplayName, { exact: true }).first(),
+          lanes.getByText(otherWorkspace.projectDisplayName, { exact: true }).first(),
         ).toBeVisible();
         await capture(page, testInfo, "04-grouped");
       });
@@ -250,6 +366,13 @@ test.describe("inbox kanban board", () => {
         await page.setViewportSize(COMPACT);
         await expect(previewButton(page, "Kanban question")).toBeVisible();
         await capture(page, testInfo, "05-compact");
+        // Working starts collapsed in the compact layout; expanding its header
+        // must reveal the working card, and collapsing again must hide it.
+        const workingHeader = page.getByRole("button", { name: /^Working/ });
+        await workingHeader.click();
+        await expect(previewButton(page, "Kanban working")).toBeVisible();
+        await workingHeader.click();
+        await expect(previewButton(page, "Kanban working")).toHaveCount(0);
       });
     } finally {
       if (scheduleId) await client.scheduleDelete({ id: scheduleId }).catch(() => undefined);
