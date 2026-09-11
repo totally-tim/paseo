@@ -666,6 +666,31 @@ test("findOrCreateProjectForDirectory keeps the worktree's original project when
   expect(project.projectId).toBe(owner.projectId);
 });
 
+test("findOrCreateProjectForDirectory follows an archived owner whose project is still active", async () => {
+  const repo = path.join(tmpDir, "repo");
+  const worktree = registerPaseoWorktree(repo, "lawful-armadillo");
+  const owner = await createWorktreeWorkspace(repo, worktree);
+  await workspaceRegistry.archive(owner.workspaceId, ARCHIVED_AT);
+
+  const project = await provisioning.findOrCreateProjectForDirectory(worktree);
+
+  expect(project.projectId).toBe(owner.projectId);
+  expect(await projectRegistry.list()).toHaveLength(1);
+});
+
+test("findOrCreateProjectForDirectory skips an archived owning project and allocates at the main checkout", async () => {
+  const repo = path.join(tmpDir, "repo");
+  const worktree = registerPaseoWorktree(repo, "lawful-armadillo");
+  const owner = await createWorktreeWorkspace(repo, worktree);
+  await projectRegistry.archive(owner.projectId, ARCHIVED_AT);
+
+  const project = await provisioning.findOrCreateProjectForDirectory(worktree);
+
+  expect(project.projectId).not.toBe(owner.projectId);
+  expect(project.rootPath).toBe(repo);
+  expect(project.archivedAt).toBeNull();
+});
+
 test("findOrCreateProjectForDirectory allocates the main checkout's project for an unowned Paseo worktree", async () => {
   const repo = path.join(tmpDir, "repo");
   const worktree = registerPaseoWorktree(repo, "orphan-worktree");
