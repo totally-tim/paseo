@@ -55,7 +55,11 @@ export interface WorkspaceProvisioningService {
     input: ImportWorkspaceInput,
     operation: (workspace: PersistedWorkspaceRecord) => Promise<T>,
   ): Promise<ImportWorkspaceResult<T>>;
-  findOrCreateWorkspaceForDirectory(cwd: string): Promise<PersistedWorkspaceRecord>;
+  findOrCreateWorkspaceForDirectory(
+    cwd: string,
+    title?: string | null,
+    context?: { expectsInitialAgent?: boolean },
+  ): Promise<PersistedWorkspaceRecord>;
   resolveOrCreateWorkspaceIdForCreateAgent(input: ResolveOrCreateWorkspaceIdInput): Promise<string>;
   createWorkspaceForDirectory(
     cwd: string,
@@ -71,6 +75,8 @@ export interface WorkspaceProvisioningService {
     workspace: PersistedWorkspaceRecord,
   ): Promise<PersistedWorkspaceRecord>;
 }
+
+type WorkspaceCheckout = Awaited<ReturnType<WorkspaceGitService["getCheckout"]>>;
 
 export type WorkspaceProvisioningErrorCode = "unknown_project" | "archived_project";
 
@@ -174,6 +180,9 @@ export function createWorkspaceProvisioningService(deps: {
   async function findOrCreateProjectForDirectory(cwd: string): Promise<PersistedProjectRecord> {
     const rootPath = resolve(cwd);
     const checkout = await workspaceGitService.getCheckout(rootPath);
+    if (isPaseoWorktreeCheckout(checkout)) {
+      return resolveProjectForPaseoWorktree(checkout);
+    }
     const timestamp = new Date().toISOString();
     return projectRegistry.getOrCreateActiveByRoot({
       rootPath,
@@ -205,6 +214,14 @@ export function createWorkspaceProvisioningService(deps: {
   ): Promise<PersistedWorkspaceRecord> {
     const normalizedCwd = resolve(cwd);
     const checkout = await workspaceGitService.getCheckout(normalizedCwd);
+    if (isPaseoWorktreeCheckout(checkout)) {
+      // The daemon minted this directory for exactly one workspace. Reopening it
+      // by path (a bare `paseo run`, an old client, an agent-scoped create with
+      // only a cwd) returns that workspace instead of a second record on the
+      // same worktree, even when the caller named a project.
+      const owner = await findWorkspaceForDirectory(normalizedCwd);
+      if (owner) return owner;
+    }
     const project = projectId
       ? await refreshProjectKind(await requireActiveProject(projectId), normalizedCwd, checkout)
       : // COMPAT(workspaceCreateMissingProjectId): added in v0.1.107, remove after 2027-01-15.
@@ -283,13 +300,17 @@ export function createWorkspaceProvisioningService(deps: {
       // Orphaned legacy workspace FKs fall through to exact-root allocation.
     }
 
-    const checkout = await workspaceGitService.getCheckout(input.repoRoot);
+    return allocateProjectForRepoRoot(input.repoRoot);
+  }
+
+  async function allocateProjectForRepoRoot(repoRoot: string): Promise<PersistedProjectRecord> {
+    const checkout = await workspaceGitService.getCheckout(repoRoot);
     const project = await projectRegistry.getOrCreateActiveByRoot({
-      rootPath: input.repoRoot,
+      rootPath: repoRoot,
       kind: "git",
-      displayName: basename(input.repoRoot) || input.repoRoot,
+      displayName: basename(repoRoot) || repoRoot,
       projectKey: deriveProjectKey({
-        rootPath: input.repoRoot,
+        rootPath: repoRoot,
         remoteUrl: checkout.remoteUrl,
         worktreeRoot: checkout.worktreeRoot,
         mainRepoRoot: checkout.mainRepoRoot,
@@ -300,8 +321,43 @@ export function createWorkspaceProvisioningService(deps: {
     return refreshProjectKind(project);
   }
 
-  async function findOrCreateWorkspaceForDirectory(cwd: string): Promise<PersistedWorkspaceRecord> {
-    const normalizedCwd = resolve(cwd);
+  // A Paseo-owned worktree is never a project root. The daemon minted the
+  // directory for one workspace of the main checkout's project, so a path under
+  // the worktrees root resolves to that project instead of allocating a sidebar
+  // project named after the worktree slug. Hand-made linked worktrees are not
+  // covered: those can legitimately be their own project.
+  function isPaseoWorktreeCheckout(
+    checkout: WorkspaceCheckout,
+  ): checkout is WorkspaceCheckout & { worktreeRoot: string; mainRepoRoot: string } {
+    return (
+      checkout.isGit &&
+      checkout.isPaseoOwnedWorktree &&
+      checkout.worktreeRoot !== null &&
+      checkout.mainRepoRoot !== null
+    );
+  }
+
+  async function resolveProjectForPaseoWorktree(checkout: {
+    worktreeRoot: string;
+    mainRepoRoot: string;
+  }): Promise<PersistedProjectRecord> {
+    const workspaces = await workspaceRegistry.list();
+    const ownsWorktree = (workspace: PersistedWorkspaceRecord) =>
+      workspace.worktreeRoot !== null &&
+      areEquivalentPaths(workspace.worktreeRoot, checkout.worktreeRoot);
+    const owner =
+      workspaces.find((workspace) => !workspace.archivedAt && ownsWorktree(workspace)) ??
+      workspaces.find(ownsWorktree);
+    if (owner) {
+      const project = await projectRegistry.get(owner.projectId);
+      if (project && !project.archivedAt) return refreshProjectKind(project);
+    }
+    return allocateProjectForRepoRoot(checkout.mainRepoRoot);
+  }
+
+  async function findWorkspaceForDirectory(
+    normalizedCwd: string,
+  ): Promise<PersistedWorkspaceRecord | null> {
     const workspaces = await workspaceRegistry.list();
     const active = workspaces
       .filter(
@@ -326,7 +382,19 @@ export function createWorkspaceProvisioningService(deps: {
       const project = await projectRegistry.get(archived.projectId);
       if (project && !project.archivedAt) return ensureWorkspaceRecordUnarchived(archived);
     }
-    return createWorkspaceForDirectory(normalizedCwd);
+    return null;
+  }
+
+  async function findOrCreateWorkspaceForDirectory(
+    cwd: string,
+    title?: string | null,
+    context?: { expectsInitialAgent?: boolean },
+  ): Promise<PersistedWorkspaceRecord> {
+    const normalizedCwd = resolve(cwd);
+    return (
+      (await findWorkspaceForDirectory(normalizedCwd)) ??
+      createWorkspaceForDirectory(normalizedCwd, title, undefined, context)
+    );
   }
 
   async function resolveOrCreateWorkspaceIdForCreateAgent(
@@ -334,8 +402,11 @@ export function createWorkspaceProvisioningService(deps: {
   ): Promise<string> {
     if (input.createdWorktree) return input.createdWorktree.workspace.workspaceId;
     if (input.requestedWorkspaceId) return input.requestedWorkspaceId;
+    // An unaddressed agent create is a placement question, not a create verb:
+    // a bare cwd that already has a workspace lands in it. Explicit
+    // workspace.create keeps minting fresh records on shared directories.
     return (
-      await createWorkspaceForDirectory(input.cwd, input.initialTitle, undefined, {
+      await findOrCreateWorkspaceForDirectory(input.cwd, input.initialTitle, {
         expectsInitialAgent: true,
       })
     ).workspaceId;
@@ -431,7 +502,7 @@ export function createWorkspaceProvisioningService(deps: {
   async function refreshProjectKind(
     project: PersistedProjectRecord,
     workspaceCwd?: string,
-    workspaceCheckout?: Awaited<ReturnType<WorkspaceGitService["getCheckout"]>>,
+    workspaceCheckout?: WorkspaceCheckout,
   ): Promise<PersistedProjectRecord> {
     const projectCheckout =
       workspaceCwd && workspaceCheckout && areEquivalentPaths(project.rootPath, workspaceCwd)
