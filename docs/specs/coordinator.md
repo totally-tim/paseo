@@ -59,7 +59,7 @@ coordinator is per machine.
 - **Trust level** — Per-project notch bounding what a wake may do: Observe, Propose, Ship,
   Autopilot. Host-local, with a global default and a committed per-project cap.
 - **Scope** — Per-project setting for what the project coordinator watches: Everything (the
-  repository and every agent session in the project's workspaces, the default) or Repo only.
+  repository and every agent session in the project's workspaces, the default) or Project only.
 - **Policy** — Your personal permission allowlist at daemon level with per-project overrides:
   tool patterns a coordinator may approve on your behalf at Ship and above. Grown
   interactively, never hand-edited as YAML.
@@ -69,7 +69,8 @@ coordinator is per machine.
   writes one board row. Nothing pauses.
 - **Runaway guard** — Hard caps that exist to catch bugs, not spend: concurrent subagents per
   coordinator and a nesting depth of two.
-- **Team memory** — Committed markdown under `.paseo/memory/` in a repository.
+- **Team memory** — Committed markdown under `.paseo/memory/` in a repository: `project.md`, written
+  by the project coordinator only, and `learned.md`, appended by subagents.
 - **Personal memory** — Markdown under the Paseo home: `coordinator/memory.md` about you, and
   `projects/{projectId}/memory.md` about you in one project. Never committed.
 
@@ -139,8 +140,8 @@ for outcomes. No bespoke badges, no trust chips on rows, no "all caught up" illu
   rendered with the transcript's permission action button and question form primitives.
   Tapping the text opens the peek modal promoted from the Kanban plugin.
 - **Proposal row.** A decision row whose answers are Approve, Edit, Ignore. The second line is
-  the evidence. Edit focuses the composer with the proposal quoted; the coordinator reposts it
-  for a fresh Approve.
+  the evidence. Edit is an ordinary option that resolves the request and focuses the composer
+  with the proposal quoted; the coordinator reposts a new proposal for a fresh Approve.
 - **Working row.** Goal on the first line, elapsed time and provider on the second. Your own
   agent sessions appear here under Everything scope, marked "Yours", with the goal line taken
   from your first message. Tap opens the session's tab. Cost is not on the row.
@@ -164,7 +165,7 @@ notch and reveals a secondary button "Allow autopilot in this project", so it ta
 and never a modal. On the global board the pill sets the global default and lists projects that
 override it.
 
-Scope is a second pill, "Everything" or "Repo only". Switching to Repo only removes your own
+Scope is a second pill, "Everything" or "Project only". Switching to Project only removes your own
 sessions from Working and stops proposals about them.
 
 The sidebar workspace row reuses the status bucket dot and adds no glyph. When decisions are
@@ -212,6 +213,8 @@ the raising session's permission request, never through the global coordinator.
    within its trust level and policy.
 4. **Your stalled session.** Under Everything scope: "Your agent on fix-auth has waited on a
    Bash permission for 40m: `npm test`." Answers: Allow, Deny, Leave it, Always allow this.
+   Your tap answers at any trust level; only the coordinator answering on its own is gated to
+   Ship and above. "Always allow this" writes policy at any level.
 5. **Digest.** One push per day inside your active hours, on by default, from the global
    coordinator, written as a product manager's note: change requests opened and merged, stale
    ones, goals fired, proposals waiting.
@@ -297,9 +300,14 @@ coordinator gets a wake saying why nothing new started.
 
 ## Daemon design
 
-New code lives in `packages/server/src/server/coordinator/`. Touch points in existing files are
-limited to registering the RPCs, the MCP tools, the push payload field, the launch option for
-required tools, the role label, and the hidden workspace kind.
+New code lives in `packages/server/src/server/coordinator/`. Existing files this branch edits,
+all named so a sync knows where to look: `paseo-tools.ts` (new tools), `agent-manager.ts`
+(required-tools gate, guard in `create_agent`, in-process events at the lifecycle emit sites),
+`agent-prompt.ts` (successor resolution), `handoff-context.ts` (reparenting), `schedule/service.ts`
+(goal target, retargeting), `agent-continuation/safety.ts` (coordinator routing),
+`workspace-registry*.ts` and `messages.ts` (hidden flag, additive fields), `track-presentation.ts`
+(pending count), the push payload builder, the sidebar items model, and the workspace route
+state views.
 
 ### Identity and residency
 
@@ -319,19 +327,46 @@ first wake. Archiving a project archives its coordinator and cascades to its sub
 the existing rule. Disabling pauses goals, keeps memory on disk, and re-enabling restores the
 transcript lineage.
 
+### Board model
+
+The daemon derives rows; coordinators never post them. Needs you rows are pending permission
+requests on any session the board covers. Working rows are live subagents plus, under
+Everything scope, your own sessions. Done rows are written by the coordinator service on subagent
+finish, change-request events, goal runs, `remember` writes, guard trips, and answered decisions.
+The wake line is written at wake time with reason and level, and its "what it did" clause is
+filled from spawns observed during that turn. Rows persist per project under
+`$PASEO_HOME/coordinator/board/{projectId}.json`, Done retained seven days, and the global board
+is the union. The reply area is the coordinator's last assistant message; the app needs a hook
+for that, mirroring the Kanban plugin's `lastAssistantLine` over the app's own timeline store,
+since no such client selector exists today.
+
+The singleton rule on load: if two active sessions carry one role scope, the one with the
+latest turn stays and the others are archived with a board row saying so.
+
+### Decision timers
+
+`timeoutAt` and `defaultAnswer` live on the permission request record. The coordinator service
+checks pending requests on the schedule service's tick, answers expired ones with the default
+through `respond_to_permission`, and writes a Done row "(default after 2h)". Pending requests are
+re-read on daemon start, so timers survive a restart. The quiet-hours rule shifts `timeoutAt`
+to delivery plus the timeout.
+
 ### Wake sources
 
-- **Change-request poll.** A standing subscription per project on the forge service's PR status
-  poll (`retainCurrentPullRequestStatusPoll`, `packages/server/src/services/forge-service.ts`),
-  held by the coordinator service rather than a client. Today that poll stops when no client is
-  subscribed; the service becomes a subscriber. It hashes open change requests plus check states
+- **Change-request poll.** The existing PR status poll covers only the current branch's change
+  request and stops when no client is subscribed; a service can retain it through
+  `workspaceGitService.registerWorkspace`. The coordinator needs every open change request, so
+  the service runs its own loop per project over `listPullRequests` plus `getCheckDetails`
+  (`packages/server/src/services/forge-service.ts`) at the same cadence. It hashes open change requests plus check states
   and steers on change with the diff in the payload. Hub has no CI-completed event, so local
   polling is the design. After a daemon outage the first wake carries the whole diff once.
 - **Goal fire.** The schedule service runs deterministic rules with a new target type and only
   the finish notification reaches the coordinator. Judgment goals are heartbeats on the project
   coordinator. Missed crons fire once each on restart.
-- **Lifecycle hooks.** Under Everything scope the coordinator service observes
-  `agent.created`, `agent.turn_ended`, `agent.permission_requested`, and
+- **Lifecycle events.** Plugin lifecycle hooks are dispatched only to plugin subprocesses over
+  IPC (`plugins/runtime.ts` `emit`); there is no in-process bus. This branch adds one, emitted
+  beside `pluginLifecycle.emit` at the same call sites in `agent-manager.ts`, and the
+  coordinator service subscribes to it. Under Everything scope it observes `agent.created`, `agent.turn_ended`, `agent.permission_requested`, and
   `agent.permission_resolved` for sessions in the project's workspaces, and wakes the project
   coordinator on a stall: a permission pending longer than a threshold, or a session idle after
   an error. Project additions wake the global coordinator.
@@ -374,6 +409,11 @@ Triggers in v1: `cron`, `pr.opened`, `pr.ci_failed`, `pr.idle`, `pr.merged`, `ag
 A goal whose sentence compiles to none of these becomes a `heartbeat` kind whose prompt is the
 sentence. Compilation is the coordinator's job; validation and execution are the daemon's.
 
+The schedule service is cron-only and knows no events. Every goal is a schedule with a new
+`goal` target type so runs appear in the schedule surface with logs. A `cron` goal is a normal
+schedule. An event goal is a paused schedule that the coordinator service runs once through the
+existing run-once path when its own poll or the lifecycle bus matches the trigger and filter.
+
 ### Policy engine
 
 Rules are `{ pattern, scope: daemon | projectId, enabled, firedCount }` under
@@ -384,8 +424,8 @@ session, and writes a Done row naming the rule. Every other permission is yours.
 ### Memory
 
 One MCP tool, `remember`, with `scope: team | personal | personal-project` and a markdown body.
-Team writes land in `.paseo/memory/decisions.md` (coordinator only) or `.paseo/memory/learned.md`
-(subagents append) as an uncommitted diff in the workspace. Personal writes land under the
+Team writes land in `.paseo/memory/project.md` (coordinator only: the project summary and its
+decisions) or `.paseo/memory/learned.md` (subagents append) as an uncommitted diff in the workspace. Personal writes land under the
 Paseo home. The tool defaults to personal and rejects a team entry phrased about a person rather
 than the codebase. Team memory is read from the workspace's own checkout, so a coordinator in
 a worktree sees the branch's view of it until the branch merges.
@@ -457,8 +497,8 @@ New RPCs follow `docs/rpc-namespacing.md`:
 - `coordinator.global.enable.request` / `.response`, `.disable`, `.update`
 - `coordinator.project.enable.request` / `.response`, `.disable`, `.update` — trust, scope,
   profiles, usage expectation
-- `coordinator.board.subscribe.request` / `.response` plus a `coordinator.board.update` event,
-  filterable by project
+- `coordinator.board.subscribe.request` / `.response` plus a `coordinator.board.changed` server
+  message, named after the existing `agent.continuation.changed`, filterable by project
 - `coordinator.goal.list`, `.approve`, `.pause`, `.delete` request and response pairs
 - `coordinator.policy.list`, `.update` request and response pairs
 
@@ -499,24 +539,103 @@ schema, the push payload builder, and the launch-context tool gate.
 
 ## Milestones
 
-1. **Project coordinator core.** Role label, residency, singleton, required-tools launch option,
-   delegate-only launch, project board at the workspace home with composer and reply area,
-   Chat tab, wake rows from user messages and subagent finish, child permissions on the board,
-   successor resolution in the finish path.
-2. **Wakes and levels.** Change-request poll as a standing subscription, wake envelopes, trust
-   levels Observe through Ship with the reviewer step, scope with lifecycle hooks, usage
-   expectation, runaway guard.
-3. **Global tier.** Global coordinator in its hidden workspace, Coordinator sidebar item, global
-   board with project grouping and filter, delegation down and summaries up, project proposals
-   on enable and on project add.
-4. **Decisions and digest.** Timeout defaults and lock-screen actions, additive push payload,
-   the daily digest from the global coordinator.
-5. **Goals, proposals, policy.** Goal compilation, the rule executor as a schedule target, the
-   Goals and Policy tabs, "Always allow this", proposals with evidence.
-6. **Memory and rotation.** The `remember` tool and three layers, the memory pane, rotation with
-   reparenting, schedule retargeting, notification forwarding, continuation routing.
-7. **Merge policy and Autopilot.** `.paseo/coordinator.yml` parsing, Autopilot merging
-   coordinator-authored change requests that pass every rule.
+Each milestone names its stories, its tests, and its evidence. A milestone is done when every
+listed test passes, the runtime evidence is appended to the PR body, and the review protocol in
+[Handoff](#handoff) has passed including re-review of fixes.
+
+1. **Project coordinator core.** Stories 1, 2, 3, 5, 35. Role label, residency, singleton,
+   required-tools launch option, delegate-only launch, protocol scaffolding
+   (`features.coordinator`, `coordinator.project.*`, `coordinator.board.*`), the board model, the
+   project board at the workspace home with composer and reply area, Chat tab, child permissions
+   on the board, successor resolution in the finish path, and a first `remember` limited to team
+   `project.md` so first contact completes. Trust is Observe only: nothing spawns. Tests: ad-hoc
+   daemon test for singleton and residency across restart; delegate-only test per eligible
+   provider with the fake agent client asking for a file edit and being refused; finish
+   notification through a manual handoff reaching the successor; a Playwright spec that the
+   board replaces the draft pane and the reply area shows the last message. Evidence: web via
+   the Paseo browser tools, desktop via `computer-use`.
+2. **Wakes and levels.** Stories 4, 8, 10, 12, 13, 14, 29, 30, 32, 34, 37. The all-PR poll with
+   hashing and outage replay, wake envelopes, trust levels through Ship with the reviewer step,
+   the in-process lifecycle bus, scope, usage expectation, runaway guard. Tests: poll diff and
+   replay against `workspace-git-service-stub.ts`; guard trip in the ad-hoc harness; reviewer
+   spawned before a change request opens; scope switch removes own sessions.
+3. **Global tier.** Stories 23, 25, 26, 28, 33. Hidden workspace and project flag, Coordinator
+   sidebar item, global board, delegation and summaries, reparenting of existing project
+   coordinators under the global one on enable. Tests: hidden records absent from the sidebar
+   projection; delegation round trip in the ad-hoc harness. Evidence: global board on web and
+   desktop.
+4. **Decisions and digest.** Stories 6, 7, 11. Timers, additive push fields, notification
+   categories with actions that answer without foregrounding, the digest. Tests: timer expiry in
+   the ad-hoc harness across a restart; push payload snapshot. Evidence: lock-screen actions
+   cannot be driven by an agent; record them in the QA table as manually verified by Tim on iOS
+   and Android or as untested, never as passed by inference.
+5. **Memory and rotation.** Stories 15, 16, 31, 36. Full `remember`, three layers, memory pane,
+   rotation with reparenting, schedule retargeting, notification forwarding through the
+   instruction queue, continuation routing. Tests: rotation in the ad-hoc harness asserting
+   reparented children, a retargeted heartbeat, and a forwarded notification; a memory pane edit
+   reflected in the next wake envelope.
+6. **Goals, proposals, policy.** Stories 17 to 22, 24, 27. Goal compilation and the `goal`
+   schedule target, event goals through run-once, Goals and Policy tabs, "Always allow this",
+   proposals. Depends on 5 so a rotation cannot orphan goals. Tests: rule validation; a cron goal
+   fires once after a missed window; an event goal fires from a stubbed poll; policy answers a
+   matching permission and writes the row.
+7. **Merge policy and Autopilot.** Story 9. Policy file parsing, Autopilot merge against
+   `temp-github-repo.ts`. Tests: every rule rejecting; parse failure disables Autopilot with a
+   row. Evidence: a real merge on a throwaway repository.
+
+## Handoff
+
+This section exists because the implementing session will not have this brainstorm's context.
+
+**Non-goals for this branch.** Hub triggers, team goals and committed permission policy, Copilot
+and Pi as coordinator providers, budgets or spend limits, label opt-in for human-authored change
+requests, a global agent that spans daemons.
+
+**Settled means settled.** Do not re-ask anything under [Settled](#settled). If one proves
+infeasible, stop that piece, quote the settled line inside an `AskUserQuestion` with the concrete
+obstacle and two options, and continue every piece that does not depend on it. Never downgrade a
+settled decision silently. Assumptions may be changed with a note in the commit.
+
+**Review protocol.** Load the `multi-agent-review` skill before the first review and
+`proven-working-code` before claiming any milestone done. The non-Claude blocking gate is Codex,
+and Codex is unavailable until 2026-09-15; the approved fallback is OpenCode as recorded in the
+`opencode-fallback-reviewer` memory. Every fix round is re-reviewed. A same-lineage "looks good"
+is not confidence.
+
+**Evidence.** Append to the PR body's Evidence section per milestone: the commands run, the raw
+outcome, what was observed on the real UI, and what was not covered. A diff summary is not
+evidence. Web is driven with the Paseo browser tools and desktop with `computer-use`; read
+`docs/qa.md` for the platform table and fill it per milestone.
+
+**Docs obligations.** Read `docs/expo-router.md` before touching the workspace home. Add a
+glossary row for every term in [Vocabulary](#vocabulary). Add the `docs/fork.md` ledger row and a
+docs-table row in `CLAUDE.md` in the final milestone. Tag the three additive schema fields with
+`// COMPAT(coordinator): added in <version>, remove after <date>` per
+`docs/protocol-compatibility.md`.
+
+**Code facts that will cost a detour otherwise.**
+
+- "Kanban plugin" is `plugin-examples/inbox`. Its views are plain React Native and move; its data
+  layer (`usePaseo`, `@tanstack/react-query`, `paseo.agents.ref(...).timeline`) is the plugin
+  sandbox API and must be rewritten onto the app's session store hooks.
+- `injectIntoAgents` defaults to `false` in `config.ts` and `true` in `bootstrap.ts`. The
+  required-tools option makes the default irrelevant for coordinators; do not fix the mismatch
+  here.
+- `AgentSessionConfig.internal` in `agent-sdk-types.ts` is the precedent for threading a
+  per-agent launch flag; follow it for `paseoTools: "required"`.
+- Workspaces have no hidden flag and `createWorkspaceForDirectory` also creates a project, so
+  the hidden flag goes on both records and both payload schemas.
+- `AgentPermissionRequest` already carries `actions` with custom labels; `timeoutAt` and
+  `defaultAnswer` are new.
+- `expo-notifications` is installed but no category is registered anywhere; lock-screen actions
+  are new end to end.
+- The sidebar item pattern is four files: `sidebar-nav/model.ts`, `sidebar-nav-rows.tsx`,
+  `app/_layout.tsx`, and the appearance settings section. Copy "schedules".
+- Test templates: `packages/server/src/server/test-utils/` (`daemon-client`,
+  `daemon-test-context`, `paseo-daemon`, `workspace-git-service-stub`, `temp-github-repo`) and
+  `docs/ad-hoc-daemon-testing.md`; app tests follow sibling `*.test.tsx` files; Maestro flows
+  live in `packages/app/maestro/`.
+- Run only the test files you changed, never a whole workspace, per `CLAUDE.md`.
 
 ## User stories
 
@@ -569,7 +688,7 @@ Each story ends in what you see. Numbers are stable for review references.
     40m: `npm test`." with Allow, Deny, Leave it, Always allow this.
 12. My session opened a PR without me noticing. The PR watch picks it up, spawns the reviewer,
     and I get "Review of #52 found two issues" with Open and Send to my agent.
-13. I find this too much and switch scope to Repo only. My sessions vanish from Working and the
+13. I find this too much and switch scope to Project only. My sessions vanish from Working and the
     coordinator stops proposing anything about them.
 14. I open the trust pill, see "Propose · 14 spawns · 1.2M of 5M tokens expected", and step down
     to Observe. The next wake row says "Level: Observe" and nothing spawns.
@@ -653,7 +772,7 @@ Decisions made 2026-09-11, in the order they were taken.
 - Coordinator replies land in a reply area above the composer.
 - Every implementer output gets a reviewer subagent before a change request opens.
 - Scope defaults to Everything: the coordinator tracks all sessions in the project and may act
-  on yours within trust level and policy. Repo only is the minimized setting.
+  on yours within trust level and policy. Project only is the minimized setting.
 - Goals from both you and the coordinator, approved by you, compiled into rules, shown as a
   plain line with the rule on tap. Personal in v1.
 - Proposals whenever the coordinator notices something, board only, never pushed.
