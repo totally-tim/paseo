@@ -37,34 +37,84 @@ heartbeats that steer an existing session, handoff, the forge service, and push 
 
 **Settled:** the coordinator lives at the workspace home, the view you land on when a workspace
 is selected and no tab is focused. Today that slot hosts the draft-agent composer
-(`packages/app/src/screens/workspace/workspace-draft-agent-config.ts`). With a coordinator
-enabled, the slot shows the board with a composer that sends to the coordinator. The draft-agent
-flow moves to the New tab menu, which already exists. With no coordinator, the slot is unchanged
-except for one row offering to enable it.
+(`packages/app/src/composer/draft/workspace-tab.tsx`). With a coordinator enabled, the slot
+shows the board with a composer that sends to the coordinator. The draft-agent flow moves to the
+New tab menu, which already exists. With no coordinator, the slot is unchanged except for one
+chevron row in the settings-row pattern, "Set up a coordinator".
 
-The board is three lanes. Needs you holds open decisions and stuck subagents, oldest first, with a
-count in the lane header and on the sidebar workspace row through the existing
-`needs_input` bucket. Working holds live subagents, one row each: goal, elapsed time, cost so
-far. Done holds the last 24 hours: one row per outcome with the change request or diff link first.
-Every wake writes one row to Working or Done stating its reason, the trust level in force, and
-what it did: "Woke on CI fail on #41. Level: Propose. Spawned investigator." The raw transcript
-opens in a drawer below the board; it is never the primary view, because most of its content is
-wake envelopes and subagent summaries.
+**Settled:** the transcript is the coordinator's ordinary agent tab. A ghost "Chat" button at the
+top right of the board opens it and closing the tab returns to the board. On compact the
+workspace header menu gets "Open coordinator chat". There is no drawer and no in-pane toggle.
 
-The board machinery is promoted from `plugin-examples/inbox` into core: board, card, peek modal,
-question card, permission card, keyboard navigation. The plugin stays as the cross-host review
-surface; the core board reads coordinator state instead of the agent directory. This is the
-first inbox code that stops being a plugin example.
+### Board layout
+
+**Settled:** on desktop, Needs you is a strip across the top, Working and Done are two columns
+beneath, and the composer stays docked at the bottom with the tracks row above it. The strip has
+a fixed row height and no empty placeholder, so a quiet workspace collapses to two columns and
+nothing shifts when a decision arrives. Done is capped at five rows with a "24h" link to the chat.
+
+On compact it is one vertical scroll with sticky section headers, Needs you first, decisions
+answered inline, Working rows collapsed to one line, and Done collapsed behind "Done (n)" the way
+the Kanban plugin collapses lanes today.
+
+```
+NEEDS YOU
+● Retry CI on #41?                          [Retry] [Investigate] [Ignore]
+  test-e2e failed · same test passed on retry twice · default Retry in 1h 40m
+
+WORKING                              DONE · 24h
+⟳ Woke: CI failed on #41 · Propose · spawned investigator
+○ Investigate test-e2e on #41        ○ Opened #43: fix timezone bug
+  4m · claude/opus                     2h ago · #43
+
+[● Propose] [+12 −3]
+┌ Ask the coordinator…                                            ↑ ┐
+```
+
+Everything on the board is a row, not a card. Section labels use the structural-label tier. Row
+titles are normal weight at base size, second lines are muted and small. Dots come from
+`getStatusDotColor`: `needs_input` for decisions, the running ring for live subagents, `done`
+for outcomes. No bespoke badges, no trust-level chips on rows, no "all caught up" illustration.
+
+- **Decision row.** First line is the question in the imperative. Second line is who is asking,
+  how long it has waited, and the default with a countdown. Buttons are right-aligned, secondary
+  tier, first option primary, rendered with the transcript's permission action button and
+  question form primitives so a decision looks the same on the board and in chat. Tapping the
+  text opens the peek modal promoted from the Kanban plugin.
+- **Working row.** Goal on the first line, elapsed time and provider on the second. Tap opens
+  the subagent's tab. Cost is not on the row; it lives in the trust pill popover.
+- **Done row.** Verb-first outcome, then time and the link. Change request rows open the PR,
+  memory rows open the file diff.
+- **Wake line.** One muted system line at the top of Working with no dot: "Woke: CI failed on
+  #41 · Propose · spawned investigator". Only the last wake shows. The full sequence is in the
+  chat.
+
+### Trust pill, sidebar, and memory pane
+
+The trust level is a `ComposerTrackPill` in the tracks row reading the current notch with its
+dot. It opens the standard popover on desktop and a sheet on compact, containing a four-notch
+`<SegmentedControl>`, one muted line under the selected notch stating what it may do unprompted,
+the month's token budget as a meter in the context meter's style, and a ghost row opening the
+personal memory pane. Stepping down applies instantly. Stepping to Autopilot highlights the notch
+and reveals a secondary button "Allow autopilot in this workspace", so it takes a second tap and
+never a modal.
+
+The sidebar workspace row reuses the status bucket dot and adds no glyph. When decisions are
+open, the meta row gains one dot-separated peer item, "2 need you", beside branch and checks.
+
+Personal memory opens as a side pane: an editable text area over
+`$PASEO_HOME/projects/{projectId}/memory.md` with a muted line naming the path.
 
 ### Enabling and the first five minutes
 
-Enabling is a toggle on the workspace, a trust level, and a coordinator agent profile (provider,
-model, mode). The provider picker offers only Claude, Codex, and OpenCode, the three that can
+Enabling opens an `<AdaptiveModalSheet>` from the "Set up a coordinator" row: the agent profile
+picker, the trust `<SegmentedControl>` defaulting to Observe, and an Enable button. Afterwards
+the same fields live on the workspace setup tab. The provider picker offers only Claude, Codex, and OpenCode, the three that can
 enforce delegate-only natively (see [Providers](#providers)).
 
 Unprompted, the coordinator reads the README, CI configuration, `.paseo/`, and the last twenty
-change requests, then posts exactly one Needs-you row: "Here's what I think this project is.
-Correct me." and writes a first draft of `.paseo/memory/project.md` as an uncommitted diff for
+change requests, then posts exactly one decision row: "Here's what I think this project is" with the answers
+"Looks right" and "Correct it", where the second focuses the composer with the draft quoted in, and writes a first draft of `.paseo/memory/project.md` as an uncommitted diff for
 you to review. It spawns nothing and opens nothing on first run regardless of trust level. A bad
 first change request from a stranger is the fastest route to the off switch.
 
@@ -79,7 +129,7 @@ Four shapes. Each is a Decision with one-tap answers, except the digest.
 3. **Blocked subagent.** "Investigator on #38 needs a call: rename `Foo` or add an alias?"
    The subagent's own permission request, already forwarded to the parent by notify-on-finish,
    re-asked in plain words. Answers are the subagent's options.
-4. **Digest.** One push per day inside your active hours: "Overnight: 2 PRs opened, 1 CI retry,
+4. **Digest.** One push per day inside your active hours, on by default: "Overnight: 2 PRs opened, 1 CI retry,
    0 need you." The Done lane rendered as text.
 
 Never pushed: heartbeat wakes, subagent starts, memory writes, budget accounting, anything with no
