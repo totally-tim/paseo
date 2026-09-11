@@ -29,6 +29,7 @@ export const fr: TranslationResources = {
       copy: "Copie",
       copyLine: "Copier la ligne",
       dismiss: "Rejeter",
+      reload: "Recharger",
       retry: "Réessayer",
       search: "Recherche",
       select: "Sélectionner",
@@ -1349,6 +1350,7 @@ export const fr: TranslationResources = {
       detail: "Arrêt du démon local.",
     },
     daemon: {
+      lifecycle: en.desktop.daemon.lifecycle,
       title: "Daemon",
       status: {
         title: "Statut",

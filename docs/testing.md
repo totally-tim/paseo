@@ -107,7 +107,7 @@ When a test is labeled end-to-end, it calls the real service. No environment var
 
 The packaged desktop smoke is an external observer of the production launch path. It must not add a smoke-only branch to Electron main or start the daemon itself.
 
-The harness launches the unpacked packaged app with isolated user data and daemon state, connects to the real renderer over Chromium's debugging protocol, and requires all of these outcomes:
+The harness launches the packaged app with isolated user data and daemon state, connects to the real renderer over Chromium's debugging protocol, and requires all of these outcomes:
 
 - the `paseo://app/` renderer mounts into `#root`;
 - the sandboxed preload exposes the desktop bridge;
