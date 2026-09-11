@@ -241,6 +241,65 @@ settings, and the workspace carries a monthly cap. The daemon already tracks per
 (fork feature, `docs/fork.md`), so cost per wake on the board row is a display of existing data.
 Hitting the monthly cap stops all wakes and sends one push.
 
+## Orchestration layer
+
+The coordinator is an orchestrating agent in the sense of `public-docs/orchestration.md` and the
+`paseo` skill, so it inherits their contract: delegate through `create_agent`, choose settings
+through `list_profiles` notes, leave `notifyOnFinish` on, never poll `list_agents` to check on a
+subagent, use `send_agent_prompt` for follow-ups, and put writing subagents in worktrees through
+`create_workspace`. Four of those mechanics hold today and four break for a long-lived parent
+that rotates. Each break is a daemon change in this branch, not a prompt workaround.
+
+What holds, verified 2026-09-11:
+
+- A steer into an idle agent starts a new turn, and concurrent steers are serialized per agent
+  in arrival order (`agent-manager.ts` `steerOrReplaceActiveTurn`, `runForegroundMutation`).
+  Every wake source can therefore use one delivery path.
+- Subagents of an agent-scoped `create_agent` are unattended for account selection and must use
+  their parent's account for the same provider (`agent-manager.ts` `resolveCreationAccount`).
+  The coordinator launches with `unattended: true` explicitly, since it has no parent label.
+- Automatic account continuation never fires for subagents or schedule-driven agents
+  (`agent-continuation/safety.ts` `isOrdinaryAgent`).
+- Cross-workspace subagents stay subagents but appear as tabs in their own workspace, and
+  archiving the parent detaches them rather than archiving them. Done rows link to them.
+
+What breaks, and the fix that ships with the milestone named:
+
+1. **Tool injection is a daemon-wide toggle.** `daemon.mcp.injectIntoAgents` defaults off and
+   `prepareSessionConfig` has no per-agent override, so a coordinator on a host with the toggle
+   off has no tools. Fix: a `paseoTools: "required"` launch option the daemon sets for the
+   coordinator and propagates to its subagents, honored ahead of the host toggle. Not exposed
+   on the `create_agent` tool. Milestone 1.
+2. **Handoff orphans subagents.** `handoffAgent` never rewrites `paseo.parent-agent-id`, and a
+   finish notification to the closed source throws in `assertAgentCanAcceptPrompt` and is
+   swallowed by `notifySafely`. Fix: rotation reparents live subagents to the successor, the
+   finish path resolves the parent through the handoff successor label instead of throwing,
+   and notifications that land while the successor is still starting go into the fork's
+   durable instruction queue for the successor. Milestone 4, with the successor resolution in
+   milestone 1 because manual "Continue with…" on a coordinator has the same hole.
+3. **Heartbeats keep firing at a closed agent.** `completeForAgent` runs only on archive and
+   `sweepOrphanedSchedules` only at startup, so an agent-targeted schedule errors on every tick
+   after a handoff. Fix: handoff retargets agent-targeted schedules to the successor.
+   Milestone 4.
+4. **A subagent's pending permission is invisible.** `track-presentation.ts` builds subagent
+   rows with `requiresAttention: false` and no `pendingPermissionCount`, so a child waiting on a
+   permission renders as running and never reaches `needs_input`. Fix: the board reads child
+   `pendingPermissions` directly into Needs you, and the subagents track passes the count. This
+   also changes the "Blocked subagent" push: the daemon surfaces the child's request itself and
+   the coordinator relays only when it can answer within its trust level. Milestone 1.
+5. **No fan-out or depth limit anywhere.** `create_agent` has no cap and a subagent can spawn
+   subagents. Fix: the spawn budget is enforced in `create_agent` for every agent whose parent
+   chain reaches a coordinator, counted against that coordinator's current wake. Milestone 2.
+6. **Automatic account continuation can rotate the coordinator on its own.** It is an ordinary
+   top-level agent, so a capacity rejection hands it off through a path that has the orphaning
+   problems above. Fix: continuation on a coordinator goes through the coordinator rotation,
+   which carries the reparenting and retargeting. Milestone 4.
+
+Profiles: the setup sheet asks for an investigator profile and an implementer profile, or the
+coordinator falls back to `inspect_provider` and says so, as the skill requires. Subagents that
+shell out to `paseo run` inherit `PASEO_AGENT_SPAWN_ISOLATION=worktree` from the coordinator's
+environment at Ship and above.
+
 ## Protocol
 
 New RPCs follow `docs/rpc-namespacing.md`:
