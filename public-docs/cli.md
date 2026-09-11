@@ -55,7 +55,7 @@ Worktree creation accepts `--worktree-mode branch-off|checkout-branch|checkout-p
 
 When an existing Paseo agent runs the same command, Paseo recognizes it through `PASEO_AGENT_ID`. Without explicit placement, the new agent becomes its subagent in the same workspace, editing the same checkout as its parent. `--workspace` can place that subagent elsewhere without changing its parent.
 
-Set `PASEO_AGENT_SPAWN_ISOLATION=worktree` in the agent environment to make every agent-spawned run mint its own managed worktree instead of sharing the parent checkout. The variable only takes the value `worktree`; anything else keeps the default. Export it from your shell profile, or per provider with `agents.providers.<id>.env` in the daemon config, so every `paseo run` from an agent gets an isolated working tree.
+Set `PASEO_AGENT_SPAWN_ISOLATION=worktree` in the agent environment to make every agent-spawned run mint its own managed worktree instead of sharing the parent checkout. The variable only takes the value `worktree`; any other value keeps the default and prints a warning on stderr. The caller's checkout has to be a git repository, because the isolated run branches a worktree off it. Export it from your shell profile, or per provider with `agents.providers.<id>.env` in the daemon config, so every `paseo run` from an agent gets an isolated working tree.
 
 Use `--output-schema` to return only matching JSON output. You can pass a schema file path or an inline JSON schema object. This mode cannot be used with `--background`.
 

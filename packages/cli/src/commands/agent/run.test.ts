@@ -80,9 +80,17 @@ describe("agent-spawned workspace isolation", () => {
       "worktree",
     );
     expect(resolveAgentSpawnIsolation({})).toBeUndefined();
+    expect(resolveAgentSpawnIsolation({ PASEO_AGENT_SPAWN_ISOLATION: "  " })).toBeUndefined();
+    expect(stderr).not.toHaveBeenCalled();
+  });
+
+  it("warns on stderr when the isolation value is not recognised", () => {
     expect(
       resolveAgentSpawnIsolation({ PASEO_AGENT_SPAWN_ISOLATION: "container" }),
     ).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining("Ignoring PASEO_AGENT_SPAWN_ISOLATION=container"),
+    );
   });
 
   it("mints a worktree workspace instead of sharing the caller checkout", async () => {

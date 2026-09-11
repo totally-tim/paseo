@@ -554,7 +554,13 @@ export type RunWorkspaceClient = RunWorkspaceLookupClient & RunWorkspaceCreateCl
 export function resolveAgentSpawnIsolation(
   env: { PASEO_AGENT_SPAWN_ISOLATION?: string } = process.env,
 ): "worktree" | undefined {
-  return env.PASEO_AGENT_SPAWN_ISOLATION?.trim() === "worktree" ? "worktree" : undefined;
+  const value = env.PASEO_AGENT_SPAWN_ISOLATION?.trim();
+  if (!value) return undefined;
+  if (value === "worktree") return "worktree";
+  console.error(
+    `Ignoring PASEO_AGENT_SPAWN_ISOLATION=${value}: the only supported value is "worktree".`,
+  );
+  return undefined;
 }
 
 // Workspace policy for `paseo run`. Precedence:
