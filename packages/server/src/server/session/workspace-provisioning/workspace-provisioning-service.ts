@@ -27,6 +27,13 @@ export interface ResolveOrCreateWorkspaceIdInput {
   initialTitle: string | null;
 }
 
+export interface CreateAgentWorkspacePlacement {
+  workspaceId: string;
+  // True only when this call minted the workspace; a reused record keeps its
+  // own title and is not auto-named from the new agent's prompt.
+  createdWorkspace: boolean;
+}
+
 export interface ImportWorkspaceInput {
   cwd: string;
   requestedWorkspaceId?: string;
@@ -60,7 +67,15 @@ export interface WorkspaceProvisioningService {
     title?: string | null,
     context?: { expectsInitialAgent?: boolean },
   ): Promise<PersistedWorkspaceRecord>;
-  resolveOrCreateWorkspaceIdForCreateAgent(input: ResolveOrCreateWorkspaceIdInput): Promise<string>;
+  resolveOrCreateWorkspaceIdForCreateAgent(
+    input: ResolveOrCreateWorkspaceIdInput,
+  ): Promise<CreateAgentWorkspacePlacement>;
+  openWorkspaceForDirectory(
+    cwd: string,
+    title?: string | null,
+    projectId?: string,
+    context?: { expectsInitialAgent?: boolean },
+  ): Promise<{ workspace: PersistedWorkspaceRecord; created: boolean }>;
   createWorkspaceForDirectory(
     cwd: string,
     title?: string | null,
@@ -206,6 +221,8 @@ export function createWorkspaceProvisioningService(deps: {
     return project;
   }
 
+  // Always mints. Scheduled runs and Hub creates rely on owning the record they
+  // get back, because they archive it when the run finishes.
   async function createWorkspaceForDirectory(
     cwd: string,
     title?: string | null,
@@ -214,14 +231,45 @@ export function createWorkspaceProvisioningService(deps: {
   ): Promise<PersistedWorkspaceRecord> {
     const normalizedCwd = resolve(cwd);
     const checkout = await workspaceGitService.getCheckout(normalizedCwd);
+    return mintWorkspaceForDirectory(normalizedCwd, checkout, title, projectId, context);
+  }
+
+  // A user-facing directory open (workspace.create with a directory source,
+  // which is also what a bare `paseo run` sends first). A Paseo-owned worktree
+  // reopens as the workspace that already has that exact cwd; an ordinary
+  // directory always gets a fresh record so two workspaces may share one cwd.
+  async function openWorkspaceForDirectory(
+    cwd: string,
+    title?: string | null,
+    projectId?: string,
+    context?: { expectsInitialAgent?: boolean },
+  ): Promise<{ workspace: PersistedWorkspaceRecord; created: boolean }> {
+    const normalizedCwd = resolve(cwd);
+    if (projectId) await requireActiveProject(projectId);
+    const checkout = await workspaceGitService.getCheckout(normalizedCwd);
     if (isPaseoWorktreeCheckout(checkout)) {
-      // The daemon minted this directory for exactly one workspace. Reopening it
-      // by path (a bare `paseo run`, an old client, an agent-scoped create with
-      // only a cwd) returns that workspace instead of a second record on the
-      // same worktree, even when the caller named a project.
       const owner = await findWorkspaceForDirectory(normalizedCwd);
-      if (owner) return owner;
+      if (owner) return { workspace: owner, created: false };
     }
+    return {
+      workspace: await mintWorkspaceForDirectory(
+        normalizedCwd,
+        checkout,
+        title,
+        projectId,
+        context,
+      ),
+      created: true,
+    };
+  }
+
+  async function mintWorkspaceForDirectory(
+    normalizedCwd: string,
+    checkout: WorkspaceCheckout,
+    title: string | null | undefined,
+    projectId: string | undefined,
+    context: { expectsInitialAgent?: boolean } | undefined,
+  ): Promise<PersistedWorkspaceRecord> {
     const project = projectId
       ? await refreshProjectKind(await requireActiveProject(projectId), normalizedCwd, checkout)
       : // COMPAT(workspaceCreateMissingProjectId): added in v0.1.107, remove after 2027-01-15.
@@ -355,14 +403,15 @@ export function createWorkspaceProvisioningService(deps: {
     return allocateProjectForRepoRoot(checkout.mainRepoRoot);
   }
 
+  // Exact cwd only, never an enclosing directory: a workspace's cwd is its
+  // execution directory, and a subdirectory is a different placement.
   async function findWorkspaceForDirectory(
     normalizedCwd: string,
   ): Promise<PersistedWorkspaceRecord | null> {
+    const matchesCwd = createRealpathAwarePathMatcher(normalizedCwd);
     const workspaces = await workspaceRegistry.list();
     const active = workspaces
-      .filter(
-        (workspace) => !workspace.archivedAt && areEquivalentPaths(workspace.cwd, normalizedCwd),
-      )
+      .filter((workspace) => !workspace.archivedAt && matchesCwd(workspace.cwd))
       .sort(
         (left, right) =>
           Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
@@ -370,9 +419,7 @@ export function createWorkspaceProvisioningService(deps: {
       )[0];
     if (active) return refreshWorkspaceRecord(active);
     const archived = workspaces
-      .filter(
-        (workspace) => workspace.archivedAt && areEquivalentPaths(workspace.cwd, normalizedCwd),
-      )
+      .filter((workspace) => workspace.archivedAt && matchesCwd(workspace.cwd))
       .sort(
         (left, right) =>
           Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
@@ -399,17 +446,27 @@ export function createWorkspaceProvisioningService(deps: {
 
   async function resolveOrCreateWorkspaceIdForCreateAgent(
     input: ResolveOrCreateWorkspaceIdInput,
-  ): Promise<string> {
-    if (input.createdWorktree) return input.createdWorktree.workspace.workspaceId;
-    if (input.requestedWorkspaceId) return input.requestedWorkspaceId;
+  ): Promise<CreateAgentWorkspacePlacement> {
+    if (input.createdWorktree) {
+      return { workspaceId: input.createdWorktree.workspace.workspaceId, createdWorkspace: false };
+    }
+    if (input.requestedWorkspaceId) {
+      return { workspaceId: input.requestedWorkspaceId, createdWorkspace: false };
+    }
     // An unaddressed agent create is a placement question, not a create verb:
-    // a bare cwd that already has a workspace lands in it. Explicit
-    // workspace.create keeps minting fresh records on shared directories.
-    return (
-      await findOrCreateWorkspaceForDirectory(input.cwd, input.initialTitle, {
+    // a bare cwd that already has a workspace lands in it.
+    const normalizedCwd = resolve(input.cwd);
+    const existing = await findWorkspaceForDirectory(normalizedCwd);
+    if (existing) return { workspaceId: existing.workspaceId, createdWorkspace: false };
+    const created = await createWorkspaceForDirectory(
+      normalizedCwd,
+      input.initialTitle,
+      undefined,
+      {
         expectsInitialAgent: true,
-      })
-    ).workspaceId;
+      },
+    );
+    return { workspaceId: created.workspaceId, createdWorkspace: true };
   }
 
   async function resolveRestoredAutoArchiveChangeRequestUrl(
@@ -531,6 +588,7 @@ export function createWorkspaceProvisioningService(deps: {
     runInImportWorkspace,
     findOrCreateWorkspaceForDirectory,
     resolveOrCreateWorkspaceIdForCreateAgent,
+    openWorkspaceForDirectory,
     createWorkspaceForDirectory,
     createWorkspaceForWorktree,
     findOrCreateProjectForDirectory,

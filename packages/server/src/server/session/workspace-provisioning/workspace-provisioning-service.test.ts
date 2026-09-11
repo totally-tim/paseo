@@ -476,38 +476,39 @@ test("resolveOrCreateWorkspaceIdForCreateAgent returns a created worktree's id w
     workspace: { workspaceId: "ws-from-worktree" },
   } as unknown as CreatePaseoWorktreeWorkflowResult;
 
-  const id = await provisioning.resolveOrCreateWorkspaceIdForCreateAgent({
+  const placement = await provisioning.resolveOrCreateWorkspaceIdForCreateAgent({
     createdWorktree,
     cwd: path.join(tmpDir, "x"),
     initialTitle: null,
   });
 
-  expect(id).toBe("ws-from-worktree");
+  expect(placement).toEqual({ workspaceId: "ws-from-worktree", createdWorkspace: false });
   expect(await workspaceRegistry.list()).toHaveLength(0);
 });
 
 test("resolveOrCreateWorkspaceIdForCreateAgent honors an explicitly requested workspace id", async () => {
-  const id = await provisioning.resolveOrCreateWorkspaceIdForCreateAgent({
+  const placement = await provisioning.resolveOrCreateWorkspaceIdForCreateAgent({
     createdWorktree: null,
     requestedWorkspaceId: "ws-requested",
     cwd: path.join(tmpDir, "x"),
     initialTitle: null,
   });
 
-  expect(id).toBe("ws-requested");
+  expect(placement).toEqual({ workspaceId: "ws-requested", createdWorkspace: false });
   expect(await workspaceRegistry.list()).toHaveLength(0);
 });
 
 test("resolveOrCreateWorkspaceIdForCreateAgent creates a titled workspace when nothing is provided", async () => {
   const dir = path.join(tmpDir, "plain");
 
-  const id = await provisioning.resolveOrCreateWorkspaceIdForCreateAgent({
+  const placement = await provisioning.resolveOrCreateWorkspaceIdForCreateAgent({
     createdWorktree: null,
     cwd: dir,
     initialTitle: "My Title",
   });
 
-  const created = await workspaceRegistry.get(id);
+  expect(placement.createdWorkspace).toBe(true);
+  const created = await workspaceRegistry.get(placement.workspaceId);
   expect(created?.cwd).toBe(dir);
   expect(created?.title).toBe("My Title");
 });
@@ -517,15 +518,15 @@ test("resolveOrCreateWorkspaceIdForCreateAgent places a bare cwd in the workspac
   gitRoots.add(repo);
   const existing = await provisioning.createWorkspaceForDirectory(repo, "First");
 
-  const id = await provisioning.resolveOrCreateWorkspaceIdForCreateAgent({
+  const placement = await provisioning.resolveOrCreateWorkspaceIdForCreateAgent({
     createdWorktree: null,
     cwd: repo,
     initialTitle: "Second",
   });
 
-  expect(id).toBe(existing.workspaceId);
+  expect(placement).toEqual({ workspaceId: existing.workspaceId, createdWorkspace: false });
   expect(await workspaceRegistry.list()).toHaveLength(1);
-  expect((await workspaceRegistry.get(id))?.title).toBe("First");
+  expect((await workspaceRegistry.get(placement.workspaceId))?.title).toBe("First");
 });
 
 test("resolveOrCreateWorkspaceIdForCreateAgent reuses the workspace that owns a Paseo worktree without minting a project", async () => {
@@ -536,33 +537,75 @@ test("resolveOrCreateWorkspaceIdForCreateAgent reuses the workspace that owns a 
   const worktree = registerPaseoWorktree(repo, "lawful-armadillo");
   const owner = await createWorktreeWorkspace(repo, worktree);
 
-  const id = await provisioning.resolveOrCreateWorkspaceIdForCreateAgent({
+  const placement = await provisioning.resolveOrCreateWorkspaceIdForCreateAgent({
     createdWorktree: null,
     cwd: worktree,
     initialTitle: "[Review] external gate",
   });
 
-  expect(id).toBe(owner.workspaceId);
+  expect(placement).toEqual({ workspaceId: owner.workspaceId, createdWorkspace: false });
   expect(await workspaceRegistry.list()).toHaveLength(1);
   const projects = await projectRegistry.list();
   expect(projects).toHaveLength(1);
   expect(projects[0]?.rootPath).toBe(repo);
 });
 
-test("createWorkspaceForDirectory reuses the workspace that owns a Paseo worktree", async () => {
+test("openWorkspaceForDirectory reopens a Paseo worktree as the workspace that owns it", async () => {
   const repo = path.join(tmpDir, "repo");
   const worktree = registerPaseoWorktree(repo, "lawful-armadillo");
   const owner = await createWorktreeWorkspace(repo, worktree);
 
-  const reopened = await provisioning.createWorkspaceForDirectory(worktree, "ignored title");
-  expect(reopened.workspaceId).toBe(owner.workspaceId);
+  const reopened = await provisioning.openWorkspaceForDirectory(worktree, "ignored title");
+  expect(reopened.created).toBe(false);
+  expect(reopened.workspace.workspaceId).toBe(owner.workspaceId);
   expect(await workspaceRegistry.list()).toHaveLength(1);
 
   await workspaceRegistry.archive(owner.workspaceId, ARCHIVED_AT);
-  const restored = await provisioning.createWorkspaceForDirectory(worktree);
-  expect(restored.workspaceId).toBe(owner.workspaceId);
-  expect(restored.archivedAt).toBeNull();
+  const restored = await provisioning.openWorkspaceForDirectory(worktree);
+  expect(restored.created).toBe(false);
+  expect(restored.workspace.workspaceId).toBe(owner.workspaceId);
+  expect(restored.workspace.archivedAt).toBeNull();
   expect(await workspaceRegistry.list()).toHaveLength(1);
+  expect(await projectRegistry.list()).toHaveLength(1);
+});
+
+test("openWorkspaceForDirectory still validates an explicit project before reusing a worktree owner", async () => {
+  const repo = path.join(tmpDir, "repo");
+  const worktree = registerPaseoWorktree(repo, "lawful-armadillo");
+  await createWorktreeWorkspace(repo, worktree);
+
+  await expect(
+    provisioning.openWorkspaceForDirectory(worktree, null, "missing"),
+  ).rejects.toMatchObject({
+    code: "unknown_project",
+  } satisfies Partial<WorkspaceProvisioningError>);
+  expect(await workspaceRegistry.list()).toHaveLength(1);
+});
+
+test("openWorkspaceForDirectory mints a fresh workspace on an ordinary shared directory", async () => {
+  const repo = path.join(tmpDir, "repo");
+  gitRoots.add(repo);
+  const first = await provisioning.openWorkspaceForDirectory(repo);
+  const second = await provisioning.openWorkspaceForDirectory(repo);
+
+  expect(first.created).toBe(true);
+  expect(second.created).toBe(true);
+  expect(second.workspace.workspaceId).not.toBe(first.workspace.workspaceId);
+  expect(await workspaceRegistry.list()).toHaveLength(2);
+});
+
+test("createWorkspaceForDirectory on a Paseo worktree mints a throwaway record under the main checkout's project", async () => {
+  // Scheduled runs and Hub creates archive the record they get back, so they
+  // must never receive the user's live worktree workspace.
+  const repo = path.join(tmpDir, "repo");
+  const worktree = registerPaseoWorktree(repo, "lawful-armadillo");
+  const owner = await createWorktreeWorkspace(repo, worktree);
+
+  const scheduled = await provisioning.createWorkspaceForDirectory(worktree, "Nightly run");
+
+  expect(scheduled.workspaceId).not.toBe(owner.workspaceId);
+  expect(scheduled.projectId).toBe(owner.projectId);
+  expect(await workspaceRegistry.list()).toHaveLength(2);
   expect(await projectRegistry.list()).toHaveLength(1);
 });
 

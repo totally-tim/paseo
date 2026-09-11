@@ -3987,6 +3987,7 @@ export class Session {
     }
 
     let config = request.config;
+    let createdDirectoryWorkspace = false;
 
     const intent = await resolveCreateAgentIntent({
       explicitWorkspaceId: createdWorktree?.workspace.workspaceId ?? request.workspaceId,
@@ -4004,21 +4005,24 @@ export class Session {
         }
         return { workspaceId, cwd: workspace.cwd };
       },
-      createWorkspace: async () => ({
-        workspaceId: await this.workspaceProvisioning.resolveOrCreateWorkspaceIdForCreateAgent({
-          createdWorktree: null,
-          cwd: config.cwd,
-          initialTitle: input.workspacePromptTitle,
-        }),
-        cwd: config.cwd,
-      }),
+      createWorkspace: async () => {
+        const placement = await this.workspaceProvisioning.resolveOrCreateWorkspaceIdForCreateAgent(
+          {
+            createdWorktree: null,
+            cwd: config.cwd,
+            initialTitle: input.workspacePromptTitle,
+          },
+        );
+        createdDirectoryWorkspace = placement.createdWorkspace;
+        return { workspaceId: placement.workspaceId, cwd: config.cwd };
+      },
     });
     config = { ...config, cwd: intent.cwd };
 
     return {
       config,
       intent,
-      createdDirectoryWorkspace: !createdWorktree && !request.workspaceId && !callerAgent,
+      createdDirectoryWorkspace,
     };
   }
 
@@ -6361,7 +6365,7 @@ export class Session {
 
     const explicitTitle = request.title?.trim() || null;
     const promptTitle = resolveFirstAgentPromptTitle(request.firstAgentContext);
-    const workspace = await this.workspaceProvisioning.createWorkspaceForDirectory(
+    const { workspace } = await this.workspaceProvisioning.openWorkspaceForDirectory(
       cwd,
       explicitTitle ?? promptTitle,
       request.source.projectId,
