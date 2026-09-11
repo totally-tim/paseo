@@ -9,7 +9,21 @@ import {
   type ProviderAccount,
   type AccountProvider,
 } from "@getpaseo/protocol/provider-accounts";
-import type { ProviderAccountContext } from "../agent/provider-account-context.js";
+import type { Logger } from "pino";
+import {
+  providerConfigDir,
+  type ProviderAccountContext,
+} from "../agent/provider-account-context.js";
+import { ensureProviderAccountUserLayer } from "./user-layer.js";
+
+export interface ProviderAccountStoreOptions {
+  logger?: Logger;
+  /**
+   * Resolves the host config dir the managed home links its user layer from.
+   * Tests inject a temp dir; production defaults to the daemon's environment.
+   */
+  resolveHostConfigDir?: (provider: AccountProvider) => string;
+}
 
 const StoreSchema = z.object({
   accounts: z.array(ProviderAccountSchema),
@@ -25,9 +39,14 @@ export class ProviderAccountStore {
   /** Set when the metadata on disk must not be replaced; every mutation refuses. */
   private readOnlyReason: string | null = null;
   readonly directory: string;
+  private readonly logger?: Logger;
+  private readonly resolveHostConfigDir: (provider: AccountProvider) => string;
 
-  constructor(paseoHome: string) {
+  constructor(paseoHome: string, options: ProviderAccountStoreOptions = {}) {
     this.directory = path.join(paseoHome, "provider-accounts");
+    this.logger = options.logger;
+    this.resolveHostConfigDir =
+      options.resolveHostConfigDir ?? ((provider) => providerConfigDir(provider, process.env));
   }
 
   async initialize(): Promise<void> {
@@ -93,7 +112,14 @@ export class ProviderAccountStore {
     if (account.ownership === "external") return undefined;
     // IDs originate here, never from paths supplied by a client.
     if (!/^[a-f0-9-]{36}$/.test(account.id)) throw new Error("Invalid managed account ID");
-    return { accountId: id, provider: account.provider, configDir: path.join(this.directory, id) };
+    const configDir = path.join(this.directory, id);
+    ensureProviderAccountUserLayer({
+      provider: account.provider,
+      accountDir: configDir,
+      hostConfigDir: this.resolveHostConfigDir(account.provider),
+      logger: this.logger,
+    });
+    return { accountId: id, provider: account.provider, configDir };
   }
 
   async create(provider: AccountProvider, label: string): Promise<ProviderAccount> {
@@ -112,6 +138,12 @@ export class ProviderAccountStore {
       updatedAt: now,
     });
     await fs.mkdir(path.join(this.directory, account.id), { mode: 0o700 });
+    ensureProviderAccountUserLayer({
+      provider: account.provider,
+      accountDir: path.join(this.directory, account.id),
+      hostConfigDir: this.resolveHostConfigDir(account.provider),
+      logger: this.logger,
+    });
     await this.save(account);
     return account;
   }

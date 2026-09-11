@@ -1,5 +1,6 @@
 import { claudeLimitNotification } from "../../provider-limit.js";
 import { providerConfigDir } from "../../provider-account-context.js";
+import { loadHostClaudeMcpServers } from "./host-mcp-servers.js";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -3318,8 +3319,9 @@ class ClaudeAgentSession implements AgentSession {
       env: sdkEnv,
     };
 
-    if (this.config.mcpServers) {
-      base.mcpServers = this.normalizeMcpServers(this.config.mcpServers);
+    const mcpServers = this.resolveSessionMcpServers(sdkEnv);
+    if (mcpServers) {
+      base.mcpServers = this.normalizeMcpServers(mcpServers);
     }
 
     if (this.config.model) {
@@ -3359,6 +3361,29 @@ class ClaudeAgentSession implements AgentSession {
       return null;
     }
     return this.config.featureValues?.fast_mode === true;
+  }
+
+  /**
+   * Managed account homes keep their own .claude.json, which is where Claude
+   * stores user-scope and local-scope MCP servers. When the session's effective
+   * config dir differs from the daemon's, the host's servers are merged under
+   * the session's so a managed agent sees the same servers as a host one.
+   */
+  private resolveSessionMcpServers(
+    sdkEnv: NodeJS.ProcessEnv,
+  ): Record<string, McpServerConfig> | undefined {
+    const hostConfigDir = providerConfigDir("claude", process.env);
+    if (providerConfigDir("claude", sdkEnv) === hostConfigDir) {
+      return this.config.mcpServers;
+    }
+    const hostServers = loadHostClaudeMcpServers({
+      hostConfigDir,
+      cwd: this.config.cwd,
+    });
+    if (Object.keys(hostServers).length === 0) {
+      return this.config.mcpServers;
+    }
+    return { ...hostServers, ...this.config.mcpServers };
   }
 
   private normalizeMcpServers(
