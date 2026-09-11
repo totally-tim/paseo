@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { formatSince, projectLanes } from "./lanes";
+import {
+  activityInFlight,
+  formatSince,
+  formatUntil,
+  type InboxCard,
+  laneFlexGrow,
+  projectLanes,
+  quietText,
+  urgencyLevel,
+} from "./lanes";
 import type { Agent, PermissionRequest, Workspace } from "./types";
 
 function agent(input: Partial<Agent> & { id: string }): Agent {
@@ -190,5 +199,68 @@ describe("formatSince", () => {
     expect(formatSince("2026-09-04T09:00:00.000Z", now)).toBe("3h");
     expect(formatSince("2026-09-01T12:00:00.000Z", now)).toBe("3d");
     expect(formatSince(null, now)).toBe("");
+  });
+});
+
+describe("formatUntil", () => {
+  const now = Date.parse("2026-09-04T12:00:00.000Z");
+  it("counts down future timestamps and marks past ones due", () => {
+    expect(formatUntil("2026-09-04T12:00:40.000Z", now)).toBe("in 40s");
+    expect(formatUntil("2026-09-04T12:40:00.000Z", now)).toBe("in 40m");
+    expect(formatUntil("2026-09-04T11:00:00.000Z", now)).toBe("due now");
+    expect(formatUntil(null, now)).toBe("");
+  });
+});
+
+describe("urgencyLevel", () => {
+  const now = Date.parse("2026-09-04T12:00:00.000Z");
+  const base = {
+    lane: "needsYou",
+    reason: "question",
+    since: "2026-09-04T11:00:00.000Z",
+  } as InboxCard;
+  it("treats errors as urgent immediately and ages requests into warnings", () => {
+    expect(urgencyLevel({ ...base, reason: "error" } as InboxCard, now)).toBe("danger");
+    expect(urgencyLevel(base, now)).toBe("normal");
+    expect(urgencyLevel({ ...base, since: "2026-09-04T07:00:00.000Z" } as InboxCard, now)).toBe(
+      "warn",
+    );
+    expect(urgencyLevel({ ...base, since: "2026-09-03T10:00:00.000Z" } as InboxCard, now)).toBe(
+      "danger",
+    );
+    expect(urgencyLevel({ ...base, lane: "working" } as InboxCard, now)).toBe("normal");
+  });
+});
+
+describe("laneFlexGrow", () => {
+  it("shrinks empty lanes and widens busy ones up to a cap", () => {
+    expect(laneFlexGrow(0)).toBeLessThan(1);
+    expect(laneFlexGrow(1)).toBeGreaterThan(1);
+    expect(laneFlexGrow(100)).toBe(laneFlexGrow(4));
+  });
+});
+
+describe("quietText", () => {
+  const now = Date.parse("2026-09-04T12:00:00.000Z");
+  it("anchors on the newest row's timestamp, not on observation time", () => {
+    // A card mounted three hours into a stall reports the real stall length.
+    expect(quietText("2026-09-04T09:00:00.000Z", false, now)).toBe("quiet 3h");
+    expect(quietText("2026-09-04T11:59:30.000Z", false, now)).toBeNull();
+    expect(quietText(null, false, now)).toBeNull();
+  });
+
+  it("stays silent while a tool call or compaction is in flight", () => {
+    const stale = "2026-09-04T08:00:00.000Z";
+    expect(quietText(stale, true, now)).toBeNull();
+  });
+});
+
+describe("activityInFlight", () => {
+  it("treats running tool calls and loading compactions as in-flight", () => {
+    expect(activityInFlight({ type: "tool_call", status: "running" } as never)).toBe(true);
+    expect(activityInFlight({ type: "tool_call", status: "completed" } as never)).toBe(false);
+    expect(activityInFlight({ type: "compaction", status: "loading" } as never)).toBe(true);
+    expect(activityInFlight({ type: "assistant_message", text: "hi" })).toBe(false);
+    expect(activityInFlight(undefined)).toBe(false);
   });
 });

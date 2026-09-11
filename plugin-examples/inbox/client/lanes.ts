@@ -1,4 +1,4 @@
-import type { Agent, PermissionRequest, Workspace } from "./types";
+import type { Agent, PermissionRequest, TimelineItem, Workspace } from "./types";
 
 const PARENT_AGENT_ID_LABEL = "paseo.parent-agent-id";
 
@@ -15,6 +15,8 @@ function activityAt(agent: Agent): string {
 
 export type Lane = "needsYou" | "working" | "done";
 export type CardReason = "question" | "permission" | "error" | "working" | "finished";
+/** The reasons a card can sit in the needs-you lane; the reason filter's domain. */
+export type NeedsReason = Extract<CardReason, "question" | "permission" | "error">;
 
 export interface InboxCard {
   agent: Agent;
@@ -185,11 +187,79 @@ export function projectLanes(
 export function formatSince(iso: string | null, now: number = Date.now()): string {
   const start = time(iso);
   if (!start) return "";
-  const seconds = Math.max(0, Math.round((now - start) / 1000));
+  return formatDuration(Math.max(0, Math.round((now - start) / 1000)));
+}
+
+/** Future timestamps read "in 5m"; past or unparseable read "due now"/"". */
+export function formatUntil(iso: string | null, now: number = Date.now()): string {
+  const start = time(iso);
+  if (!start) return "";
+  const seconds = Math.round((start - now) / 1000);
+  if (seconds <= 0) return "due now";
+  return `in ${formatDuration(seconds)}`;
+}
+
+export function formatDuration(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.round(seconds / 60);
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.round(minutes / 60);
   if (hours < 48) return `${hours}h`;
   return `${Math.round(hours / 24)}d`;
+}
+
+/** What a snooze records; the card resurfaces when its wait state changes. */
+export function snoozeStamp(card: InboxCard): string {
+  return card.since ?? "";
+}
+
+export type Urgency = "normal" | "warn" | "danger";
+
+const URGENCY_WARN_MS = 4 * 60 * 60 * 1000;
+const URGENCY_DANGER_MS = 24 * 60 * 60 * 1000;
+
+/** Errors are urgent immediately; questions and approvals age into it. */
+export function urgencyLevel(card: InboxCard, now: number = Date.now()): Urgency {
+  if (card.lane !== "needsYou") return "normal";
+  if (card.reason === "error") return "danger";
+  // A missing timestamp must not age into danger: time(null) parses as epoch.
+  const since = time(card.since);
+  if (!since) return "normal";
+  const waited = now - since;
+  if (waited >= URGENCY_DANGER_MS) return "danger";
+  if (waited >= URGENCY_WARN_MS) return "warn";
+  return "normal";
+}
+
+/** Empty lanes shrink; busy lanes widen. Keeps populated columns readable. */
+export function laneFlexGrow(count: number): number {
+  if (count <= 0) return 0.55;
+  return 1 + Math.min(count, 4) * 0.2;
+}
+
+/** Milliseconds without a new timeline row before a working card reads as quiet. */
+export const QUIET_AFTER_MS = 2 * 60 * 1000;
+
+/**
+ * A running tool call or in-flight compaction is expected silence: the row sits
+ * frozen until the operation ends. Everything else going quiet means the agent
+ * produced nothing.
+ */
+export function activityInFlight(item: TimelineItem | undefined | null): boolean {
+  if (!item) return false;
+  if (item.type === "tool_call") return item.status === "running";
+  if (item.type === "compaction") return item.status === "loading";
+  return false;
+}
+
+/** Renders once the newest timeline row is older than QUIET_AFTER_MS. */
+export function quietText(
+  lastAt: string | null,
+  inFlight: boolean,
+  now: number = Date.now(),
+): string | null {
+  if (!lastAt || inFlight) return null;
+  const quietMs = now - time(lastAt);
+  if (quietMs < QUIET_AFTER_MS) return null;
+  return `quiet ${formatDuration(Math.round(quietMs / 1000))}`;
 }

@@ -1,7 +1,7 @@
 import type { PluginClientStorage } from "@getpaseo/plugin/client";
 
 import { ALL_PROJECTS, type InboxFilters, parseFilters } from "./filters";
-import { type Lanes, projectLanes } from "./lanes";
+import { type InboxCard, type Lanes, projectLanes, snoozeStamp } from "./lanes";
 import type { Agent, PaseoApi, PermissionResponse, Workspace } from "./types";
 
 export interface Operation {
@@ -13,6 +13,31 @@ export const responseKey = (agentId: string, requestId: string) =>
   JSON.stringify(["answer", agentId, requestId]);
 export const replyKey = (agentId: string) => JSON.stringify(["reply", agentId]);
 export const readKey = (agentId: string) => JSON.stringify(["read", agentId]);
+export const archiveKey = (agentId: string) => JSON.stringify(["archive", agentId]);
+export const READ_ALL_KEY = JSON.stringify(["readAll"]);
+
+/** Parses the stored snooze map: agentId -> the card `since` the user dismissed. */
+export function parseSnoozed(value: string | null): Map<string, string> {
+  if (!value) return new Map();
+  const parsed: unknown = JSON.parse(value);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    throw new Error("Saved snoozed cards are invalid.");
+  const entries = Object.entries(parsed);
+  if (entries.some(([, since]) => typeof since !== "string"))
+    throw new Error("Saved snoozed cards are invalid.");
+  return new Map(entries as [string, string][]);
+}
+
+export function isSnoozed(card: InboxCard, snoozed: ReadonlyMap<string, string>): boolean {
+  return snoozed.get(card.agent.id) === snoozeStamp(card);
+}
+
+export function unsnoozedCards(
+  cards: readonly InboxCard[],
+  snoozed: ReadonlyMap<string, string>,
+): InboxCard[] {
+  return cards.filter((card) => !isSnoozed(card, snoozed));
+}
 
 export interface InboxSnapshot {
   agents: ReadonlyMap<string, Agent>;
@@ -31,6 +56,10 @@ export interface InboxSnapshot {
   filtersReady: boolean;
   filtersSaving: boolean;
   filtersError: string | null;
+  snoozed: ReadonlyMap<string, string>;
+  snoozedReady: boolean;
+  snoozedError: string | null;
+  snoozedLoadError: string | null;
 }
 
 export interface InboxStore {
@@ -45,9 +74,14 @@ export interface InboxStore {
   respond(agentId: string, requestId: string, response: PermissionResponse): Promise<boolean>;
   sendReply(agentId: string): Promise<boolean>;
   markRead(agentId: string): Promise<boolean>;
+  markAllRead(agentIds: readonly string[]): Promise<boolean>;
+  archive(agentId: string): Promise<boolean>;
+  snooze(card: InboxCard): void;
+  unsnooze(agentId: string): void;
   setFilters(filters: InboxFilters): void;
   retryFilters(): void;
   retryDrafts(): void;
+  retrySnoozed(): void;
   dispose(): void;
 }
 
@@ -67,6 +101,10 @@ export const EMPTY_SNAPSHOT: InboxSnapshot = {
   filtersReady: false,
   filtersSaving: false,
   filtersError: null,
+  snoozed: new Map(),
+  snoozedReady: false,
+  snoozedError: null,
+  snoozedLoadError: null,
 };
 
 function errorMessage(error: unknown): string {
@@ -232,6 +270,56 @@ export function createInboxStore(paseo: PaseoApi, storage?: PluginClientStorage)
       })
       .catch((error: unknown) => publish({ filtersError: errorMessage(error) }));
   };
+  let snoozedRevision = 0;
+  const saveSnoozed = () => {
+    if (disposed || !storage) return;
+    const revision = ++snoozedRevision;
+    // Drop entries whose card left the lane; a stale stamp can never match again.
+    const snoozed = new Map(snapshot.snoozed);
+    for (const [agentId] of snoozed) {
+      if (
+        !snapshot.lanes.needsYou.some(
+          (card) => card.agent.id === agentId && snoozeStamp(card) === snoozed.get(agentId),
+        )
+      )
+        snoozed.delete(agentId);
+    }
+    void storage
+      .setItem("snoozed", JSON.stringify(Object.fromEntries(snoozed)))
+      .then(() => {
+        if (revision === snoozedRevision) publish({ snoozedError: null, snoozedLoadError: null });
+        return undefined;
+      })
+      .catch((error: unknown) => {
+        if (revision === snoozedRevision) publish({ snoozedError: errorMessage(error) });
+      });
+  };
+  const loadSnoozed = () => {
+    if (!storage) {
+      publish({ snoozedReady: true });
+      return;
+    }
+    const revision = snoozedRevision;
+    void storage
+      .getItem("snoozed")
+      .then((value) => {
+        // A newer save already holds truth; still mark the load path ready so
+        // the board does not wait on a gate that will never open.
+        if (revision !== snoozedRevision) publish({ snoozedReady: true });
+        else
+          publish({
+            snoozed: parseSnoozed(value),
+            snoozedReady: true,
+            snoozedError: null,
+            snoozedLoadError: null,
+          });
+        return undefined;
+      })
+      .catch((error: unknown) =>
+        publish({ snoozedReady: true, snoozedLoadError: errorMessage(error) }),
+      );
+  };
+
   let draftRevision = 0;
   const saveDrafts = () => {
     if (disposed) return;
@@ -274,6 +362,7 @@ export function createInboxStore(paseo: PaseoApi, storage?: PluginClientStorage)
   };
   loadDrafts();
   loadFilters();
+  loadSnoozed();
   void retryLoad();
 
   return {
@@ -284,7 +373,7 @@ export function createInboxStore(paseo: PaseoApi, storage?: PluginClientStorage)
         listeners.delete(listener);
       };
     },
-    getBadge: () => snapshot.lanes.needsYou.length || null,
+    getBadge: () => unsnoozedCards(snapshot.lanes.needsYou, snapshot.snoozed).length || null,
     requestOpen: (agentId) => publish({ pendingOpenAgentId: agentId }),
     clearPendingOpen() {
       if (snapshot.pendingOpenAgentId !== null) publish({ pendingOpenAgentId: null });
@@ -325,6 +414,36 @@ export function createInboxStore(paseo: PaseoApi, storage?: PluginClientStorage)
       return sent;
     },
     markRead: (agentId) => run(readKey(agentId), () => paseo.agents.ref(agentId).clearAttention()),
+    async markAllRead(agentIds) {
+      // Per-card read keys show progress on each card; failures keep their own retry state.
+      return run(READ_ALL_KEY, async () => {
+        let failed = 0;
+        for (const agentId of agentIds) {
+          if (disposed) return;
+          // A read already in flight will succeed on its own — don't count it.
+          if (snapshot.operations.get(readKey(agentId))?.status === "pending") continue;
+          if (!(await this.markRead(agentId))) failed += 1;
+        }
+        if (failed > 0) {
+          throw new Error(`${failed} of ${agentIds.length} results could not be marked read.`);
+        }
+      });
+    },
+    archive: (agentId) => run(archiveKey(agentId), () => paseo.agents.ref(agentId).archive()),
+    snooze(card) {
+      if (disposed) return;
+      const snoozed = new Map(snapshot.snoozed);
+      snoozed.set(card.agent.id, snoozeStamp(card));
+      publish({ snoozed });
+      saveSnoozed();
+    },
+    unsnooze(agentId) {
+      if (disposed || !snapshot.snoozed.has(agentId)) return;
+      const snoozed = new Map(snapshot.snoozed);
+      snoozed.delete(agentId);
+      publish({ snoozed });
+      saveSnoozed();
+    },
     setFilters(filters) {
       if (disposed) return;
       publish({ filters, filtersReady: true });
@@ -337,6 +456,12 @@ export function createInboxStore(paseo: PaseoApi, storage?: PluginClientStorage)
     retryFilters() {
       if (snapshot.filtersReady) saveFilters();
       else loadFilters();
+    },
+    retrySnoozed() {
+      // A failed save means the in-memory map is newer: write it again rather
+      // than reloading a stale stored map over it. Otherwise reload.
+      if (snapshot.snoozedError) saveSnoozed();
+      else loadSnoozed();
     },
     dispose() {
       disposed = true;

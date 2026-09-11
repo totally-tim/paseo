@@ -1,6 +1,8 @@
 import type { DaemonClientConfig } from "./daemon-client.js";
 import type {
   AgentSnapshotPayload,
+  CheckoutPrStatusResponse,
+  CheckoutStatusResponse,
   CreateAgentRequestMessage,
   FetchWorkspacesRequestMessage,
   FetchWorkspacesResponseMessage,
@@ -18,6 +20,7 @@ import type {
   ProviderDiagnosticResponseMessage,
   ProviderUsageListResponseMessage,
   ProjectPlacementPayload,
+  SubscribeCheckoutDiffResponse,
   WorkspaceProjectDescriptorPayload,
   RefreshProvidersSnapshotResponseMessage,
   SendAgentMessageRequest,
@@ -456,6 +459,39 @@ export interface PaseoConfigActions {
   ): Promise<{ requestId: string; config: MutableDaemonConfig }>;
 }
 
+export type PaseoCheckoutStatusResult = CheckoutStatusResponse["payload"];
+export type PaseoCheckoutPrStatusResult = CheckoutPrStatusResponse["payload"];
+export type PaseoCheckoutDiffResult = Omit<
+  SubscribeCheckoutDiffResponse["payload"],
+  "subscriptionId"
+>;
+export interface PaseoCheckoutDiffCompare {
+  mode: "uncommitted" | "base";
+  baseRef?: string;
+  ignoreWhitespace?: boolean;
+}
+export interface PaseoCheckoutActions {
+  /** Git status for a checkout: branch, dirty state, ahead/behind. */
+  status(cwd: string, requestId?: string): Promise<PaseoCheckoutStatusResult>;
+  /** Change-request status for a checkout: PR/MR state, checks, review decision. */
+  prStatus(cwd: string, requestId?: string): Promise<PaseoCheckoutPrStatusResult>;
+  /** One-shot parsed diff. Prefer file metadata over `files[].hunks` for summaries. */
+  diff(
+    cwd: string,
+    compare: PaseoCheckoutDiffCompare,
+    requestId?: string,
+  ): Promise<PaseoCheckoutDiffResult>;
+}
+
+export type PaseoScheduleListResult = Extract<
+  SessionOutboundMessage,
+  { type: "schedule/list/response" }
+>["payload"];
+export type PaseoScheduleSummary = PaseoScheduleListResult["schedules"][number];
+export interface PaseoScheduleActions {
+  list(requestId?: string): Promise<PaseoScheduleListResult>;
+}
+
 export interface PaseoApi {
   readonly terminals: PaseoTerminalActions;
   readonly workspaces: PaseoWorkspaceActions;
@@ -463,6 +499,10 @@ export interface PaseoApi {
   readonly agents: PaseoAgentActions;
   readonly providers: PaseoProviderActions;
   readonly config: PaseoConfigActions;
+  /** Absent on hosts older than the checkout feature contract — probe before use. */
+  readonly checkout?: PaseoCheckoutActions;
+  /** Absent on hosts older than the schedules feature contract — probe before use. */
+  readonly schedules?: PaseoScheduleActions;
 }
 
 export interface PaseoClient extends PaseoApi {
@@ -580,6 +620,14 @@ export function createPaseoApi(daemonClient: DaemonClient): PaseoApi {
     config: {
       get: (requestId) => daemonClient.getDaemonConfig(requestId),
       patch: (patch, requestId) => daemonClient.patchDaemonConfig(patch, requestId),
+    },
+    checkout: {
+      status: (cwd, requestId) => daemonClient.getCheckoutStatus(cwd, { requestId }),
+      prStatus: (cwd, requestId) => daemonClient.checkoutPrStatus(cwd, requestId),
+      diff: (cwd, compare, requestId) => daemonClient.getCheckoutDiff(cwd, compare, requestId),
+    },
+    schedules: {
+      list: (requestId) => daemonClient.scheduleList(requestId),
     },
   };
 }

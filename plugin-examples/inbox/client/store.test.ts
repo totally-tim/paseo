@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createInboxStore, replyKey, responseKey } from "./store";
+import { createInboxStore, READ_ALL_KEY, replyKey, responseKey } from "./store";
 import type { Agent, PaseoApi } from "./types";
 
 function fakePaseo(agents: Agent[]) {
@@ -216,7 +216,7 @@ describe("inbox recovery and review", () => {
 
   it("restores filters, serializes writes, and reports a failed save until retry", async () => {
     const { paseo } = fakePaseo([]);
-    const saved = { projectId: "p", projectGroup: "group" };
+    const saved = { projectId: "p", projectGroup: "group", groupByProject: true };
     const storage = {
       getItem: vi.fn().mockResolvedValue(JSON.stringify(saved)),
       setItem: vi.fn().mockRejectedValueOnce(new Error("Disk full")).mockResolvedValue(undefined),
@@ -225,7 +225,7 @@ describe("inbox recovery and review", () => {
     const store = createInboxStore(paseo, storage);
     await tick();
     expect(store.getSnapshot().filters).toEqual(saved);
-    store.setFilters({ projectId: "new", projectGroup: null });
+    store.setFilters({ projectId: "new", projectGroup: null, groupByProject: false });
     await tick();
     expect(store.getSnapshot().filtersError).toBe("Disk full");
     store.retryFilters();
@@ -233,7 +233,7 @@ describe("inbox recovery and review", () => {
     expect(store.getSnapshot().filtersError).toBeNull();
     expect(storage.setItem).toHaveBeenLastCalledWith(
       "filters",
-      JSON.stringify({ projectId: "new", projectGroup: null }),
+      JSON.stringify({ projectId: "new", projectGroup: null, groupByProject: false }),
     );
     store.dispose();
   });
@@ -247,10 +247,145 @@ describe("inbox recovery and review", () => {
       removeItem: vi.fn(),
     };
     const store = createInboxStore(paseo, storage);
-    store.setFilters({ projectId: "chosen", projectGroup: null });
+    store.setFilters({ projectId: "chosen", projectGroup: null, groupByProject: false });
     read.resolve(JSON.stringify({ projectId: "old", projectGroup: null }));
     await tick();
     expect(store.getSnapshot().filters.projectId).toBe("chosen");
+    store.dispose();
+  });
+
+  it("snoozes a waiting card out of the badge and review queue until it changes", async () => {
+    const { paseo } = fakePaseo([waiting]);
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: async (key: string) => values.get(key) ?? null,
+      setItem: async (key: string, value: string) => {
+        values.set(key, value);
+      },
+      removeItem: async (key: string) => {
+        values.delete(key);
+      },
+    };
+    const store = createInboxStore(paseo, storage);
+    await tick();
+    const card = store.getSnapshot().lanes.needsYou[0];
+    store.snooze(card);
+    expect(store.getSnapshot().snoozed.get("a")).toBe(card.since);
+    expect(store.getBadge()).toBeNull();
+    await tick();
+    expect(JSON.parse(values.get("snoozed") ?? "{}")).toEqual({ a: card.since });
+    store.unsnooze("a");
+    expect(store.getBadge()).toBe(1);
+    store.dispose();
+  });
+
+  it("marks every unread result read and archives an agent through the handles", async () => {
+    const done = {
+      ...waiting,
+      id: "done",
+      status: "idle",
+      pendingPermissions: [],
+      requiresAttention: true,
+      attentionReason: "finished",
+      attentionTimestamp: "2026-09-04T10:00:00.000Z",
+    } as unknown as Agent;
+    const { paseo } = fakePaseo([done]);
+    const clearAttention = vi.fn().mockResolvedValue(undefined);
+    const archive = vi.fn().mockResolvedValue(undefined);
+    paseo.agents.ref = vi.fn(() => ({
+      clearAttention,
+      archive,
+    })) as unknown as PaseoApi["agents"]["ref"];
+    const store = createInboxStore(paseo);
+    await tick();
+    expect(store.getSnapshot().lanes.done.map((card) => card.agent.id)).toEqual(["done"]);
+    expect(await store.markAllRead(["done"])).toBe(true);
+    expect(clearAttention).toHaveBeenCalledTimes(1);
+    expect(await store.archive("done")).toBe(true);
+    expect(archive).toHaveBeenCalledTimes(1);
+    store.dispose();
+  });
+
+  it("reports mark-all-read as failed when a card's clear fails", async () => {
+    const done = (id: string) =>
+      ({
+        ...waiting,
+        id,
+        status: "idle",
+        pendingPermissions: [],
+        requiresAttention: true,
+        attentionReason: "finished",
+        attentionTimestamp: "2026-09-04T10:00:00.000Z",
+      }) as unknown as Agent;
+    const { paseo } = fakePaseo([done("one"), done("two")]);
+    paseo.agents.ref = vi.fn((id: string) => ({
+      clearAttention:
+        id === "two"
+          ? vi.fn().mockRejectedValue(new Error("Offline"))
+          : vi.fn().mockResolvedValue(undefined),
+    })) as unknown as PaseoApi["agents"]["ref"];
+    const store = createInboxStore(paseo);
+    await tick();
+    expect(await store.markAllRead(["one", "two"])).toBe(false);
+    expect(store.getSnapshot().operations.get(READ_ALL_KEY)?.error).toContain(
+      "1 of 2 results could not be marked read",
+    );
+    store.dispose();
+  });
+
+  it("surfaces a failed snooze save and retries it", async () => {
+    const { paseo } = fakePaseo([waiting]);
+    const values = new Map<string, string>();
+    let failWrites = true;
+    const storage = {
+      getItem: async (key: string) => values.get(key) ?? null,
+      setItem: async (key: string, value: string) => {
+        if (failWrites && key === "snoozed") throw new Error("Disk full");
+        values.set(key, value);
+      },
+      removeItem: async (key: string) => {
+        values.delete(key);
+      },
+    };
+    const store = createInboxStore(paseo, storage);
+    await tick();
+    store.snooze(store.getSnapshot().lanes.needsYou[0]);
+    await tick();
+    expect(store.getSnapshot().snoozedError).toBe("Disk full");
+    failWrites = false;
+    store.retrySnoozed();
+    await tick();
+    expect(store.getSnapshot().snoozedError).toBeNull();
+    expect(JSON.parse(values.get("snoozed") ?? "{}")).toEqual({
+      a: store.getSnapshot().snoozed.get("a"),
+    });
+    store.dispose();
+  });
+
+  it("reports a corrupt snooze map as a load error and clears it on retry", async () => {
+    const { paseo } = fakePaseo([waiting]);
+    let corrupt = true;
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: async (key: string) => {
+        if (key !== "snoozed") return null;
+        return corrupt ? "{not json" : (values.get(key) ?? null);
+      },
+      setItem: async (key: string, value: string) => {
+        values.set(key, value);
+      },
+      removeItem: vi.fn(),
+    };
+    const store = createInboxStore(paseo, storage);
+    await tick();
+    const snapshot = store.getSnapshot();
+    expect(snapshot.snoozedReady).toBe(true);
+    expect(snapshot.snoozedLoadError).toBeTruthy();
+    expect(snapshot.snoozedError).toBeNull();
+    corrupt = false;
+    store.retrySnoozed();
+    await tick();
+    expect(store.getSnapshot().snoozedLoadError).toBeNull();
     store.dispose();
   });
 });

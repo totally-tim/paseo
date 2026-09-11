@@ -28,7 +28,21 @@ describe("keyToAction", () => {
       index: 2,
     });
     expect(keyToAction({ key: "k", metaKey: true, ctrlKey: false, altKey: false })).toBeNull();
-    expect(keyToAction({ key: "x", metaKey: false, ctrlKey: false, altKey: false })).toBeNull();
+    expect(keyToAction({ key: "x", metaKey: false, ctrlKey: false, altKey: false })).toEqual({
+      kind: "archive",
+    });
+    expect(keyToAction({ key: "O", metaKey: false, ctrlKey: false, altKey: false })).toEqual({
+      kind: "openAgent",
+    });
+    expect(keyToAction({ key: "s", metaKey: false, ctrlKey: false, altKey: false })).toEqual({
+      kind: "snooze",
+    });
+    expect(keyToAction({ key: "m", metaKey: false, ctrlKey: false, altKey: false })).toEqual({
+      kind: "markRead",
+    });
+    expect(keyToAction({ key: "?", metaKey: false, ctrlKey: false, altKey: false })).toEqual({
+      kind: "help",
+    });
   });
 });
 
@@ -127,5 +141,45 @@ describe("resolveKeyAction respond", () => {
       { ordered, focusedId: "a", openCardId: null },
     );
     expect(effect).toMatchObject({ kind: "respond", nextFocusAgentId: "b" });
+  });
+});
+
+describe("resolveKeyAction card commands", () => {
+  const done = card({ agent: { id: "a" }, lane: "done", reason: "finished" } as never);
+  const waiting = card({
+    agent: { id: "b" },
+    subject: { id: "b" },
+    lane: "needsYou",
+  } as never);
+  const ordered = [done, waiting];
+
+  it("marks read and archives only done cards, moving focus to the next card", () => {
+    for (const kind of ["markRead", "archive"] as const) {
+      expect(
+        resolveKeyAction({ kind }, { ordered, focusedId: "a", openCardId: null }),
+      ).toMatchObject({ kind, nextFocusAgentId: "b" });
+      expect(resolveKeyAction({ kind }, { ordered, focusedId: "b", openCardId: null })).toBeNull();
+    }
+  });
+
+  it("snoozes only needs-you cards", () => {
+    expect(
+      resolveKeyAction({ kind: "snooze" }, { ordered, focusedId: "b", openCardId: null }),
+    ).toMatchObject({ kind: "snooze", nextFocusAgentId: "a" });
+    expect(
+      resolveKeyAction({ kind: "snooze" }, { ordered, focusedId: "a", openCardId: null }),
+    ).toBeNull();
+  });
+
+  it("opens the focused card's agent and shows help", () => {
+    expect(
+      resolveKeyAction({ kind: "openAgent" }, { ordered, focusedId: "b", openCardId: null }),
+    ).toEqual({ kind: "openAgent", agentId: "b" });
+    expect(
+      resolveKeyAction({ kind: "openAgent" }, { ordered, focusedId: null, openCardId: null }),
+    ).toEqual({ kind: "openAgent", agentId: "a" });
+    expect(
+      resolveKeyAction({ kind: "help" }, { ordered, focusedId: null, openCardId: null }),
+    ).toEqual({ kind: "help" });
   });
 });

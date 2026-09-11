@@ -41,6 +41,12 @@ function usePeekStyles(theme: PluginTheme) {
         section: { borderTopWidth: 1, borderTopColor: theme.colors.border, paddingTop: 12, gap: 8 },
         members: { gap: 6 },
         speech: { gap: 4 },
+        filePath: {
+          flex: 1,
+          minWidth: 0,
+          color: theme.colors.foreground,
+          fontSize: 13,
+        },
         member: {
           padding: 10,
           borderWidth: 1,
@@ -58,6 +64,72 @@ function usePeekStyles(theme: PluginTheme) {
         },
       }),
     [theme],
+  );
+}
+
+function fileStat(file: {
+  additions: number;
+  deletions: number;
+  isNew: boolean;
+  isDeleted: boolean;
+}): string {
+  if (file.isNew) return "new";
+  if (file.isDeleted) return "deleted";
+  return `+${file.additions} −${file.deletions}`;
+}
+
+/** The card workspace's diff vs its base ref — the files the agent actually touched. */
+function ChangedFiles({
+  paseo,
+  theme,
+  workspace,
+  active,
+}: {
+  paseo: PaseoApi;
+  theme: PluginTheme;
+  workspace: InboxCard["workspace"];
+  active: boolean;
+}) {
+  const cwd = workspace?.workspaceDirectory ?? null;
+  const checkout = paseo.checkout;
+  const supported = typeof checkout?.diff === "function";
+  const styles = usePeekStyles(theme);
+  const files = useQuery({
+    queryKey: ["inbox", "files", cwd],
+    enabled: active && supported && cwd !== null,
+    staleTime: 30_000,
+    queryFn: async () => {
+      if (!cwd || !checkout) throw new Error("Checkout diffs unavailable");
+      return checkout.diff(cwd, { mode: "base" });
+    },
+  });
+  if (!cwd || !supported) return null;
+  const list = files.data?.files ?? [];
+  const shown = list.slice(0, 12);
+  const failed = files.isError || files.data?.error;
+  return (
+    <View style={styles.section}>
+      <Text style={styles.subtitle}>Changed files</Text>
+      {files.isPending ? <Text style={styles.subtitle}>Loading…</Text> : null}
+      {failed ? <Text style={styles.error}>Could not load the diff for this checkout.</Text> : null}
+      {files.data?.diffTooLarge ? (
+        <Text style={styles.subtitle}>Diff too large to list.</Text>
+      ) : null}
+      {list.length === 0 && !files.isPending && !failed ? (
+        <Text style={styles.subtitle}>No changes vs base.</Text>
+      ) : null}
+      {shown.map((file) => (
+        <View key={file.path} style={styles.row}>
+          <Text numberOfLines={1} style={styles.filePath}>
+            {file.path}
+          </Text>
+          <Text style={styles.subtitle}>{fileStat(file)}</Text>
+        </View>
+      ))}
+      {list.length > shown.length ? (
+        <Text style={styles.subtitle}>…and {list.length - shown.length} more</Text>
+      ) : null}
+    </View>
   );
 }
 
@@ -239,6 +311,7 @@ export function PeekModal({
   onClose,
   onNext,
   remaining,
+  position,
 }: {
   card: InboxCard;
   selectedId: string | null;
@@ -250,6 +323,8 @@ export function PeekModal({
   onClose(): void;
   onNext(): void;
   remaining: number;
+  /** 1-based queue position when the open card is in the needs-you lane. */
+  position: number | null;
 }) {
   const agent = card.members.find((member) => member.id === selectedId) ?? card.subject;
   const styles = usePeekStyles(theme);
@@ -265,7 +340,9 @@ export function PeekModal({
         {/* Modal.Content owns scrolling on every platform. Avoid a nested, fixed-height transcript. */}
         <View style={styles.container}>
           <View style={styles.row}>
-            <Text style={styles.subtitle}>{remaining} needing you</Text>
+            <Text style={styles.subtitle}>
+              {position !== null ? `Card ${position} of ${remaining}` : `${remaining} needing you`}
+            </Text>
             <ActionButton
               theme={theme}
               label="Next needing you"
@@ -293,6 +370,12 @@ export function PeekModal({
               {card.workspace.projectDisplayName} / {card.workspace.name}
             </Text>
           ) : null}
+          <ChangedFiles
+            paseo={paseo}
+            theme={theme}
+            workspace={card.workspace}
+            active={actions.active}
+          />
           <AgentDetail
             agent={agent}
             theme={theme}

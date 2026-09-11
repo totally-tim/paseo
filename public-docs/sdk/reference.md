@@ -193,6 +193,24 @@ Use `workspace.terminals.create(options?)` and `workspace.terminals.list(options
 
 `config.patch(patch, requestId?)` validates, persists, and returns an updated configuration. Use this administrative surface for host configuration, not per-agent choices. A patch affects every client and future agent using that daemon.
 
+## `client.checkout`
+
+Checkout operations inspect the git checkout at a directory — usually `workspace.workspaceDirectory`. They require a daemon that serves checkout requests; feature-detect `typeof client.checkout?.diff === "function"` on hosts that may predate the group.
+
+| Method                           | Result                                 | Behavior                                                                                                                                                                                                                                                                    |
+| -------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status(cwd, requestId?)`        | `Promise<PaseoCheckoutStatusResult>`   | Git state for the checkout: branch, dirty state, and ahead/behind counts.                                                                                                                                                                                                   |
+| `prStatus(cwd, requestId?)`      | `Promise<PaseoCheckoutPrStatusResult>` | The checkout's change request: PR/MR `status` (state, checks, review decision), forge, and `authState`. `status` is `null` when none exists.                                                                                                                                |
+| `diff(cwd, compare, requestId?)` | `Promise<PaseoCheckoutDiffResult>`     | One-shot parsed diff. `compare.mode` is `"uncommitted"` or `"base"`; `"base"` accepts `baseRef`. Returns `files` with per-file `path`, `additions`, `deletions`, `isNew`, `isDeleted`, and `hunks`; sets `diffTooLarge` or `error` instead of throwing for oversized diffs. |
+
+## `client.schedules`
+
+| Method             | Result                             | Behavior                                                        |
+| ------------------ | ---------------------------------- | --------------------------------------------------------------- |
+| `list(requestId?)` | `Promise<PaseoScheduleListResult>` | Returns `{ schedules }`: every schedule summary on this daemon. |
+
+Each summary carries `id`, `name`, `prompt`, `cadence`, `target`, `status`, `nextRunAt`, and `lastRunAt`. Feature-detect `typeof client.schedules?.list === "function"` on hosts that may predate the group.
+
 ## Errors and cleanup
 
 Connection, validation, rejection, and timeout failures reject their promise. Turn outcomes are returned through `PaseoAgentRunResult.status` because permission and provider errors are expected agent states.

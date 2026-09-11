@@ -6,7 +6,12 @@ import type { WebKeyEvent } from "./web";
 export type KeyAction =
   | { kind: "move"; delta: 1 | -1 }
   | { kind: "open" }
+  | { kind: "openAgent" }
   | { kind: "close" }
+  | { kind: "markRead" }
+  | { kind: "archive" }
+  | { kind: "snooze" }
+  | { kind: "help" }
   | { kind: "option"; index: number }
   | { kind: "allow" }
   | { kind: "deny" };
@@ -26,12 +31,22 @@ export function keyToAction(
     case "Enter":
     case "o":
       return { kind: "open" };
+    case "O":
+      return { kind: "openAgent" };
     case "Escape":
       return { kind: "close" };
     case "y":
       return { kind: "allow" };
     case "n":
       return { kind: "deny" };
+    case "m":
+      return { kind: "markRead" };
+    case "x":
+      return { kind: "archive" };
+    case "s":
+      return { kind: "snooze" };
+    case "?":
+      return { kind: "help" };
     default: {
       if (/^[1-9]$/.test(event.key)) return { kind: "option", index: Number(event.key) - 1 };
       return null;
@@ -84,7 +99,9 @@ export interface BoardKeyState {
 export type BoardKeyEffect =
   | { kind: "focus"; agentId: string | null }
   | { kind: "open"; agentId: string }
+  | { kind: "openAgent"; agentId: string }
   | { kind: "close" }
+  | { kind: "help" }
   | {
       kind: "respond";
       card: InboxCard;
@@ -92,11 +109,30 @@ export type BoardKeyEffect =
       /** Where focus goes after answering, so it does not follow the card into Done. */
       nextFocusAgentId: string | null;
     }
+  | { kind: "markRead"; card: InboxCard; nextFocusAgentId: string | null }
+  | { kind: "archive"; card: InboxCard; nextFocusAgentId: string | null }
+  | { kind: "snooze"; card: InboxCard; nextFocusAgentId: string | null }
   | null;
 
 function nextIndex(length: number, current: number, delta: 1 | -1): number {
   if (current < 0) return delta > 0 ? 0 : length - 1;
   return (current + delta + length) % length;
+}
+
+/** Cards that leave their lane when dismissed keep focus on a neighbor. */
+function dismissEffect(
+  kind: "markRead" | "archive" | "snooze",
+  focused: InboxCard | null,
+  ordered: readonly InboxCard[],
+  focusedIndex: number,
+): BoardKeyEffect {
+  const lane = kind === "snooze" ? "needsYou" : "done";
+  if (focused?.lane !== lane) return null;
+  return {
+    kind,
+    card: focused,
+    nextFocusAgentId: (ordered[focusedIndex + 1] ?? ordered[focusedIndex - 1])?.agent.id ?? null,
+  };
 }
 
 function resolveAnswer(
@@ -126,12 +162,22 @@ export function resolveKeyAction(action: KeyAction, state: BoardKeyState): Board
       const index = nextIndex(ordered.length, focusedIndex, action.delta);
       return { kind: "focus", agentId: ordered[index].agent.id };
     }
-    case "open": {
+    case "open":
+    case "openAgent": {
       const target = focused ?? ordered[0];
-      return target ? { kind: "open", agentId: target.agent.id } : null;
+      if (!target) return null;
+      return action.kind === "open"
+        ? { kind: "open", agentId: target.agent.id }
+        : { kind: "openAgent", agentId: target.subject.id };
     }
     case "close":
       return openCardId ? { kind: "close" } : { kind: "focus", agentId: null };
+    case "help":
+      return { kind: "help" };
+    case "markRead":
+    case "archive":
+    case "snooze":
+      return dismissEffect(action.kind, focused, ordered, focusedIndex);
     default:
       return resolveAnswer(
         action,

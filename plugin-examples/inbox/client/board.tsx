@@ -5,24 +5,52 @@ import { usePaseo } from "@getpaseo/plugin/client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { TextInput } from "@getpaseo/plugin/client/react-native";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import {
+  Pressable,
+  ScrollView,
+  type StyleProp,
+  StyleSheet,
+  Text,
+  View,
+  type ViewStyle,
+} from "react-native";
+import { ReasonChips, SchedulesStrip, ShortcutHelp, SnoozedSection } from "./board-extras";
 import { type CardActions, InboxCardView } from "./card";
 import { keyToAction, resolveKeyAction } from "./keyboard";
-import { type InboxCard, type Lane, type Lanes } from "./lanes";
+import { type InboxCard, type Lane, type Lanes, laneFlexGrow, type NeedsReason } from "./lanes";
 import { PeekModal } from "./peek-modal";
-import { EMPTY_SNAPSHOT, getInboxStore, type InboxSnapshot, type InboxStore } from "./store";
+import {
+  EMPTY_SNAPSHOT,
+  getInboxStore,
+  type InboxSnapshot,
+  type InboxStore,
+  READ_ALL_KEY,
+} from "./store";
 import type { PaseoApi } from "./types";
 import { ActionButton } from "./question-card";
 import { FilterControls } from "./filter-controls";
-import { boardLanes, boardReady, searchLanes } from "./review";
+import {
+  boardLanes,
+  boardReady,
+  filterNeedsYouReason,
+  groupCardsByProject,
+  searchCards,
+  searchLanes,
+} from "./review";
 import { isTextTarget, subscribeKeydown, type WebKeyEvent } from "./web";
 
-const KEY_HINT = "j/k move · Enter preview · 1-9 answer · y/n allow/deny";
+const KEY_HINT =
+  "j/k move · Enter preview · O agent · 1-9 answer · y/n allow/deny · m read · x archive · s snooze · ? help";
 const LANE_ORDER: readonly Lane[] = ["needsYou", "working", "done"];
 const LANE_TITLE: Record<Lane, string> = {
   needsYou: "Needs you",
   working: "Working",
   done: "Done",
+};
+const REASON_EMPTY: Record<NeedsReason, string> = {
+  question: "No questions.",
+  permission: "No approval requests.",
+  error: "No errors.",
 };
 const NO_STORE_UNSUBSCRIBE = () => {};
 
@@ -70,16 +98,8 @@ function useBoardStyles(theme: PluginTheme, compact: boolean) {
       },
       status: { color: theme.colors.foregroundMuted, fontSize: 13 },
       error: { color: theme.colors.statusDanger, fontSize: 13 },
-      needsYou: {
-        flex: 1,
-        minWidth: 0,
-        backgroundColor: theme.colors.surface0,
-        borderColor: theme.colors.border,
-        borderWidth: 1,
-        borderRadius: 12,
-        paddingHorizontal: 12,
-        paddingTop: 10,
-      },
+      schedules: { paddingHorizontal: padding, paddingBottom: 4 },
+      needsYouActive: { borderColor: theme.colors.accent },
       lanes: { flex: 1, flexDirection: "row", gap: 16, padding },
       lane: {
         flex: 1,
@@ -92,6 +112,7 @@ function useBoardStyles(theme: PluginTheme, compact: boolean) {
         paddingTop: 10,
       },
       laneContent: { paddingBottom: 12 },
+      laneExtras: { paddingBottom: 8, gap: 8 },
       header: { flexDirection: "row", alignItems: "center", paddingVertical: 10 },
       headerTitle: {
         flex: 1,
@@ -116,6 +137,12 @@ function useBoardStyles(theme: PluginTheme, compact: boolean) {
         paddingHorizontal: 4,
       },
       cards: { gap: 10 },
+      groupLabel: {
+        color: theme.colors.foregroundMuted,
+        fontSize: 11,
+        fontWeight: "600",
+        paddingTop: 4,
+      },
       hint: {
         color: theme.colors.foregroundMuted,
         fontSize: 11,
@@ -176,6 +203,7 @@ function LaneBody({
   now,
   actions,
   focusedId,
+  grouped,
 }: {
   cards: InboxCard[];
   emptyText: string;
@@ -185,23 +213,68 @@ function LaneBody({
   now: number;
   actions: CardActions;
   focusedId: string | null;
+  grouped: boolean;
 }) {
   if (cards.length === 0) {
     return <Text style={styles.empty}>{emptyText}</Text>;
   }
+  const renderCard = (card: InboxCard) => (
+    <InboxCardView
+      key={card.agent.id}
+      card={card}
+      theme={theme}
+      paseo={paseo}
+      now={now}
+      actions={actions}
+      focused={card.agent.id === focusedId}
+    />
+  );
+  if (!grouped) {
+    return <View style={styles.cards}>{cards.map(renderCard)}</View>;
+  }
+  const groups = groupCardsByProject(cards);
   return (
     <View style={styles.cards}>
-      {cards.map((card) => (
-        <InboxCardView
-          key={card.agent.id}
-          card={card}
-          theme={theme}
-          paseo={paseo}
-          now={now}
-          actions={actions}
-          focused={card.agent.id === focusedId}
-        />
+      {groups.map((group) => (
+        <View key={group.key || "none"} style={styles.cards}>
+          <Text style={styles.groupLabel}>{group.label}</Text>
+          {group.cards.map(renderCard)}
+        </View>
       ))}
+    </View>
+  );
+}
+
+function MarkAllReadRow({
+  lane,
+  lanes,
+  actions,
+  theme,
+  styles,
+}: {
+  lane: Lane;
+  lanes: Lanes;
+  actions: CardActions;
+  theme: PluginTheme;
+  styles: BoardStyles;
+}) {
+  const operation = actions.operations.get(READ_ALL_KEY);
+  const markAll = useCallback(
+    () => actions.onMarkAllRead(lanes.done.map((card) => card.subject.id)),
+    [actions, lanes.done],
+  );
+  if (lane !== "done" || lanes.done.length === 0 || !actions.canRespond) return null;
+  return (
+    <View style={styles.laneExtras}>
+      <ActionButton
+        theme={theme}
+        label={operation?.status === "pending" ? "Marking read…" : "Mark all read"}
+        onPress={markAll}
+        disabled={operation?.status === "pending"}
+      />
+      {operation?.status === "failed" ? (
+        <Text style={styles.error}>{operation.error ?? "Could not mark everything read."}</Text>
+      ) : null}
     </View>
   );
 }
@@ -216,9 +289,11 @@ function BoardToolbar({
   setFiltersOpen,
   isActive,
   lanes,
+  snoozedCount,
   filtered,
   next,
   retryLoad,
+  retrySnoozed,
   search,
   onSearch,
   clearSearch,
@@ -232,9 +307,11 @@ function BoardToolbar({
   setFiltersOpen(open: boolean): void;
   isActive: boolean;
   lanes: Lanes;
+  snoozedCount: number;
   filtered: boolean;
   next(): void;
   retryLoad(): void;
+  retrySnoozed(): void;
   search: string;
   onSearch(value: string): void;
   clearSearch(): void;
@@ -266,6 +343,7 @@ function BoardToolbar({
         <Text style={styles.status}>
           {lanes.needsYou.length ? `${lanes.needsYou.length} needing you` : "All caught up"} ·{" "}
           {lanes.working.length} working · {lanes.done.length} unread
+          {snoozedCount ? ` · ${snoozedCount} snoozed` : ""}
           {filtered ? " in these projects" : ""}
         </Text>
         <ActionButton
@@ -290,104 +368,382 @@ function BoardToolbar({
           <ActionButton theme={theme} label="Retry loading" onPress={retryLoad} />
         </View>
       ) : null}
+      {snapshot.snoozedLoadError ? (
+        <View style={styles.toolbarRow}>
+          <Text style={styles.error}>
+            Could not load snoozed cards: {snapshot.snoozedLoadError}
+          </Text>
+          <ActionButton theme={theme} label="Retry" onPress={retrySnoozed} />
+        </View>
+      ) : null}
+      {snapshot.snoozedError ? (
+        <View style={styles.toolbarRow}>
+          <Text style={styles.error}>Could not save snoozed cards: {snapshot.snoozedError}</Text>
+          <ActionButton theme={theme} label="Retry" onPress={retrySnoozed} />
+        </View>
+      ) : null}
     </View>
   );
 }
 
 const INITIAL_COLLAPSED: Record<Lane, boolean> = { needsYou: false, working: true, done: true };
 
-export function InboxBoard({
+function emptyLanesText(
+  filtered: boolean,
+  reasonFilter: NeedsReason | null,
+  search: string,
+): Record<Lane, string> {
+  let text: Record<Lane, string> = {
+    needsYou: "All caught up. Questions, approvals, and errors will appear here.",
+    working: "No agents working right now. Start a conversation to put an agent to work.",
+    done: "No unread results. Completed work stays here until you mark it read.",
+  };
+  if (filtered)
+    text = {
+      needsYou: "No requests in these projects.",
+      working: "No agents working in these projects.",
+      done: "No unread results in these projects.",
+    };
+  if (reasonFilter) text = { ...text, needsYou: REASON_EMPTY[reasonFilter] };
+  if (search.trim())
+    text = {
+      needsYou: "No requests match your search.",
+      working: "No working agents match your search.",
+      done: "No results match your search.",
+    };
+  return text;
+}
+
+interface BoardKeyboardInput {
+  actions: CardActions;
+  isActive: boolean;
+  filtersOpen: boolean;
+  helpOpen: boolean;
+  keyboard: boolean;
+  platform: string;
+  /** Host capabilities — dismiss keys must not move focus when they will no-op. */
+  canRespond: boolean;
+  canArchive: boolean;
+  ordered: readonly InboxCard[];
+  focusedId: string | null;
+  openCardId: string | null;
+  interactionRevision: { current: number };
+  setFocusedId(id: string | null): void;
+  setHelpOpen(open: boolean): void;
+  open(card: InboxCard): void;
+  closePeek(): void;
+}
+
+/** Dispatches a resolved effect; keep the keydown listener free of branch logic. */
+function applyKeyEffect(
+  effect: NonNullable<ReturnType<typeof resolveKeyAction>>,
+  input: BoardKeyboardInput,
+): void {
+  if (
+    (effect.kind === "archive" && !input.canArchive) ||
+    ((effect.kind === "markRead" || effect.kind === "respond") && !input.canRespond)
+  ) {
+    return;
+  }
+  input.interactionRevision.current += 1;
+  switch (effect.kind) {
+    case "focus":
+      input.setFocusedId(effect.agentId);
+      break;
+    case "open": {
+      input.setFocusedId(effect.agentId);
+      const card = input.ordered.find((item) => item.agent.id === effect.agentId);
+      if (card) input.open(card);
+      break;
+    }
+    case "openAgent":
+      input.actions.onOpenAgent?.(effect.agentId);
+      break;
+    case "close":
+      input.closePeek();
+      break;
+    case "help":
+      input.setHelpOpen(true);
+      break;
+    case "markRead":
+      input.setFocusedId(effect.nextFocusAgentId);
+      input.actions.onMarkRead(effect.card.subject.id);
+      break;
+    case "archive":
+      input.setFocusedId(effect.nextFocusAgentId);
+      input.actions.onArchive(effect.card.subject.id);
+      break;
+    case "snooze":
+      input.setFocusedId(effect.nextFocusAgentId);
+      input.actions.onSnooze(effect.card);
+      break;
+    case "respond":
+      if (effect.card.request) {
+        input.setFocusedId(effect.nextFocusAgentId);
+        input.actions.onRespond(effect.card.subject.id, effect.card.request.id, effect.response);
+      }
+      break;
+  }
+}
+
+function useBoardKeyboard(input: BoardKeyboardInput): void {
+  const { isActive, filtersOpen, keyboard, platform } = input;
+  // The listener reads the live input each keypress so the subscription can
+  // persist across focus/peek changes instead of re-subscribing every render.
+  const latest = useRef(input);
+  latest.current = input;
+  useEffect(() => {
+    if (!isActive || filtersOpen || !keyboard || platform !== "web") return;
+    const handle = (event: WebKeyEvent) => {
+      if (event.defaultPrevented || event.repeat || event.isComposing || isTextTarget(event.target))
+        return;
+      const live = latest.current;
+      if (live.helpOpen) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          live.setHelpOpen(false);
+        }
+        return;
+      }
+      // The peek can select a child independently. Never answer a background card.
+      if (live.openCardId) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          live.closePeek();
+        }
+        return;
+      }
+      const action = keyToAction(event);
+      if (!action) return;
+      const effect = resolveKeyAction(action, {
+        ordered: live.ordered,
+        focusedId: live.focusedId,
+        openCardId: live.openCardId,
+      });
+      if (!effect) return;
+      event.preventDefault();
+      applyKeyEffect(effect, live);
+    };
+    return subscribeKeydown(handle);
+  }, [isActive, filtersOpen, keyboard, platform]);
+}
+
+interface LaneListExtrasProps {
+  lane: Lane;
+  lanes: Lanes;
+  styles: BoardStyles;
+  theme: PluginTheme;
+  actions: CardActions;
+  now: number;
+  snoozed: InboxCard[];
+  showSnoozed: boolean;
+  onToggleSnoozed(): void;
+  /** Compact sections show snoozed rows directly instead of behind a toggle. */
+  compact: boolean;
+}
+
+/** The bulk action for Done plus the needs-you lane's snoozed section. */
+function LaneListExtras({
+  lane,
+  lanes,
+  styles,
   theme,
-  layout,
-  navigation,
-  workspaceId,
-  keyboard = false,
-  isActive: activity,
-}: Pick<PluginSurfaceProps, "theme" | "layout" | "navigation" | "isActive"> & {
-  workspaceId?: string;
-  /** Bind board shortcuts. Only the global surface does, so a panel never doubles them. */
-  keyboard?: boolean;
-}) {
-  const isActive = activity === true;
-  const paseo = usePaseo();
-  const snapshot = useInboxSnapshot();
-  const now = useNow(isActive);
-  const styles = useBoardStyles(theme, layout.compact);
-  const [peekAgentId, setPeekAgentId] = useState<string | null>(null);
-  const [openCardId, setOpenCardId] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState<Record<Lane, boolean>>(INITIAL_COLLAPSED);
-
-  const [search, setSearch] = useState("");
-  const [filtersOpen, setFiltersOpen] = useState(false);
-  const [focusedId, setFocusedId] = useState<string | null>(null);
-
-  const store = getInboxStore();
-  const interactionRevision = useRef(0);
-  const unfilteredLanes = useMemo(() => boardLanes(snapshot, workspaceId), [snapshot, workspaceId]);
-  const lanes = useMemo(() => searchLanes(unfilteredLanes, search), [unfilteredLanes, search]);
-  const ordered = useMemo(() => LANE_ORDER.flatMap((lane) => lanes[lane]), [lanes]);
-  const openCard = ordered.find((card) => card.agent.id === openCardId) ?? null;
-  const open = useCallback((card: InboxCard) => {
-    interactionRevision.current += 1;
-    setOpenCardId(card.agent.id);
-    setPeekAgentId(card.subject.id);
-    setFocusedId(card.agent.id);
-  }, []);
-  const selectMember = useCallback((agentId: string) => {
-    interactionRevision.current += 1;
-    setPeekAgentId(agentId);
-  }, []);
-  const closePeek = useCallback(() => {
-    interactionRevision.current += 1;
-    setOpenCardId(null);
-  }, []);
-  const changeFilters = useCallback(() => {
-    interactionRevision.current += 1;
-    setOpenCardId(null);
-    setFocusedId(null);
-  }, []);
-
-  const changeSearch = useCallback(
-    (value: string) => {
-      changeFilters();
-      setSearch(value);
-    },
-    [changeFilters],
+  actions,
+  now,
+  snoozed,
+  showSnoozed,
+  onToggleSnoozed,
+  compact,
+}: LaneListExtrasProps) {
+  return (
+    <>
+      <MarkAllReadRow lane={lane} lanes={lanes} actions={actions} theme={theme} styles={styles} />
+      {lane === "needsYou" && snoozed.length > 0 ? (
+        <View style={styles.laneExtras}>
+          {compact ? null : (
+            <ActionButton
+              theme={theme}
+              label={showSnoozed ? "Hide snoozed" : `Show ${snoozed.length} snoozed`}
+              onPress={onToggleSnoozed}
+            />
+          )}
+          {compact || showSnoozed ? (
+            <SnoozedSection cards={snoozed} theme={theme} now={now} actions={actions} />
+          ) : null}
+        </View>
+      ) : null}
+    </>
   );
-  const clearSearch = useCallback(() => changeSearch(""), [changeSearch]);
-  useEffect(() => {
-    interactionRevision.current += 1;
-  }, [isActive]);
-  const pendingOpenAgentId = snapshot.pendingOpenAgentId;
-  useEffect(() => {
-    if (!isActive || workspaceId || !pendingOpenAgentId || !store) return;
-    const card = LANE_ORDER.flatMap((lane) => unfilteredLanes[lane]).find(
-      (item) => item.agent.id === pendingOpenAgentId,
-    );
-    if (!card) return;
-    setSearch("");
-    open(card);
-    store.clearPendingOpen();
-  }, [isActive, workspaceId, pendingOpenAgentId, store, unfilteredLanes, open]);
+}
 
-  const candidates = useCallback(() => {
-    const current = store?.getSnapshot();
-    if (!current) return [];
-    return searchLanes(boardLanes(current, workspaceId), search).needsYou;
-  }, [store, workspaceId, search]);
-  const next = useCallback(() => {
-    const queue = candidates();
-    const index = queue.findIndex((card) => card.agent.id === openCardId);
-    const card = queue[(index + 1) % queue.length];
-    if (card) open(card);
-  }, [candidates, open, openCardId]);
+interface LaneViewProps {
+  styles: BoardStyles;
+  theme: PluginTheme;
+  paseo: PaseoApi;
+  now: number;
+  actions: CardActions;
+  focusedId: string | null;
+  grouped: boolean;
+  lanes: Lanes;
+  /** Visible + snoozed waiting cards, post-search and pre-reason-filter — feeds chips. */
+  searchedNeedsYou: InboxCard[];
+  reasonFilter: NeedsReason | null;
+  onSelectReason(reason: NeedsReason | null): void;
+  snoozed: InboxCard[];
+  showSnoozed: boolean;
+  onToggleSnoozed(): void;
+  emptyText: Record<Lane, string>;
+  laneStyles: Record<Lane, StyleProp<ViewStyle>>;
+  collapsed: Record<Lane, boolean>;
+  onToggleLane(lane: Lane): void;
+}
 
-  const probe = paseo.agents.ref("__inbox_probe__");
-  const canRespond =
-    typeof probe.respondToPermission === "function" && typeof probe.clearAttention === "function";
-  const actions: CardActions = useMemo(
+function CompactLanes(props: LaneViewProps) {
+  return (
+    <ScrollView contentContainerStyle={props.styles.compactContent}>
+      {LANE_ORDER.map((lane) => (
+        <View key={lane}>
+          <LaneHeader
+            lane={lane}
+            count={props.lanes[lane].length}
+            styles={props.styles}
+            collapsed={props.collapsed[lane]}
+            onToggle={props.onToggleLane}
+          />
+          {props.collapsed[lane] ? null : (
+            <View style={props.styles.cards}>
+              {lane === "needsYou" ? (
+                <ReasonChips
+                  cards={props.searchedNeedsYou}
+                  selected={props.reasonFilter}
+                  theme={props.theme}
+                  onSelect={props.onSelectReason}
+                />
+              ) : null}
+              <LaneListExtras
+                lane={lane}
+                lanes={props.lanes}
+                styles={props.styles}
+                theme={props.theme}
+                actions={props.actions}
+                now={props.now}
+                snoozed={props.snoozed}
+                showSnoozed={props.showSnoozed}
+                onToggleSnoozed={props.onToggleSnoozed}
+                compact
+              />
+              <LaneBody
+                cards={props.lanes[lane]}
+                emptyText={props.emptyText[lane]}
+                styles={props.styles}
+                theme={props.theme}
+                paseo={props.paseo}
+                now={props.now}
+                actions={props.actions}
+                focusedId={props.focusedId}
+                grouped={props.grouped}
+              />
+            </View>
+          )}
+        </View>
+      ))}
+    </ScrollView>
+  );
+}
+
+function DesktopLanes(props: LaneViewProps) {
+  return (
+    <View style={props.styles.lanes}>
+      {LANE_ORDER.map((lane) => (
+        <View key={lane} style={props.laneStyles[lane]}>
+          <LaneHeader
+            lane={lane}
+            count={props.lanes[lane].length}
+            styles={props.styles}
+            collapsed={null}
+          />
+          {lane === "needsYou" &&
+          (props.searchedNeedsYou.length > 0 || props.reasonFilter !== null) ? (
+            <View style={props.styles.laneExtras}>
+              <ReasonChips
+                cards={props.searchedNeedsYou}
+                selected={props.reasonFilter}
+                theme={props.theme}
+                onSelect={props.onSelectReason}
+              />
+            </View>
+          ) : null}
+          <ScrollView contentContainerStyle={props.styles.laneContent}>
+            <LaneListExtras
+              lane={lane}
+              lanes={props.lanes}
+              styles={props.styles}
+              theme={props.theme}
+              actions={props.actions}
+              now={props.now}
+              snoozed={props.snoozed}
+              showSnoozed={props.showSnoozed}
+              onToggleSnoozed={props.onToggleSnoozed}
+              compact={false}
+            />
+            <LaneBody
+              cards={props.lanes[lane]}
+              emptyText={props.emptyText[lane]}
+              styles={props.styles}
+              theme={props.theme}
+              paseo={props.paseo}
+              now={props.now}
+              actions={props.actions}
+              focusedId={props.focusedId}
+              grouped={props.grouped}
+            />
+          </ScrollView>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+interface CardActionsInput {
+  store: InboxStore | null;
+  navigation: PluginSurfaceProps["navigation"];
+  isActive: boolean;
+  canRespond: boolean;
+  canArchive: boolean;
+  canCheckout: boolean;
+  snapshot: InboxSnapshot;
+  candidates(): InboxCard[];
+  openCardId: string | null;
+  open(card: InboxCard): void;
+  interactionRevision: { current: number };
+  setFocusedId(id: string | null): void;
+  setOpenCardId(id: string | null): void;
+  setPeekAgentId(id: string | null): void;
+}
+
+/** Builds the shared action surface for cards, peeks, and lane extras. */
+function useCardActions(input: CardActionsInput): CardActions {
+  const {
+    store,
+    navigation,
+    isActive,
+    canRespond,
+    canArchive,
+    canCheckout,
+    snapshot,
+    candidates,
+    openCardId,
+    open,
+    interactionRevision,
+    setFocusedId,
+    setOpenCardId,
+    setPeekAgentId,
+  } = input;
+  return useMemo(
     () => ({
       canRespond,
+      canArchive,
+      canCheckout,
       active: isActive,
       drafts: snapshot.drafts,
       draftsReady: snapshot.draftsReady,
@@ -416,6 +772,18 @@ export function InboxBoard({
       onMarkRead: (agentId) => {
         if (isActive) void store?.markRead(agentId);
       },
+      onMarkAllRead: (agentIds) => {
+        if (isActive && canRespond) void store?.markAllRead(agentIds);
+      },
+      onArchive: (agentId) => {
+        if (isActive && canArchive) void store?.archive(agentId);
+      },
+      onSnooze: (card) => {
+        if (isActive) store?.snooze(card);
+      },
+      onUnsnooze: (agentId) => {
+        if (isActive) store?.unsnooze(agentId);
+      },
       onOpen: open,
       onOpenAgent: navigation
         ? (agentId) => {
@@ -427,6 +795,8 @@ export function InboxBoard({
     }),
     [
       canRespond,
+      canArchive,
+      canCheckout,
       isActive,
       navigation,
       snapshot.drafts,
@@ -437,137 +807,291 @@ export function InboxBoard({
       candidates,
       openCardId,
       open,
+      interactionRevision,
+      setFocusedId,
+      setOpenCardId,
+      setPeekAgentId,
     ],
   );
+}
+
+interface BoardDerived {
+  unfilteredLanes: ReturnType<typeof boardLanes>;
+  searchedLanes: Lanes;
+  lanes: Lanes;
+  /** Snoozed cards after search but before the reason filter — for chip counts. */
+  searchedSnoozed: InboxCard[];
+  snoozed: InboxCard[];
+  ordered: InboxCard[];
+  grouped: boolean;
+  filtered: boolean;
+  emptyText: Record<Lane, string>;
+}
+
+/** The view pipeline: project/workspace scope -> search -> snooze split -> reason filter. */
+function useBoardDerived(
+  snapshot: InboxSnapshot,
+  workspaceId: string | undefined,
+  search: string,
+  reasonFilter: NeedsReason | null,
+): BoardDerived {
+  const unfilteredLanes = useMemo(() => boardLanes(snapshot, workspaceId), [snapshot, workspaceId]);
+  const searchedLanes = useMemo(
+    () => searchLanes(unfilteredLanes, search),
+    [unfilteredLanes, search],
+  );
+  const lanes = useMemo(
+    () => filterNeedsYouReason(searchedLanes, reasonFilter),
+    [searchedLanes, reasonFilter],
+  );
+  const searchedSnoozed = useMemo(
+    () => searchCards(unfilteredLanes.snoozed, search),
+    [unfilteredLanes.snoozed, search],
+  );
+  const snoozed = useMemo(
+    () =>
+      reasonFilter
+        ? searchedSnoozed.filter((card) => card.reason === reasonFilter)
+        : searchedSnoozed,
+    [searchedSnoozed, reasonFilter],
+  );
+  const ordered = useMemo(() => LANE_ORDER.flatMap((lane) => lanes[lane]), [lanes]);
+  const grouped = !workspaceId && snapshot.filters.groupByProject;
+  const filtered = Boolean(
+    !workspaceId && (snapshot.filters.projectId !== null || snapshot.filters.projectGroup !== null),
+  );
+  return {
+    unfilteredLanes,
+    searchedLanes,
+    lanes,
+    searchedSnoozed,
+    snoozed,
+    ordered,
+    grouped,
+    filtered,
+    emptyText: emptyLanesText(filtered, reasonFilter, search),
+  };
+}
+
+export function InboxBoard({
+  theme,
+  layout,
+  navigation,
+  workspaceId,
+  keyboard = false,
+  isActive: activity,
+}: Pick<PluginSurfaceProps, "theme" | "layout" | "navigation" | "isActive"> & {
+  workspaceId?: string;
+  /** Bind board shortcuts. Only the global surface does, so a panel never doubles them. */
+  keyboard?: boolean;
+}) {
+  const isActive = activity === true;
+  const paseo = usePaseo();
+  const snapshot = useInboxSnapshot();
+  const now = useNow(isActive);
+  const styles = useBoardStyles(theme, layout.compact);
+  const [peekAgentId, setPeekAgentId] = useState<string | null>(null);
+  const [openCardId, setOpenCardId] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState<Record<Lane, boolean>>(INITIAL_COLLAPSED);
+
+  const [search, setSearch] = useState("");
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [focusedId, setFocusedId] = useState<string | null>(null);
+  const [reasonFilter, setReasonFilter] = useState<NeedsReason | null>(null);
+  const [showSnoozed, setShowSnoozed] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+
+  const store = getInboxStore();
+  const interactionRevision = useRef(0);
+  const {
+    unfilteredLanes,
+    searchedLanes,
+    lanes,
+    searchedSnoozed,
+    snoozed,
+    ordered,
+    grouped,
+    filtered,
+    emptyText,
+  } = useBoardDerived(snapshot, workspaceId, search, reasonFilter);
+  // Snoozed cards are off `ordered` but their rows still offer a preview.
+  const openCard =
+    ordered.find((card) => card.agent.id === openCardId) ??
+    snoozed.find((card) => card.agent.id === openCardId) ??
+    null;
+  const openPosition = openCard
+    ? lanes.needsYou.findIndex((card) => card.agent.id === openCard.agent.id) + 1 || null
+    : null;
+  const open = useCallback((card: InboxCard) => {
+    interactionRevision.current += 1;
+    setOpenCardId(card.agent.id);
+    setPeekAgentId(card.subject.id);
+    setFocusedId(card.agent.id);
+  }, []);
+  const selectMember = useCallback((agentId: string) => {
+    interactionRevision.current += 1;
+    setPeekAgentId(agentId);
+  }, []);
+  const closePeek = useCallback(() => {
+    interactionRevision.current += 1;
+    setOpenCardId(null);
+  }, []);
+  const changeFilters = useCallback(() => {
+    interactionRevision.current += 1;
+    setOpenCardId(null);
+    setFocusedId(null);
+  }, []);
+  const changeReason = useCallback(
+    (reason: NeedsReason | null) => {
+      changeFilters();
+      setReasonFilter((current) => (current === reason ? null : reason));
+    },
+    [changeFilters],
+  );
+
+  const changeSearch = useCallback(
+    (value: string) => {
+      changeFilters();
+      setSearch(value);
+    },
+    [changeFilters],
+  );
+  const clearSearch = useCallback(() => changeSearch(""), [changeSearch]);
+  useEffect(() => {
+    interactionRevision.current += 1;
+  }, [isActive]);
+  const pendingOpenAgentId = snapshot.pendingOpenAgentId;
+  useEffect(() => {
+    if (!isActive || workspaceId || !pendingOpenAgentId || !store) return;
+    const card = LANE_ORDER.flatMap((lane) => unfilteredLanes[lane])
+      .concat(unfilteredLanes.snoozed)
+      .find((item) => item.agent.id === pendingOpenAgentId);
+    if (!card) return;
+    setSearch("");
+    setReasonFilter(null);
+    open(card);
+    store.clearPendingOpen();
+  }, [isActive, workspaceId, pendingOpenAgentId, store, unfilteredLanes, open]);
+
+  const candidates = useCallback(() => {
+    const current = store?.getSnapshot();
+    if (!current) return [];
+    return filterNeedsYouReason(searchLanes(boardLanes(current, workspaceId), search), reasonFilter)
+      .needsYou;
+  }, [store, workspaceId, search, reasonFilter]);
+  const next = useCallback(() => {
+    const queue = candidates();
+    const index = queue.findIndex((card) => card.agent.id === openCardId);
+    const card = queue[(index + 1) % queue.length];
+    if (card) open(card);
+  }, [candidates, open, openCardId]);
+
+  const probe = paseo.agents.ref("__inbox_probe__");
+  const canRespond =
+    typeof probe.respondToPermission === "function" && typeof probe.clearAttention === "function";
+  const canArchive = typeof probe.archive === "function";
+  const canCheckout =
+    typeof paseo.checkout?.prStatus === "function" && typeof paseo.checkout?.diff === "function";
+  const actions = useCardActions({
+    store,
+    navigation,
+    isActive,
+    canRespond,
+    canArchive,
+    canCheckout,
+    snapshot,
+    candidates,
+    openCardId,
+    open,
+    interactionRevision,
+    setFocusedId,
+    setOpenCardId,
+    setPeekAgentId,
+  });
 
   const toggleLane = useCallback(
     (lane: Lane) => setCollapsed((value) => ({ ...value, [lane]: !value[lane] })),
     [],
   );
+  const toggleSnoozed = useCallback(() => setShowSnoozed((value) => !value), []);
+  const closeHelp = useCallback(() => setHelpOpen(false), []);
 
   const showsKeyHint = isActive && keyboard && layout.platform === "web" && !layout.compact;
-  useEffect(() => {
-    if (!isActive || filtersOpen || !keyboard || layout.platform !== "web") return;
-    const handle = (event: WebKeyEvent) => {
-      if (event.defaultPrevented || event.repeat || event.isComposing || isTextTarget(event.target))
-        return;
-      // The peek can select a child independently. Never answer a background card.
-      if (openCardId) {
-        if (event.key === "Escape") {
-          event.preventDefault();
-          closePeek();
-        }
-        return;
-      }
-      const action = keyToAction(event);
-      if (!action) return;
-      const effect = resolveKeyAction(action, { ordered, focusedId, openCardId });
-      if (!effect) return;
-      event.preventDefault();
-      interactionRevision.current += 1;
-      if (effect.kind === "focus") setFocusedId(effect.agentId);
-      else if (effect.kind === "open") {
-        setFocusedId(effect.agentId);
-        const card = ordered.find((item) => item.agent.id === effect.agentId);
-        if (card) open(card);
-      } else if (effect.kind === "close") setOpenCardId(null);
-      else if (effect.card.request) {
-        actions.onRespond(effect.card.subject.id, effect.card.request.id, effect.response);
-      }
-    };
-    return subscribeKeydown(handle);
-  }, [
+  useBoardKeyboard({
     actions,
     isActive,
     filtersOpen,
-    focusedId,
+    helpOpen,
     keyboard,
-    layout.platform,
-    openCardId,
+    platform: layout.platform,
+    canRespond,
+    canArchive,
     ordered,
-    closePeek,
+    focusedId,
+    openCardId,
+    interactionRevision,
+    setFocusedId,
+    setHelpOpen,
     open,
-  ]);
+    closePeek,
+  });
 
+  // Widths and the needs-you accent track the searched (pre-reason-filter) lanes:
+  // a reason chip that matches nothing must not shrink the lane or drop the signal.
+  const laneStyles = useMemo(
+    () =>
+      Object.fromEntries(
+        LANE_ORDER.map((lane) => [
+          lane,
+          [
+            styles.lane,
+            { flexGrow: laneFlexGrow(searchedLanes[lane].length) },
+            lane === "needsYou" && searchedLanes.needsYou.length > 0 ? styles.needsYouActive : null,
+          ],
+        ]),
+      ) as Record<Lane, StyleProp<ViewStyle>>,
+    [searchedLanes, styles],
+  );
+
+  const searchedWaiting = useMemo(
+    () => [...searchedLanes.needsYou, ...searchedSnoozed],
+    [searchedLanes, searchedSnoozed],
+  );
   const retryLoad = useCallback(() => {
     void store?.retryLoad();
   }, [store]);
-  const filtered =
-    !workspaceId && (snapshot.filters.projectId !== null || snapshot.filters.projectGroup !== null);
-  let emptyText: Record<Lane, string> = {
-    needsYou: "All caught up. Questions, approvals, and errors will appear here.",
-    working: "No agents working right now. Start a conversation to put an agent to work.",
-    done: "No unread results. Completed work stays here until you mark it read.",
-  };
-  if (filtered)
-    emptyText = {
-      needsYou: "No requests in these projects.",
-      working: "No agents working in these projects.",
-      done: "No unread results in these projects.",
-    };
-  if (search.trim())
-    emptyText = {
-      needsYou: "No requests match your search.",
-      working: "No working agents match your search.",
-      done: "No results match your search.",
-    };
+  const retrySnoozed = useCallback(() => store?.retrySnoozed(), [store]);
   if (activity === undefined)
     return <Text style={styles.loading}>Update this Paseo app to use Kanban.</Text>;
+  const laneViewProps: LaneViewProps = {
+    styles,
+    theme,
+    paseo,
+    now,
+    actions,
+    focusedId,
+    grouped,
+    lanes,
+    searchedNeedsYou: searchedWaiting,
+    reasonFilter,
+    onSelectReason: changeReason,
+    snoozed,
+    showSnoozed,
+    onToggleSnoozed: toggleSnoozed,
+    emptyText,
+    laneStyles,
+    collapsed,
+    onToggleLane: toggleLane,
+  };
   let content: React.ReactNode;
   if (!boardReady(snapshot, workspaceId)) {
     content = snapshot.loading ? (
       <Text style={styles.loading}>Loading agents and saved filters…</Text>
     ) : null;
   } else if (layout.compact) {
-    content = (
-      <ScrollView contentContainerStyle={styles.compactContent}>
-        {LANE_ORDER.map((lane) => (
-          <View key={lane}>
-            <LaneHeader
-              lane={lane}
-              count={lanes[lane].length}
-              styles={styles}
-              collapsed={collapsed[lane]}
-              onToggle={toggleLane}
-            />
-            {collapsed[lane] ? null : (
-              <LaneBody
-                cards={lanes[lane]}
-                emptyText={emptyText[lane]}
-                styles={styles}
-                theme={theme}
-                paseo={paseo}
-                now={now}
-                actions={actions}
-                focusedId={focusedId}
-              />
-            )}
-          </View>
-        ))}
-      </ScrollView>
-    );
+    content = <CompactLanes {...laneViewProps} />;
   } else {
-    content = (
-      <View style={styles.lanes}>
-        {LANE_ORDER.map((lane) => (
-          <View key={lane} style={lane === "needsYou" ? styles.needsYou : styles.lane}>
-            <LaneHeader lane={lane} count={lanes[lane].length} styles={styles} collapsed={null} />
-            <ScrollView contentContainerStyle={styles.laneContent}>
-              <LaneBody
-                cards={lanes[lane]}
-                emptyText={emptyText[lane]}
-                styles={styles}
-                theme={theme}
-                paseo={paseo}
-                now={now}
-                actions={actions}
-                focusedId={focusedId}
-              />
-            </ScrollView>
-          </View>
-        ))}
-      </View>
-    );
+    content = <DesktopLanes {...laneViewProps} />;
   }
 
   return (
@@ -582,15 +1106,23 @@ export function InboxBoard({
         setFiltersOpen={setFiltersOpen}
         isActive={isActive}
         lanes={lanes}
+        snoozedCount={snoozed.length}
         filtered={filtered}
         next={next}
         retryLoad={retryLoad}
+        retrySnoozed={retrySnoozed}
         search={search}
         onSearch={changeSearch}
         clearSearch={clearSearch}
       />
+      {!workspaceId ? (
+        <View style={styles.schedules}>
+          <SchedulesStrip paseo={paseo} theme={theme} active={isActive} now={now} />
+        </View>
+      ) : null}
       {content}
       {showsKeyHint ? <Text style={styles.hint}>{KEY_HINT}</Text> : null}
+      <ShortcutHelp open={helpOpen} theme={theme} onClose={closeHelp} />
       {openCard ? (
         <PeekModal
           key={openCard.agent.id}
@@ -604,6 +1136,7 @@ export function InboxBoard({
           onClose={closePeek}
           onNext={next}
           remaining={lanes.needsYou.length}
+          position={openPosition}
         />
       ) : null}
     </View>
