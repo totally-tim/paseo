@@ -9,7 +9,10 @@ import type { AgentManager, ManagedAgent } from "./agent-manager.js";
 import type { AgentStorage } from "./agent-storage.js";
 import { ensureAgentLoaded } from "./agent-loading.js";
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
-import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
+import {
+  getParentAgentIdFromLabels,
+  HANDOFF_TO_AGENT_ID_LABEL,
+} from "@getpaseo/protocol/agent-labels";
 import type { ActiveTurnBehavior } from "@getpaseo/protocol/messages";
 
 export type AgentUnarchiveController = Pick<AgentManager, "notifyAgentState" | "unarchiveSnapshot">;
@@ -437,6 +440,37 @@ interface NotifySafelyOptions {
   permissionRequest?: AgentPermissionRequest;
 }
 
+interface ResolvedNotificationTarget {
+  targetAgentId: string;
+  record: Awaited<ReturnType<AgentStorage["get"]>>;
+}
+
+/**
+ * Follow an agent's handoff successor chain so a finish notification aimed at
+ * a continued agent lands on the session that actually owns the work now.
+ * Stops at the last link when the chain cycles, and keeps the last known id
+ * when a link points at a record that is gone — the existing archived/missing
+ * drop rules then apply to the resolved target.
+ */
+async function resolveNotificationTarget(
+  agentStorage: AgentStorage,
+  agentId: string,
+): Promise<ResolvedNotificationTarget> {
+  let targetAgentId = agentId;
+  const seen = new Set<string>([targetAgentId]);
+  let record = await agentStorage.get(targetAgentId);
+  while (record) {
+    const successor = record.labels?.[HANDOFF_TO_AGENT_ID_LABEL];
+    if (!successor || seen.has(successor)) {
+      break;
+    }
+    seen.add(successor);
+    targetAgentId = successor;
+    record = await agentStorage.get(targetAgentId);
+  }
+  return { targetAgentId, record };
+}
+
 export function setupFinishNotification(params: SetupFinishNotificationParams): void {
   const {
     agentManager,
@@ -462,7 +496,10 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
     reason: FinishNotificationReason,
     permissionRequest?: AgentPermissionRequest,
   ): Promise<void> {
-    const callerRecord = await agentStorage.get(callerAgentId);
+    const { targetAgentId, record: callerRecord } = await resolveNotificationTarget(
+      agentStorage,
+      callerAgentId,
+    );
     if (callerRecord?.archivedAt) {
       return;
     }
@@ -484,7 +521,7 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
     await sendPromptToAgent({
       agentManager,
       agentStorage,
-      agentId: callerAgentId,
+      agentId: targetAgentId,
       prompt: formatSystemNotificationPrompt(body),
       activeTurnBehavior: "steer",
       unarchive: false,

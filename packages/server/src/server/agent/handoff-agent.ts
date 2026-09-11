@@ -123,6 +123,11 @@ async function resolveHandoffConfig(
     ...(execution?.preserveConfiguration ? preservedOptions(source) : {}),
     systemPrompt: source.config?.systemPrompt ?? undefined,
     mcpServers: source.config?.mcpServers ?? undefined,
+    // A coordinator's successor is still the coordinator — the delegate-only
+    // restriction and required Paseo tools ride along regardless of which
+    // settings the handoff tweaks.
+    paseoTools: source.config?.paseoTools ?? undefined,
+    delegateOnly: source.config?.delegateOnly ?? undefined,
   };
 }
 

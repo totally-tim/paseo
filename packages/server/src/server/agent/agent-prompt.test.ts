@@ -52,6 +52,13 @@ interface FinishNotificationScenarioOptions {
   requireParentOwnership?: boolean;
   parentPromptError?: Error;
   logger?: Logger;
+  /** Stored records keyed by agent id, consulted before the built-in child record. */
+  records?: Record<
+    string,
+    { labels?: Record<string, string>; archivedAt?: string; title?: string } | null
+  >;
+  /** Live managed agents beyond the built-in child/caller pair (e.g. handoff successors). */
+  extraAgents?: Record<string, ManagedAgent>;
 }
 
 interface FinishNotificationScenario {
@@ -64,6 +71,7 @@ interface FinishNotificationScenario {
   finishChildAndReadParentPrompt(): Promise<string>;
   closeChildAndReadParentPrompt(): Promise<string>;
   parentPrompts(): string[];
+  promptedAgentIds(): string[];
   steerAttemptCount(): number;
   wasParentPrompted(): boolean;
 }
@@ -76,6 +84,7 @@ function createFinishNotificationScenario(
   let parentPrompted = false;
   let steerAttemptCount = 0;
   const parentPrompts: string[] = [];
+  const promptedAgentIds: string[] = [];
 
   const childAgent: ManagedAgent = Object.create(null);
   Reflect.set(childAgent, "id", "child-agent");
@@ -98,7 +107,7 @@ function createFinishNotificationScenario(
     if (agentId === "caller-agent") {
       return callerAgent;
     }
-    return null;
+    return options?.extraAgents?.[agentId] ?? null;
   });
   Reflect.set(agentManager, "subscribe", (callback: (event: AgentManagerEvent) => void) => {
     subscriber = callback;
@@ -115,9 +124,10 @@ function createFinishNotificationScenario(
     steerAttemptCount += 1;
     return { status: "inactive" };
   });
-  Reflect.set(agentManager, "streamAgent", (_agentId: string, prompt: string) => {
+  Reflect.set(agentManager, "streamAgent", (agentId: string, prompt: string) => {
     parentPrompted = true;
     parentPrompts.push(prompt);
+    promptedAgentIds.push(agentId);
     resolveParentPrompt?.(prompt);
     return (async function* noop() {})();
   });
@@ -135,6 +145,9 @@ function createFinishNotificationScenario(
         title: "Child Agent",
         labels: parentAgentId ? { "paseo.parent-agent-id": parentAgentId } : {},
       };
+    }
+    if (options?.records && agentId in options.records) {
+      return options.records[agentId];
     }
     return null;
   });
@@ -251,6 +264,9 @@ function createFinishNotificationScenario(
     },
     parentPrompts() {
       return parentPrompts;
+    },
+    promptedAgentIds() {
+      return promptedAgentIds;
     },
     steerAttemptCount() {
       return steerAttemptCount;
@@ -534,6 +550,128 @@ it("does not notify archived callers", async () => {
 
   expect(streamAgentSpy).not.toHaveBeenCalled();
   expect(replaceAgentRunSpy).not.toHaveBeenCalled();
+});
+
+function createSuccessorAgent(id: string): ManagedAgent {
+  const agent: ManagedAgent = Object.create(null);
+  Reflect.set(agent, "id", id);
+  Reflect.set(agent, "lifecycle", "idle");
+  Reflect.set(agent, "config", { title: `Successor ${id}` });
+  Reflect.set(agent, "labels", {});
+  Reflect.set(agent, "pendingPermissions", new Map());
+  return agent;
+}
+
+test("finish notifications route to the caller's handoff successor", async () => {
+  const scenario = createFinishNotificationScenario({
+    records: {
+      "caller-agent": {
+        labels: { "paseo.handoff-to-agent-id": "caller-successor" },
+      },
+      "caller-successor": { labels: {} },
+    },
+    extraAgents: { "caller-successor": createSuccessorAgent("caller-successor") },
+  });
+
+  scenario.startWatchingChild();
+  const parentPrompt = await scenario.finishChildAndReadParentPrompt();
+
+  // The notification lands on the live successor while the body still names the
+  // child that finished.
+  expect(scenario.promptedAgentIds()).toEqual(["caller-successor"]);
+  expect(parentPrompt).toContain("Agent child-agent (Child Agent) finished.");
+});
+
+test("finish notifications follow a successor chain across multiple handoffs", async () => {
+  const scenario = createFinishNotificationScenario({
+    records: {
+      "caller-agent": {
+        labels: { "paseo.handoff-to-agent-id": "caller-mid" },
+      },
+      "caller-mid": {
+        labels: { "paseo.handoff-to-agent-id": "caller-final" },
+      },
+      "caller-final": { labels: {} },
+    },
+    extraAgents: {
+      "caller-mid": createSuccessorAgent("caller-mid"),
+      "caller-final": createSuccessorAgent("caller-final"),
+    },
+  });
+
+  scenario.startWatchingChild();
+  await scenario.finishChildAndReadParentPrompt();
+
+  expect(scenario.promptedAgentIds()).toEqual(["caller-final"]);
+});
+
+test("a successor chain loop terminates at the last unseen link", async () => {
+  const scenario = createFinishNotificationScenario({
+    records: {
+      "caller-agent": {
+        labels: { "paseo.handoff-to-agent-id": "caller-mid" },
+      },
+      // Malformed cycle back to the original caller: resolution must stop
+      // instead of looping forever.
+      "caller-mid": {
+        labels: { "paseo.handoff-to-agent-id": "caller-agent" },
+      },
+    },
+    extraAgents: { "caller-mid": createSuccessorAgent("caller-mid") },
+  });
+
+  scenario.startWatchingChild();
+  const parentPrompt = await scenario.finishChildAndReadParentPrompt();
+
+  expect(scenario.promptedAgentIds()).toEqual(["caller-mid"]);
+  expect(parentPrompt).toContain("Agent child-agent (Child Agent) finished.");
+});
+
+test("finish notifications drop quietly when the resolved successor is archived", async () => {
+  const scenario = createFinishNotificationScenario({
+    records: {
+      "caller-agent": {
+        labels: { "paseo.handoff-to-agent-id": "caller-successor" },
+      },
+      "caller-successor": { labels: {}, archivedAt: "2026-01-01T00:00:00.000Z" },
+    },
+    extraAgents: { "caller-successor": createSuccessorAgent("caller-successor") },
+  });
+
+  scenario.startWatchingChild();
+  scenario.finishChild();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(scenario.wasParentPrompted()).toBe(false);
+});
+
+test("finish notifications resolve a missing successor to the last known target", async () => {
+  const captured = createCapturedLogger();
+  const scenario = createFinishNotificationScenario({
+    records: {
+      "caller-agent": {
+        labels: { "paseo.handoff-to-agent-id": "caller-gone" },
+      },
+      // "caller-gone" has no stored record: resolution keeps the missing id,
+      // so the usual not-found drop path applies to it.
+    },
+    logger: captured.logger,
+  });
+
+  scenario.startWatchingChild();
+  scenario.finishChild();
+  await captured.nextRecord;
+
+  expect(scenario.wasParentPrompted()).toBe(false);
+  expect(captured.records).toEqual([
+    expect.objectContaining({
+      msg: "Failed to notify caller agent",
+      childAgentId: "child-agent",
+      callerAgentId: "caller-agent",
+      reason: "finished",
+      err: expect.objectContaining({ message: "Agent not found: caller-gone" }),
+    }),
+  ]);
 });
 
 // Deliberately independent literals rather than the production constants these tests

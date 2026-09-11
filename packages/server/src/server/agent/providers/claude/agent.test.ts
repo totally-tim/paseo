@@ -778,6 +778,39 @@ describe("ClaudeAgentSession features", () => {
     await session.close();
   });
 
+  test("delegateOnly merges the native edit/shell denies into disallowedTools", async () => {
+    const { queryFactory } = createQueryMock();
+    const client = new ClaudeAgentClient({
+      logger,
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    const session = await client.createSession({
+      provider: "claude",
+      cwd: process.cwd(),
+      delegateOnly: true,
+      providerOptions: {
+        allowedTools: ["Read"],
+        // An authored deny that overlaps the delegate-only set must not duplicate.
+        disallowedTools: ["WebSearch", "Bash"],
+      },
+    });
+
+    await (
+      session as unknown as {
+        ensureQuery(): Promise<unknown>;
+      }
+    ).ensureQuery();
+
+    const disallowed = queryFactory.mock.calls[0]?.[0].options.disallowedTools as string[];
+    for (const tool of ["Bash", "Edit", "Write", "NotebookEdit", "WebSearch"]) {
+      expect(disallowed).toContain(tool);
+    }
+    expect(disallowed.filter((tool) => tool === "Bash")).toHaveLength(1);
+    expect(queryFactory.mock.calls[0]?.[0].options.allowedTools).toEqual(["Read"]);
+    await session.close();
+  });
+
   test("lists fast mode only for supported Opus models", async () => {
     const client = new ClaudeAgentClient({ logger, resolveBinary: async () => "/test/claude/bin" });
 

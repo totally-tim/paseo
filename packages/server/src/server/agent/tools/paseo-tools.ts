@@ -653,12 +653,23 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
 
   const resolveInheritedProviderConfig = (
     selectedProvider: string,
-  ): Pick<AgentSessionConfig, "providerOptions"> | undefined => {
+  ): Pick<AgentSessionConfig, "providerOptions" | "paseoTools"> | undefined => {
     const callerAgent = resolveCallerAgent();
-    if (callerAgent?.provider !== selectedProvider || !callerAgent.config?.providerOptions) {
+    if (!callerAgent) {
       return undefined;
     }
-    return { providerOptions: callerAgent.config.providerOptions };
+    const inherited: Pick<AgentSessionConfig, "providerOptions" | "paseoTools"> = {};
+    if (callerAgent.provider === selectedProvider && callerAgent.config?.providerOptions) {
+      inherited.providerOptions = callerAgent.config.providerOptions;
+    }
+    // `paseoTools: "required"` is daemon-controlled and propagates to every
+    // spawned subagent regardless of provider, so a coordinator's children keep
+    // the Paseo tools even when daemon-wide injection is off. `delegateOnly`
+    // deliberately does not propagate — delegates do the implementation work.
+    if (callerAgent.config?.paseoTools === "required") {
+      inherited.paseoTools = "required";
+    }
+    return Object.keys(inherited).length > 0 ? inherited : undefined;
   };
 
   const resolveScopedCwd = (requestedCwd?: string, opts?: { required?: boolean }): string => {

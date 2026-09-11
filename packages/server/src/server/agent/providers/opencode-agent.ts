@@ -3510,6 +3510,7 @@ class OpenCodeAgentSession implements AgentSession {
     const permission = buildOpenCodePermissionRules(
       this.config.providerOptions,
       this.config.toolPolicy,
+      this.config.delegateOnly,
     );
     const model = this.parseModel(this.config.model);
     const effectiveMode = resolveOpenCodeRuntimeAgentId(this.currentMode);
@@ -3850,6 +3851,7 @@ class OpenCodeAgentSession implements AgentSession {
           const permission = buildOpenCodePermissionRules(
             this.config.providerOptions,
             this.config.toolPolicy,
+            this.config.delegateOnly,
           );
           const promptResponse = await this.client.session.promptAsync({
             sessionID: this.sessionId,
