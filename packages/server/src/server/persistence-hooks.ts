@@ -79,6 +79,8 @@ export function buildConfigOverrides(record: StoredAgentRecord): Partial<AgentSe
     toolPolicy: config.toolPolicy ?? undefined,
     systemPrompt: config.systemPrompt ?? undefined,
     mcpServers: config.mcpServers ?? undefined,
+    paseoTools: config.paseoTools ?? undefined,
+    delegateOnly: config.delegateOnly ?? undefined,
   });
 }
 
@@ -105,6 +107,8 @@ export function buildSessionConfig(
     toolPolicy: overrides.toolPolicy,
     systemPrompt: overrides.systemPrompt,
     mcpServers: overrides.mcpServers,
+    paseoTools: overrides.paseoTools,
+    delegateOnly: overrides.delegateOnly,
   });
 }
 

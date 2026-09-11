@@ -21,6 +21,23 @@ export class ProviderOptionsValidationError extends Error {
   }
 }
 
+/**
+ * Providers whose native session controls can enforce delegate-only operation
+ * (no file edits, no shell execution). See docs/specs/coordinator.md.
+ */
+export const DELEGATE_ONLY_CAPABLE_PROVIDERS = new Set(["claude", "codex", "opencode"]);
+
+export class DelegateOnlyUnsupportedError extends Error {
+  readonly code = "delegate_only_unsupported" as const;
+
+  constructor(readonly provider: string) {
+    super(
+      `Provider '${provider}' cannot run delegate-only: it has no native edit/shell restriction. Delegate-only agents require Claude, Codex, or OpenCode.`,
+    );
+    this.name = "DelegateOnlyUnsupportedError";
+  }
+}
+
 export class ToolPolicyUnsupportedError extends Error {
   readonly code = "tool_policy_unsupported" as const;
 

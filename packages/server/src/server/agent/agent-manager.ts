@@ -87,6 +87,10 @@ import { invokeRewindCapability, type RewindMode } from "./rewind/rewind.js";
 import { isSystemInjectedEnvelope } from "./agent-prompt.js";
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
 import { stripInternalPaseoMcpServer, withRuntimePaseoMcpServer } from "./runtime-mcp-config.js";
+import {
+  DELEGATE_ONLY_CAPABLE_PROVIDERS,
+  DelegateOnlyUnsupportedError,
+} from "./provider-options.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
 import type { PaseoToolCatalogFactory } from "./tools/types.js";
 import { isPaseoToolPolicyEnabled } from "./paseo-tool-policy.js";
@@ -194,6 +198,8 @@ function buildStoredAgentConfig(record: StoredAgentRecord): AgentSessionConfig {
     config.systemPrompt = record.config.systemPrompt;
   }
   if (record.config.mcpServers != null) config.mcpServers = record.config.mcpServers;
+  if (record.config.paseoTools != null) config.paseoTools = record.config.paseoTools;
+  if (record.config.delegateOnly != null) config.delegateOnly = record.config.delegateOnly;
   return stripInternalPaseoMcpServer(config);
 }
 
@@ -1456,6 +1462,10 @@ export class AgentManager {
       config: {
         ...request.config,
         internal: config.internal,
+        // The wire schema strips daemon-internal launch flags; re-apply them
+        // so a plugin cannot drop (or grant) a coordinator's restrictions.
+        paseoTools: config.paseoTools,
+        delegateOnly: config.delegateOnly,
         ...(config.accountId !== undefined ? { accountId: config.accountId } : {}),
         ...(config.accountSelectionReason !== undefined
           ? { accountSelectionReason: config.accountSelectionReason }
@@ -5623,6 +5633,15 @@ export class AgentManager {
 
   private applyProviderConfiguration(config: AgentSessionConfig): AgentSessionConfig {
     const definition = this.providerDefinitions.get(config.provider);
+    if (config.delegateOnly) {
+      // Delegate-only restrictions are enforced by the provider itself, so
+      // eligibility follows the provider that will actually run the session —
+      // the base provider for custom providers extending a built-in.
+      const effectiveProvider = definition?.derivedFromProviderId ?? config.provider;
+      if (!DELEGATE_ONLY_CAPABLE_PROVIDERS.has(effectiveProvider)) {
+        throw new DelegateOnlyUnsupportedError(config.provider);
+      }
+    }
     if (config.providerOptions !== undefined && !definition?.validateOptions) {
       throw new Error(`Provider '${config.provider}' does not accept providerOptions`);
     }
@@ -5677,7 +5696,11 @@ export class AgentManager {
     env?: Record<string, string>,
   ): Promise<PreparedSessionConfig> {
     const storedConfig = await this.normalizeConfig(stripInternalPaseoMcpServer(config), { env });
-    const paseoToolPolicy = this.paseoToolsEnabled
+    // `paseoTools: "required"` overrides the daemon-wide injection toggle for
+    // this agent (coordinators must always have the Paseo tools).
+    const paseoToolsRequired = storedConfig.paseoTools === "required";
+    const injectPaseoTools = this.paseoToolsEnabled || paseoToolsRequired;
+    const paseoToolPolicy = injectPaseoTools
       ? this.resolvePaseoToolPolicy(storedConfig.provider)
       : { enabled: false };
     const launchConfig = this.applyDaemonAppendSystemPrompt(
@@ -5685,9 +5708,7 @@ export class AgentManager {
         config: storedConfig,
         agentId,
         mcpBaseUrl:
-          this.paseoToolsEnabled && isPaseoToolPolicyEnabled(paseoToolPolicy)
-            ? this.mcpBaseUrl
-            : null,
+          injectPaseoTools && isPaseoToolPolicyEnabled(paseoToolPolicy) ? this.mcpBaseUrl : null,
         mcpAuthToken: this.mcpAuthToken,
       }),
     );
@@ -5740,8 +5761,12 @@ export class AgentManager {
         PASEO_AGENT_CWD: cwd,
       },
     };
+    // `paseoToolPolicy` is `{ enabled: false }` unless prepareSessionConfig
+    // decided this agent gets Paseo tools (daemon-wide injection or the
+    // per-agent `paseoTools: "required"` override), so it already encodes the
+    // daemon toggle — checking `this.paseoToolsEnabled` here would block
+    // required agents when the daemon-wide default is off.
     if (
-      this.paseoToolsEnabled &&
       isPaseoToolPolicyEnabled(paseoToolPolicy) &&
       client.capabilities.supportsNativePaseoTools &&
       this.paseoToolCatalogFactory

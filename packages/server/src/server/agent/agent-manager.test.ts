@@ -18,6 +18,8 @@ import { InMemoryAgentTimelineStore } from "./agent-timeline-store.js";
 import { toAgentPayload } from "./agent-projections.js";
 import { projectTimelineRows } from "./timeline-projection.js";
 import { getOpenAgentTabLabel, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+import { DelegateOnlyUnsupportedError } from "./provider-options.js";
+import { buildConfigOverrides } from "../persistence-hooks.js";
 import { formatSystemNotificationPrompt, startAgentRun } from "./agent-prompt.js";
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent-loading.js";
@@ -11854,4 +11856,291 @@ test("onWorkspaceStateMayHaveChanged is not called for running shell tool calls"
   await manager.runAgent(snapshot.id, { text: "merge it" });
 
   expect(onWorkspaceStateMayHaveChanged).not.toHaveBeenCalled();
+});
+
+test("paseoTools 'required' injects the internal paseo MCP server when daemon-wide injection is off", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+
+  class CaptureClient extends TestAgentClient {
+    override readonly capabilities = {
+      ...TEST_CAPABILITIES,
+      supportsMcpServers: true,
+    };
+    lastConfig: AgentSessionConfig | null = null;
+
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      this.lastConfig = config;
+      return new McpCapableTestAgentSession(config);
+    }
+  }
+
+  const client = new CaptureClient();
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    logger,
+    mcpBaseUrl: "http://127.0.0.1:6767/mcp/agents",
+    paseoToolsEnabled: false,
+    idFactory: () => "00000000-0000-4000-8000-000000000201",
+  });
+
+  try {
+    const snapshot = await manager.createAgent(
+      { provider: "codex", cwd: workdir, paseoTools: "required" },
+      undefined,
+      { workspaceId: undefined },
+    );
+
+    // The runtime launch config carries the injected endpoint even though the
+    // daemon-wide default is off; the stored config stays clean.
+    expect(client.lastConfig?.mcpServers?.paseo).toEqual({
+      type: "http",
+      url: `http://127.0.0.1:6767/mcp/agents?callerAgentId=${snapshot.id}`,
+    });
+    expect(snapshot.config.paseoTools).toBe("required");
+    expect(snapshot.config.mcpServers?.paseo).toBeUndefined();
+
+    const stored = await storage.get(snapshot.id);
+    expect(stored?.config?.paseoTools).toBe("required");
+    expect(stored?.config?.mcpServers?.paseo).toBeUndefined();
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("paseoTools 'required' supplies the native Paseo catalog when daemon-wide injection is off", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+
+  const paseoTools: PaseoToolCatalog = {
+    tools: new Map(),
+    getTool: () => undefined,
+    executeTool: async () => {
+      throw new Error("No tools registered in test catalog");
+    },
+  };
+
+  class NativeToolsClient extends TestAgentClient {
+    override readonly capabilities = {
+      ...TEST_CAPABILITIES,
+      supportsMcpServers: true,
+      supportsNativePaseoTools: true,
+    };
+    lastConfig: AgentSessionConfig | null = null;
+    lastLaunchContext: AgentLaunchContext | undefined;
+
+    override async createSession(
+      config: AgentSessionConfig,
+      launchContext?: AgentLaunchContext,
+    ): Promise<AgentSession> {
+      this.lastConfig = config;
+      this.lastLaunchContext = launchContext;
+      return new McpCapableTestAgentSession(config);
+    }
+  }
+
+  const client = new NativeToolsClient();
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    logger,
+    mcpBaseUrl: "http://127.0.0.1:6767/mcp/agents",
+    paseoToolsEnabled: false,
+    paseoToolCatalogFactory: () => paseoTools,
+    idFactory: () => "00000000-0000-4000-8000-000000000202",
+  });
+
+  try {
+    const snapshot = await manager.createAgent(
+      { provider: "codex", cwd: workdir, paseoTools: "required" },
+      undefined,
+      { workspaceId: undefined },
+    );
+
+    // Native tools replace the internal MCP server entirely.
+    expect(client.lastLaunchContext?.paseoTools).toBe(paseoTools);
+    expect(client.lastConfig?.mcpServers?.paseo).toBeUndefined();
+
+    const stored = await storage.get(snapshot.id);
+    expect(stored?.config?.mcpServers?.paseo).toBeUndefined();
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("createAgent rejects delegateOnly on providers without a native restriction", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const client = new TestAgentClient("copilot");
+  const manager = new AgentManager({
+    clients: { copilot: client },
+    providerDefinitions: { copilot: { enabled: true, derivedFromProviderId: null } },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000203",
+  });
+
+  try {
+    const rejection = await manager
+      .createAgent({ provider: "copilot", cwd: workdir, delegateOnly: true }, undefined, {
+        workspaceId: undefined,
+      })
+      .then(
+        () => {
+          throw new Error("expected delegateOnly launch to be rejected");
+        },
+        (error: unknown) => error,
+      );
+
+    expect(rejection).toBeInstanceOf(DelegateOnlyUnsupportedError);
+    expect((rejection as DelegateOnlyUnsupportedError).code).toBe("delegate_only_unsupported");
+    expect((rejection as DelegateOnlyUnsupportedError).provider).toBe("copilot");
+    expect(client.createdConfigs).toHaveLength(0);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("createAgent accepts delegateOnly on a custom provider derived from a capable base", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const client = new TestAgentClient("zai-claude");
+  const manager = new AgentManager({
+    clients: { "zai-claude": client },
+    providerDefinitions: {
+      "zai-claude": { enabled: true, derivedFromProviderId: "claude" },
+    },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000204",
+  });
+
+  try {
+    const snapshot = await manager.createAgent(
+      { provider: "zai-claude", cwd: workdir, delegateOnly: true },
+      undefined,
+      { workspaceId: undefined },
+    );
+
+    expect(snapshot.config.delegateOnly).toBe(true);
+    expect(client.createdConfigs.at(-1)?.delegateOnly).toBe(true);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("createAgent rejects delegateOnly on a custom provider derived from an incapable base", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const client = new TestAgentClient("my-pi");
+  const manager = new AgentManager({
+    clients: { "my-pi": client },
+    providerDefinitions: {
+      "my-pi": { enabled: true, derivedFromProviderId: "pi" },
+    },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000205",
+  });
+
+  try {
+    await expect(
+      manager.createAgent({ provider: "my-pi", cwd: workdir, delegateOnly: true }, undefined, {
+        workspaceId: undefined,
+      }),
+    ).rejects.toBeInstanceOf(DelegateOnlyUnsupportedError);
+    expect(client.createdConfigs).toHaveLength(0);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("coordinator launch flags persist in storage and still apply after a restart resume", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+
+  class CaptureClient extends TestAgentClient {
+    override readonly capabilities = {
+      ...TEST_CAPABILITIES,
+      supportsMcpServers: true,
+    };
+    lastConfig: AgentSessionConfig | null = null;
+    lastResumeConfig: Partial<AgentSessionConfig> | undefined;
+    lastResumeContext: AgentLaunchContext | undefined;
+
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      this.lastConfig = config;
+      return new McpCapableTestAgentSession(config);
+    }
+
+    override async resumeSession(
+      handle: AgentPersistenceHandle,
+      config?: Partial<AgentSessionConfig>,
+      launchContext?: AgentLaunchContext,
+    ): Promise<AgentSession> {
+      this.lastResumeConfig = config;
+      this.lastResumeContext = launchContext;
+      return new McpCapableTestAgentSession({
+        provider: this.provider,
+        cwd: config?.cwd ?? workdir,
+      });
+    }
+  }
+
+  const firstClient = new CaptureClient();
+  const firstManager = new AgentManager({
+    clients: { codex: firstClient },
+    registry: storage,
+    logger,
+    mcpBaseUrl: "http://127.0.0.1:6767/mcp/agents",
+    paseoToolsEnabled: false,
+    idFactory: () => "00000000-0000-4000-8000-000000000206",
+  });
+
+  try {
+    const created = await firstManager.createAgent(
+      { provider: "codex", cwd: workdir, paseoTools: "required", delegateOnly: true },
+      undefined,
+      { workspaceId: undefined },
+    );
+
+    const stored = await storage.get(created.id);
+    expect(stored?.config?.paseoTools).toBe("required");
+    expect(stored?.config?.delegateOnly).toBe(true);
+    expect(stored?.config?.mcpServers?.paseo).toBeUndefined();
+
+    // Simulate a daemon restart: a fresh manager with injection disabled
+    // resumes the same stored record.
+    const secondClient = new CaptureClient();
+    const secondManager = new AgentManager({
+      clients: { codex: secondClient },
+      registry: storage,
+      logger,
+      mcpBaseUrl: "http://127.0.0.1:6767/mcp/agents",
+      paseoToolsEnabled: false,
+    });
+    const handle: AgentPersistenceHandle = {
+      provider: "codex",
+      sessionId: stored?.persistence?.sessionId ?? "session-1",
+    };
+
+    const resumed = await secondManager.resumeAgentFromPersistence(
+      handle,
+      buildConfigOverrides(stored!),
+      created.id,
+    );
+
+    expect(secondClient.lastResumeConfig?.paseoTools).toBe("required");
+    expect(secondClient.lastResumeConfig?.delegateOnly).toBe(true);
+    expect(secondClient.lastResumeConfig?.mcpServers?.paseo).toEqual({
+      type: "http",
+      url: `http://127.0.0.1:6767/mcp/agents?callerAgentId=${created.id}`,
+    });
+    expect(resumed.config.paseoTools).toBe("required");
+    expect(resumed.config.delegateOnly).toBe(true);
+    expect(resumed.config.mcpServers?.paseo).toBeUndefined();
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
 });

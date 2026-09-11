@@ -368,6 +368,10 @@ const CLAUDE_ROOT_ONLY_COMMANDS = new Set([
   "schedule",
   "usage",
 ]);
+// Provider-native delegate-only restriction (docs/specs/coordinator.md):
+// coordinators orchestrate through the Paseo MCP tools and must never edit
+// files or run shell commands themselves.
+const CLAUDE_DELEGATE_ONLY_DISALLOWED_TOOLS = ["Bash", "Edit", "Write", "NotebookEdit"];
 const INTERRUPT_TOOL_USE_PLACEHOLDER = "[Request interrupted by user for tool use]";
 const INTERRUPT_PLACEHOLDER_PATTERN = /^\[Request interrupted by user(?:[^\]]*)\]$/;
 const NO_RESPONSE_REQUESTED_PLACEHOLDER = "No response requested.";
@@ -3333,6 +3337,14 @@ class ClaudeAgentSession implements AgentSession {
       base.disallowedTools = [
         ...(base.disallowedTools ?? []),
         ...this.runtimeSettings.disallowedTools,
+      ];
+    }
+    if (this.config.delegateOnly) {
+      // Delegate-only sessions (coordinators) delegate through the Paseo MCP
+      // tools, so the provider must not be able to edit files or run shell
+      // commands itself. `disallowedTools` is the native restriction.
+      base.disallowedTools = [
+        ...new Set([...(base.disallowedTools ?? []), ...CLAUDE_DELEGATE_ONLY_DISALLOWED_TOOLS]),
       ];
     }
     return base;

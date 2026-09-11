@@ -3418,7 +3418,14 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
     this.hasWorkflowModeOverride = config.modeId !== undefined;
     this.currentMode = config.modeId ?? DEFAULT_CODEX_MODE_ID;
-    this.providerOptions = CodexProviderOptionsSchema.parse(config.providerOptions ?? {});
+    const parsedProviderOptions = CodexProviderOptionsSchema.parse(config.providerOptions ?? {});
+    // Delegate-only sessions (coordinators) delegate through the Paseo MCP
+    // tools; the session itself must not edit files or run approved commands.
+    // Read-only sandbox plus a "never" approval policy is Codex's native
+    // restriction, and it overrides both authored options and mode presets.
+    this.providerOptions = config.delegateOnly
+      ? { ...parsedProviderOptions, approval_policy: "never", sandbox_mode: "read-only" }
+      : parsedProviderOptions;
     this.config = config;
     this.asyncQuestions = new CodexAsyncQuestions(resumeHandle?.metadata?.asyncQuestions);
     this.config.thinkingOptionId = normalizeCodexThinkingOptionId(this.config.thinkingOptionId);
@@ -4749,6 +4756,8 @@ export class CodexAppServerAgentSession implements AgentSession {
         toolPolicy: this.config.toolPolicy,
         systemPrompt: this.config.systemPrompt,
         mcpServers: this.config.mcpServers,
+        paseoTools: this.config.paseoTools,
+        delegateOnly: this.config.delegateOnly,
         asyncQuestions: this.asyncQuestions.serialize(),
       },
     };
