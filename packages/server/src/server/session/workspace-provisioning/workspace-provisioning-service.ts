@@ -243,9 +243,11 @@ export function createWorkspaceProvisioningService(deps: {
     const normalizedCwd = resolve(cwd);
     if (projectId) await requireActiveProject(projectId);
     const checkout = await workspaceGitService.getCheckout(normalizedCwd);
-    if (isPaseoWorktreeCheckout(checkout)) {
-      const owner = await findWorkspaceForDirectory(normalizedCwd);
-      if (owner) return { workspace: owner, created: false };
+    const owner = await findPaseoWorktreeOwner(normalizedCwd, checkout);
+    // A request that names a different project is honored as a fresh record
+    // rather than silently rehomed onto the owner.
+    if (owner && (!projectId || owner.projectId === projectId)) {
+      return { workspace: owner, created: false };
     }
     return {
       workspace: await mintWorkspaceForDirectory(
@@ -257,6 +259,18 @@ export function createWorkspaceProvisioningService(deps: {
       ),
       created: true,
     };
+  }
+
+  // The workspace that already runs at this exact cwd, only inside a
+  // Paseo-owned worktree. Ordinary directories never reuse: scheduled runs and
+  // Hub creates mint throwaway records at arbitrary cwds and archive them, with
+  // every agent inside, when the run ends, so a bare create must not join one.
+  async function findPaseoWorktreeOwner(
+    normalizedCwd: string,
+    checkout: WorkspaceCheckout,
+  ): Promise<PersistedWorkspaceRecord | null> {
+    if (!isPaseoWorktreeCheckout(checkout)) return null;
+    return findWorkspaceForDirectory(normalizedCwd);
   }
 
   async function mintWorkspaceForDirectory(
@@ -348,6 +362,18 @@ export function createWorkspaceProvisioningService(deps: {
   }
 
   async function allocateProjectForRepoRoot(repoRoot: string): Promise<PersistedProjectRecord> {
+    // Git reports the main checkout as a realpath while the selected project
+    // root keeps the user's spelling; exact-root allocation is string-only, so
+    // look for a filesystem-equivalent active project before minting one.
+    const matchesRepoRoot = createRealpathAwarePathMatcher(repoRoot);
+    const equivalent = (await projectRegistry.list())
+      .filter((project) => !project.archivedAt && matchesRepoRoot(project.rootPath))
+      .sort(
+        (left, right) =>
+          Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
+          left.projectId.localeCompare(right.projectId),
+      )[0];
+    if (equivalent) return refreshProjectKind(equivalent);
     const checkout = await workspaceGitService.getCheckout(repoRoot);
     const project = await projectRegistry.getOrCreateActiveByRoot({
       rootPath: repoRoot,
@@ -444,18 +470,18 @@ export function createWorkspaceProvisioningService(deps: {
     if (input.requestedWorkspaceId) {
       return { workspaceId: input.requestedWorkspaceId, createdWorkspace: false };
     }
-    // An unaddressed agent create is a placement question, not a create verb:
-    // a bare cwd that already has a workspace lands in it.
+    // An unaddressed agent create inside a Paseo-owned worktree is a placement
+    // question, not a create verb: it lands in the worktree's own workspace.
     const normalizedCwd = resolve(input.cwd);
-    const existing = await findWorkspaceForDirectory(normalizedCwd);
-    if (existing) return { workspaceId: existing.workspaceId, createdWorkspace: false };
-    const created = await createWorkspaceForDirectory(
+    const checkout = await workspaceGitService.getCheckout(normalizedCwd);
+    const owner = await findPaseoWorktreeOwner(normalizedCwd, checkout);
+    if (owner) return { workspaceId: owner.workspaceId, createdWorkspace: false };
+    const created = await mintWorkspaceForDirectory(
       normalizedCwd,
+      checkout,
       input.initialTitle,
       undefined,
-      {
-        expectsInitialAgent: true,
-      },
+      { expectsInitialAgent: true },
     );
     return { workspaceId: created.workspaceId, createdWorkspace: true };
   }

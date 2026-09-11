@@ -6365,7 +6365,7 @@ export class Session {
 
     const explicitTitle = request.title?.trim() || null;
     const promptTitle = resolveFirstAgentPromptTitle(request.firstAgentContext);
-    const { workspace } = await this.workspaceProvisioning.openWorkspaceForDirectory(
+    const { workspace, created } = await this.workspaceProvisioning.openWorkspaceForDirectory(
       cwd,
       explicitTitle ?? promptTitle,
       request.source.projectId,
@@ -6394,7 +6394,8 @@ export class Session {
           "Background snapshot refresh failed after workspace.create",
         );
       });
-    if (request.firstAgentContext) {
+    // A reused worktree workspace keeps its own name.
+    if (request.firstAgentContext && created) {
       const firstAgentContext = request.firstAgentContext;
       this.workspaceAutoName.scheduleForDirectory(
         {

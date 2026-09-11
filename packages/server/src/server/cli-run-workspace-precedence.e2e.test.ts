@@ -9,9 +9,11 @@ import { getFullAccessConfig } from "./daemon-e2e/agent-configs.js";
 import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 
 // The daemon-level workspace contract that `paseo run` depends on: each
-// local-backed createWorkspace for a cwd mints a fresh, distinct workspace,
-// createAgent stamps the agent with the workspaceId it is given, and attaching
-// to an existing workspace by id creates no new record. The CLI's own flag
+// local-backed createWorkspace for an ordinary cwd mints a fresh, distinct
+// workspace (a Paseo-owned worktree cwd instead reopens its own workspace, see
+// workspace-paseo-worktree-placement.e2e.test.ts), createAgent stamps the agent
+// with the workspaceId it is given, and attaching to an existing workspace by
+// id creates no new record. The CLI's own flag
 // precedence (--workspace > $PASEO_WORKSPACE_ID > --worktree > bare) is covered
 // in packages/cli/src/commands/agent/run.test.ts; this test only proves the
 // daemon behaviors the CLI builds on.
