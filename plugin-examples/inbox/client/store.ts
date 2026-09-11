@@ -1,7 +1,7 @@
 import type { PluginClientStorage } from "@getpaseo/plugin/client";
 
 import { ALL_PROJECTS, type InboxFilters, parseFilters } from "./filters";
-import { type Lanes, projectLanes } from "./lanes";
+import { canSnooze, type InboxCard, type Lanes, projectLanes, snoozeStamp } from "./lanes";
 import type { Agent, PaseoApi, PermissionResponse, Workspace } from "./types";
 
 export interface Operation {
@@ -13,6 +13,31 @@ export const responseKey = (agentId: string, requestId: string) =>
   JSON.stringify(["answer", agentId, requestId]);
 export const replyKey = (agentId: string) => JSON.stringify(["reply", agentId]);
 export const readKey = (agentId: string) => JSON.stringify(["read", agentId]);
+export const archiveKey = (agentId: string) => JSON.stringify(["archive", agentId]);
+export const READ_ALL_KEY = JSON.stringify(["readAll"]);
+
+/** Parses the stored snooze map: agentId -> the card `since` the user dismissed. */
+export function parseSnoozed(value: string | null): Map<string, string> {
+  if (!value) return new Map();
+  const parsed: unknown = JSON.parse(value);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    throw new Error("Saved snoozed cards are invalid.");
+  const entries = Object.entries(parsed);
+  if (entries.some(([, since]) => typeof since !== "string"))
+    throw new Error("Saved snoozed cards are invalid.");
+  return new Map(entries as [string, string][]);
+}
+
+export function isSnoozed(card: InboxCard, snoozed: ReadonlyMap<string, string>): boolean {
+  return snoozed.get(card.agent.id) === snoozeStamp(card);
+}
+
+export function unsnoozedCards(
+  cards: readonly InboxCard[],
+  snoozed: ReadonlyMap<string, string>,
+): InboxCard[] {
+  return cards.filter((card) => !isSnoozed(card, snoozed));
+}
 
 export interface InboxSnapshot {
   agents: ReadonlyMap<string, Agent>;
@@ -31,6 +56,10 @@ export interface InboxSnapshot {
   filtersReady: boolean;
   filtersSaving: boolean;
   filtersError: string | null;
+  snoozed: ReadonlyMap<string, string>;
+  snoozedReady: boolean;
+  snoozedError: string | null;
+  snoozedLoadError: string | null;
 }
 
 export interface InboxStore {
@@ -45,9 +74,14 @@ export interface InboxStore {
   respond(agentId: string, requestId: string, response: PermissionResponse): Promise<boolean>;
   sendReply(agentId: string): Promise<boolean>;
   markRead(agentId: string): Promise<boolean>;
+  markAllRead(agentIds: readonly string[]): Promise<boolean>;
+  archive(agentId: string): Promise<boolean>;
+  snooze(card: InboxCard): void;
+  unsnooze(agentId: string): void;
   setFilters(filters: InboxFilters): void;
   retryFilters(): void;
   retryDrafts(): void;
+  retrySnoozed(): void;
   dispose(): void;
 }
 
@@ -67,10 +101,44 @@ export const EMPTY_SNAPSHOT: InboxSnapshot = {
   filtersReady: false,
   filtersSaving: false,
   filtersError: null,
+  snoozed: new Map(),
+  snoozedReady: false,
+  snoozedError: null,
+  snoozedLoadError: null,
 };
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Mark-all-read's concurrency cap: enough to feel instant, not enough to flood the daemon. */
+const MARK_ALL_READ_CONCURRENCY = 4;
+
+/**
+ * Runs `worker` over `items` with at most `limit` in flight at once, settling
+ * like `Promise.allSettled` (index-aligned, never rejects itself). A worker
+ * slot picks up the next queued item the moment it frees, instead of the
+ * fixed batches `Promise.allSettled` in chunks would produce.
+ */
+async function runPool<T>(
+  items: readonly T[],
+  limit: number,
+  worker: (item: T) => Promise<boolean>,
+): Promise<PromiseSettledResult<boolean>[]> {
+  const results: PromiseSettledResult<boolean>[] = Array.from({ length: items.length });
+  let next = 0;
+  const runSlot = async (): Promise<void> => {
+    const index = next++;
+    if (index >= items.length) return;
+    try {
+      results[index] = { status: "fulfilled", value: await worker(items[index]) };
+    } catch (error) {
+      results[index] = { status: "rejected", reason: error };
+    }
+    await runSlot();
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => runSlot()));
+  return results;
 }
 
 /** One instance per host/plugin installation, including all retained surfaces and panels. */
@@ -232,6 +300,149 @@ export function createInboxStore(paseo: PaseoApi, storage?: PluginClientStorage)
       })
       .catch((error: unknown) => publish({ filtersError: errorMessage(error) }));
   };
+  let snoozedRevision = 0;
+  // Agent ids unsnoozed since the last successful save. A load that resolves
+  // before that unsnooze is persisted must not let the still-stale stored
+  // entry resurrect it; each id is removed once a save actually carries it.
+  const unsnoozedSinceSave = new Set<string>();
+  // Guards the initial load, `retrySnoozed`, and the automatic reload a
+  // blocked save triggers, from stacking: `loadSnoozed` itself returns early
+  // when a load is already in flight, so callers never need to check first.
+  let snoozedReloadInFlight = false;
+  let snoozedLoadRevision = 0;
+  // Chains every snoozed write through one promise: two setItem calls in
+  // flight at once can land out of order at the backend, so a later write
+  // carrying a tombstone can get overwritten by an earlier one that resolves
+  // after it. A rejected write must not poison the chain — the catch below
+  // always resolves so the next save still fires.
+  let snoozedWrite: Promise<void> = Promise.resolve();
+  const saveSnoozed = () => {
+    if (disposed || !storage) return;
+    // Bump before the blocked check below, not just on the write path: an
+    // older in-flight setItem must stop matching the moment a newer save is
+    // requested, blocked or not, or its stale resolution can clear tombstones
+    // and clear the error banner for a save that never actually happened.
+    const revision = ++snoozedRevision;
+    // A failed load means storage truth is unknown: writing now would overwrite
+    // whatever is actually stored with a map that never saw it. Keep the change
+    // in memory and reload once so the merge can pick it up automatically; the
+    // banner and manual Retry stay for when the reload itself fails.
+    if (snapshot.snoozedLoadError) {
+      publish({
+        snoozedError:
+          "Snoozed cards were not loaded, so this snooze is not saved yet. Retry loading.",
+      });
+      loadSnoozed();
+      return;
+    }
+    const snoozed = new Map(snapshot.snoozed);
+    let pruned = false;
+    // Lanes are empty before the first load finishes, so pruning here would
+    // drop every entry; save the map as-is and prune once agents are loaded.
+    if (snapshot.loaded) {
+      // Drop an entry once its agent is gone, or once a needs-you card for it
+      // resurfaces with a different stamp. Keep it while the agent still exists
+      // but has no needs-you card right now — that gap can be one broadcast
+      // where the card is momentarily absent, not the wait actually resolving.
+      for (const [agentId, stamp] of snoozed) {
+        if (!snapshot.agents.has(agentId)) {
+          snoozed.delete(agentId);
+          pruned = true;
+          continue;
+        }
+        const card = snapshot.lanes.needsYou.find((candidate) => candidate.agent.id === agentId);
+        if (card && snoozeStamp(card) !== stamp) {
+          snoozed.delete(agentId);
+          pruned = true;
+        }
+      }
+    }
+    // A prune that only lands in storage leaves memory holding the ghost
+    // entry, so every later load forces a redundant save; publish it too.
+    if (pruned) publish({ snoozed });
+    // Tombstones this save actually carries — captured now, not read off
+    // `unsnoozedSinceSave` inside `.then`, so an unsnooze that arrives while
+    // this write is still in flight is not dropped by a save that predates it.
+    const carriedTombstones = new Set(unsnoozedSinceSave);
+    snoozedWrite = snoozedWrite
+      .then(() => {
+        // A write queued behind a pending one can still fire after dispose
+        // tears the store down; storage should not hear from a dead store.
+        if (disposed) return;
+        return storage.setItem("snoozed", JSON.stringify(Object.fromEntries(snoozed)));
+      })
+      .then(() => {
+        if (disposed) return undefined;
+        if (revision === snoozedRevision) {
+          for (const agentId of carriedTombstones) unsnoozedSinceSave.delete(agentId);
+          publish({ snoozedError: null });
+        }
+        return undefined;
+      })
+      .catch((error: unknown) => {
+        if (revision === snoozedRevision) publish({ snoozedError: errorMessage(error) });
+      });
+  };
+  const loadSnoozed = () => {
+    if (!storage) {
+      publish({ snoozedReady: true });
+      return;
+    }
+    if (snoozedReloadInFlight) return;
+    snoozedReloadInFlight = true;
+    const loadRevision = ++snoozedLoadRevision;
+    void storage
+      .getItem("snoozed")
+      .then((value) => {
+        // A newer load superseded this one; its own completion owns the publish.
+        if (loadRevision !== snoozedLoadRevision) return undefined;
+        let stored: Map<string, string>;
+        let corrupt = false;
+        try {
+          stored = parseSnoozed(value);
+        } catch {
+          // A corrupt stored value can't be trusted; treat storage as empty
+          // and force the save below so the corruption gets overwritten.
+          stored = new Map();
+          corrupt = true;
+        }
+        // An unsnooze made while a prior load was broken never reached storage;
+        // the stored entry is the pre-unsnooze state and must not come back.
+        let removedUnsnoozed = false;
+        for (const agentId of unsnoozedSinceSave) {
+          if (stored.delete(agentId)) removedUnsnoozed = true;
+        }
+        // Stored entries first, in-memory entries on top: a snooze made while a
+        // prior load was broken outranks whatever storage last held for it.
+        const memory = snapshot.snoozed;
+        const merged = new Map([...stored, ...memory]);
+        const hasUnsavedEntries =
+          corrupt ||
+          removedUnsnoozed ||
+          Array.from(memory).some(([agentId, stamp]) => stored.get(agentId) !== stamp);
+        // A save blocked by the failed load left snoozedError set; the merge
+        // below either persists those entries or proves storage already had them.
+        publish({
+          snoozed: merged,
+          snoozedReady: true,
+          snoozedLoadError: null,
+          snoozedError: null,
+        });
+        if (hasUnsavedEntries) saveSnoozed();
+        return undefined;
+      })
+      .catch((error: unknown) => {
+        if (loadRevision !== snoozedLoadRevision) return undefined;
+        // A rejected getItem is the only failure that leaves storage truth
+        // unknown — a parse failure above is handled, not rethrown here.
+        publish({ snoozedReady: true, snoozedLoadError: errorMessage(error) });
+        return undefined;
+      })
+      .finally(() => {
+        snoozedReloadInFlight = false;
+      });
+  };
+
   let draftRevision = 0;
   const saveDrafts = () => {
     if (disposed) return;
@@ -274,6 +485,7 @@ export function createInboxStore(paseo: PaseoApi, storage?: PluginClientStorage)
   };
   loadDrafts();
   loadFilters();
+  loadSnoozed();
   void retryLoad();
 
   return {
@@ -284,7 +496,11 @@ export function createInboxStore(paseo: PaseoApi, storage?: PluginClientStorage)
         listeners.delete(listener);
       };
     },
-    getBadge: () => snapshot.lanes.needsYou.length || null,
+    // Until the stored snoozes load, the badge would count cards the user hid.
+    getBadge: () =>
+      snapshot.snoozedReady
+        ? unsnoozedCards(snapshot.lanes.needsYou, snapshot.snoozed).length || null
+        : null,
     requestOpen: (agentId) => publish({ pendingOpenAgentId: agentId }),
     clearPendingOpen() {
       if (snapshot.pendingOpenAgentId !== null) publish({ pendingOpenAgentId: null });
@@ -325,6 +541,42 @@ export function createInboxStore(paseo: PaseoApi, storage?: PluginClientStorage)
       return sent;
     },
     markRead: (agentId) => run(readKey(agentId), () => paseo.agents.ref(agentId).clearAttention()),
+    async markAllRead(agentIds) {
+      // Per-card read keys show progress on each card; failures keep their own retry state.
+      return run(READ_ALL_KEY, async () => {
+        // A read already in flight will succeed on its own — don't count it.
+        const eligible = agentIds.filter(
+          (agentId) => snapshot.operations.get(readKey(agentId))?.status !== "pending",
+        );
+        const results = await runPool(eligible, MARK_ALL_READ_CONCURRENCY, (agentId) =>
+          this.markRead(agentId),
+        );
+        // Nobody is left to show a failure to.
+        if (disposed) return;
+        const failed = results.filter(
+          (result) => result.status === "rejected" || !result.value,
+        ).length;
+        if (failed > 0) {
+          throw new Error(`${failed} of ${eligible.length} results could not be marked read.`);
+        }
+      });
+    },
+    archive: (agentId) => run(archiveKey(agentId), () => paseo.agents.ref(agentId).archive()),
+    snooze(card) {
+      if (disposed || !canSnooze(card)) return;
+      const snoozed = new Map(snapshot.snoozed);
+      snoozed.set(card.agent.id, snoozeStamp(card));
+      publish({ snoozed });
+      saveSnoozed();
+    },
+    unsnooze(agentId) {
+      if (disposed || !snapshot.snoozed.has(agentId)) return;
+      const snoozed = new Map(snapshot.snoozed);
+      snoozed.delete(agentId);
+      unsnoozedSinceSave.add(agentId);
+      publish({ snoozed });
+      saveSnoozed();
+    },
     setFilters(filters) {
       if (disposed) return;
       publish({ filters, filtersReady: true });
@@ -337,6 +589,13 @@ export function createInboxStore(paseo: PaseoApi, storage?: PluginClientStorage)
     retryFilters() {
       if (snapshot.filtersReady) saveFilters();
       else loadFilters();
+    },
+    retrySnoozed() {
+      // A failed load means storage truth is unknown: reload and merge memory
+      // on top. A failed save with a known-good load means the in-memory map
+      // is newer: write it again rather than reloading over it.
+      if (snapshot.snoozedLoadError) loadSnoozed();
+      else if (snapshot.snoozedError) saveSnoozed();
     },
     dispose() {
       disposed = true;

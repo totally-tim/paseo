@@ -1803,6 +1803,12 @@ export class VoiceAssistantWebSocketServer {
         agentProfiles: true,
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.
         agentConfigApply: true,
+        // COMPAT(permissionRequestedAt): added in v0.8.0, remove gate after 2027-03-11 once daemon floor >= v0.8.0.
+        permissionRequestedAt: true,
+        // COMPAT(checkoutInspection): added in v0.8.0, remove gate after 2027-03-11 once daemon floor >= v0.8.0.
+        checkoutInspection: true,
+        // COMPAT(scheduleList): added in v0.8.0, remove gate after 2027-03-11 once daemon floor >= v0.8.0.
+        scheduleList: true,
       },
     };
   }

@@ -42,6 +42,7 @@ const CLOSED_PARENT: ManagedAgent = {
   availableModes: [],
   currentModeId: null,
   pendingPermissions: new Map(),
+  permissionRequestedAt: new Map(),
   bufferedPermissionResolutions: new Map(),
   inFlightPermissionResponses: new Set(),
   pendingReplacement: false,

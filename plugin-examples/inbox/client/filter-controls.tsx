@@ -91,10 +91,17 @@ export function FilterControls({
     [onChange, onOpenChange, store],
   );
   const reset = useCallback(() => update(ALL_PROJECTS), [update]);
+  // Grouping is a view mode, not a filter: it must not close an open preview.
+  const toggleGrouping = useCallback(
+    () => store.setFilters({ ...filters, groupByProject: !filters.groupByProject }),
+    [store, filters],
+  );
   const select = useCallback(
     (id: string | null) =>
       update(
-        picker === "group" ? { projectGroup: id, projectId: null } : { ...filters, projectId: id },
+        picker === "group"
+          ? { ...filters, projectGroup: id, projectId: null }
+          : { ...filters, projectId: id },
       ),
     [filters, picker, update],
   );
@@ -154,6 +161,13 @@ export function FilterControls({
         {filters.projectId || filters.projectGroup !== null ? (
           <ActionButton theme={theme} label="Clear filters" onPress={reset} />
         ) : null}
+        <ActionButton
+          theme={theme}
+          label="Group by project"
+          primary={filters.groupByProject}
+          onPress={toggleGrouping}
+          disabled={!snapshot.filtersReady}
+        />
         {snapshot.filtersSaving ? <Text style={styles.text}>Saving filters…</Text> : null}
       </View>
       {snapshot.filtersError ? (

@@ -12,16 +12,37 @@ const lanes: Lanes = { needsYou: cards, working: cards, done: cards };
 
 describe("project and group filters", () => {
   it("intersects project and group on every lane without changing the host queue", () => {
-    const result = filterLanes(lanes, { projectId: "p1", projectGroup: "Work" });
+    const result = filterLanes(lanes, {
+      projectId: "p1",
+      projectGroup: "Work",
+      groupByProject: false,
+    });
     expect(Object.values(result).map((lane) => lane.map(agentId))).toEqual([["a"], ["a"], ["a"]]);
-    expect(filterLanes(lanes, { projectId: "p1", projectGroup: "Personal" }).needsYou).toEqual([]);
-    expect(filterLanes(lanes, { projectId: null, projectGroup: "" }).needsYou).toEqual([cards[2]]);
+    expect(
+      filterLanes(lanes, { projectId: "p1", projectGroup: "Personal", groupByProject: false })
+        .needsYou,
+    ).toEqual([]);
+    expect(
+      filterLanes(lanes, { projectId: null, projectGroup: "", groupByProject: false }).needsYou,
+    ).toEqual([cards[2]]);
     expect(lanes.needsYou).toHaveLength(3);
   });
   it("validates stored preferences, including the ungrouped selection", () => {
-    expect(parseFilters(null)).toEqual({ projectId: null, projectGroup: null });
+    expect(parseFilters(null)).toEqual({
+      projectId: null,
+      projectGroup: null,
+      groupByProject: false,
+    });
     expect(parseFilters('{"projectId":null,"projectGroup":""}').projectGroup).toBe("");
     expect(() => parseFilters('{"projectId":123}')).toThrow("invalid");
     expect(() => parseFilters("broken")).toThrow();
+  });
+  it("defaults grouping off for filters saved before it existed", () => {
+    expect(parseFilters('{"projectId":null,"projectGroup":null}').groupByProject).toBe(false);
+    expect(parseFilters('{"projectId":null,"projectGroup":null,"groupByProject":true}')).toEqual({
+      projectId: null,
+      projectGroup: null,
+      groupByProject: true,
+    });
   });
 });

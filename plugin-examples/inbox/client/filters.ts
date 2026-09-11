@@ -3,9 +3,15 @@ import type { InboxCard, Lanes } from "./lanes";
 export interface InboxFilters {
   projectId: string | null;
   projectGroup: string | null;
+  /** Sections cards by project inside each lane. Absent in saved filters predating it. */
+  groupByProject: boolean;
 }
 
-export const ALL_PROJECTS: InboxFilters = { projectId: null, projectGroup: null };
+export const ALL_PROJECTS: InboxFilters = {
+  projectId: null,
+  projectGroup: null,
+  groupByProject: false,
+};
 
 export function parseFilters(value: string | null): InboxFilters {
   if (!value) return ALL_PROJECTS;
@@ -17,7 +23,11 @@ export function parseFilters(value: string | null): InboxFilters {
     !(input.projectGroup === null || typeof input.projectGroup === "string")
   )
     throw new Error("Saved Kanban filters are invalid.");
-  return { projectId: input.projectId, projectGroup: input.projectGroup };
+  return {
+    projectId: input.projectId,
+    projectGroup: input.projectGroup,
+    groupByProject: input.groupByProject === true,
+  };
 }
 
 export function filterLanes(lanes: Lanes, filters: InboxFilters): Lanes {

@@ -1,29 +1,73 @@
 import { filterLanes } from "./filters";
-import type { InboxCard, Lanes } from "./lanes";
-import type { InboxSnapshot } from "./store";
+import type { CardReason, InboxCard, Lanes } from "./lanes";
+import { isSnoozed, type InboxSnapshot } from "./store";
 
 const EMPTY: Lanes = { needsYou: [], working: [], done: [] };
 
-/** A global review must wait for its saved scope; a workspace panel already has an explicit scope. */
-export function boardLanes(snapshot: InboxSnapshot, workspaceId?: string): Lanes {
-  if (!workspaceId)
-    return snapshot.filtersReady ? filterLanes(snapshot.lanes, snapshot.filters) : EMPTY;
-  const matches = (card: InboxCard) => card.agent.workspaceId === workspaceId;
+export interface BoardLanes extends Lanes {
+  /** Needs-you cards the user dismissed until their wait state changes. */
+  snoozed: InboxCard[];
+}
+
+/**
+ * The lanes a board surface shows. Snoozed needs-you cards leave the review
+ * queue and the lane list, but stay reachable through `snoozed`.
+ */
+export function boardLanes(snapshot: InboxSnapshot, workspaceId?: string): BoardLanes {
+  let lanes: Lanes;
+  if (!workspaceId) {
+    lanes = snapshot.filtersReady ? filterLanes(snapshot.lanes, snapshot.filters) : EMPTY;
+  } else {
+    const matches = (card: InboxCard) => card.agent.workspaceId === workspaceId;
+    lanes = {
+      needsYou: snapshot.lanes.needsYou.filter(matches),
+      working: snapshot.lanes.working.filter(matches),
+      done: snapshot.lanes.done.filter(matches),
+    };
+  }
   return {
-    needsYou: snapshot.lanes.needsYou.filter(matches),
-    working: snapshot.lanes.working.filter(matches),
-    done: snapshot.lanes.done.filter(matches),
+    ...lanes,
+    needsYou: lanes.needsYou.filter((card) => !isSnoozed(card, snapshot.snoozed)),
+    snoozed: lanes.needsYou.filter((card) => isSnoozed(card, snapshot.snoozed)),
   };
 }
 
 export function boardReady(snapshot: InboxSnapshot, workspaceId?: string): boolean {
-  return snapshot.loaded && (Boolean(workspaceId) || snapshot.filtersReady);
+  return (
+    snapshot.loaded && snapshot.snoozedReady && (Boolean(workspaceId) || snapshot.filtersReady)
+  );
+}
+
+export function filterNeedsYouReason(lanes: Lanes, reason: CardReason | null): Lanes {
+  if (!reason) return lanes;
+  return { ...lanes, needsYou: lanes.needsYou.filter((card) => card.reason === reason) };
+}
+
+export interface CardGroup {
+  key: string;
+  label: string;
+  cards: InboxCard[];
+}
+
+/** Groups by project in first-appearance order, preserving the lane's sort. */
+export function groupCardsByProject(cards: readonly InboxCard[]): CardGroup[] {
+  const groups = new Map<string, CardGroup>();
+  for (const card of cards) {
+    const key = card.workspace?.projectId ?? "";
+    let group = groups.get(key);
+    if (!group) {
+      group = { key, label: card.workspace?.projectDisplayName || "No project", cards: [] };
+      groups.set(key, group);
+    }
+    group.cards.push(card);
+  }
+  return Array.from(groups.values());
 }
 
 /** Search the whole family so a matching child keeps its parent card and review actions. */
-export function searchLanes(lanes: Lanes, query: string): Lanes {
+export function searchCards(cards: readonly InboxCard[], query: string): InboxCard[] {
   const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  if (!words.length) return lanes;
+  if (!words.length) return [...cards];
   const matches = (card: InboxCard) => {
     const text = [
       card.workspace?.projectDisplayName,
@@ -35,9 +79,14 @@ export function searchLanes(lanes: Lanes, query: string): Lanes {
       .toLowerCase();
     return words.every((word) => text.includes(word));
   };
+  return cards.filter(matches);
+}
+
+export function searchLanes(lanes: Lanes, query: string): Lanes {
+  if (!query.trim()) return lanes;
   return {
-    needsYou: lanes.needsYou.filter(matches),
-    working: lanes.working.filter(matches),
-    done: lanes.done.filter(matches),
+    needsYou: searchCards(lanes.needsYou, query),
+    working: searchCards(lanes.working, query),
+    done: searchCards(lanes.done, query),
   };
 }

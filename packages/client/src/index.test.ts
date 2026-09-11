@@ -230,15 +230,47 @@ test("createPaseoApi borrows daemon capabilities without exposing connection own
 
   expect(Object.keys(paseo).sort()).toEqual([
     "agents",
+    "checkout",
     "config",
     "projects",
     "providers",
+    "schedules",
     "terminals",
     "workspaces",
   ]);
   expect("connect" in paseo).toBe(false);
   expect("close" in paseo).toBe(false);
   expect("skills" in paseo.agents).toBe(false);
+});
+
+test("checkout and schedules are defined before any server_info arrives", () => {
+  const daemonClient = new DaemonClient({
+    url: "ws://daemon.test",
+    clientId: "no-server-info-yet",
+    reconnect: { enabled: false },
+  });
+
+  const paseo = createPaseoApi(daemonClient);
+
+  expect(paseo.checkout).toBeDefined();
+  expect(paseo.schedules).toBeDefined();
+});
+
+test("checkout and schedules stay undefined when the host doesn't advertise the feature", async () => {
+  const { client } = await connectClient({});
+  expect(client.checkout).toBeUndefined();
+  expect(client.schedules).toBeUndefined();
+  await client.close();
+});
+
+test("checkout and schedules are defined once the host advertises the feature", async () => {
+  const { client } = await connectClient({
+    checkoutInspection: true,
+    scheduleList: true,
+  });
+  expect(client.checkout).toBeDefined();
+  expect(client.schedules).toBeDefined();
+  await client.close();
 });
 
 test("project actions list registered projects through the existing RPC", async () => {
@@ -1395,6 +1427,34 @@ test("provider usage requires the advertised host capability", async () => {
     "Update the host to list provider usage.",
   );
   expect(ws.sent).toHaveLength(sentBeforeUsage);
+
+  await client.close();
+});
+
+test("schedules.list throws the daemon's payload error instead of returning it silently", async () => {
+  const { client, ws } = await connectClient({ scheduleList: true });
+  const { schedules } = client;
+  if (!schedules) throw new Error("expected client.schedules to be present");
+
+  const listPromise = schedules.list("schedules-list-request");
+  const request = parseSentSessionMessage(ws.sent.at(-1));
+  expect(request).toMatchObject({
+    type: "schedule/list",
+    requestId: "schedules-list-request",
+  });
+
+  ws.message(
+    sessionMessage({
+      type: "schedule/list/response",
+      payload: {
+        requestId: request.requestId,
+        schedules: [],
+        error: "Schedules are disabled on this host",
+      },
+    }),
+  );
+
+  await expect(listPromise).rejects.toThrow("Schedules are disabled on this host");
 
   await client.close();
 });

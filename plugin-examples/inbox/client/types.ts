@@ -12,3 +12,9 @@ export type TimelineEntry = Awaited<
   ReturnType<AgentHandle["timeline"]["refetch"]>
 >["entries"][number];
 export type TimelineItem = TimelineEntry["item"];
+export type CheckoutPrStatusResult = Awaited<
+  ReturnType<NonNullable<PaseoApi["checkout"]>["prStatus"]>
+>;
+export type ScheduleSummary = Awaited<
+  ReturnType<NonNullable<PaseoApi["schedules"]>["list"]>
+>["schedules"][number];
