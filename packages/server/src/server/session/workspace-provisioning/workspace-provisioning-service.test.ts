@@ -34,6 +34,8 @@ const directorySymlinkType = process.platform === "win32" ? "junction" : "dir";
 let tmpDir: string;
 let gitRoots: Set<string>;
 let gitBranches: Map<string, string | null>;
+// worktreeRoot -> mainRepoRoot for directories the fake daemon "owns".
+let paseoWorktrees: Map<string, string>;
 let checkoutFailure: Error | null;
 let restoredMergedChangeRequestUrl: string | null;
 let workspaceRegistry: FileBackedWorkspaceRegistry;
@@ -79,10 +81,31 @@ function gitService() {
         currentBranch: worktreeRoot ? (gitBranches.get(worktreeRoot) ?? "main") : null,
         remoteUrl: null,
         worktreeRoot,
-        isPaseoOwnedWorktree: false,
-        mainRepoRoot: null,
+        isPaseoOwnedWorktree: worktreeRoot !== null && paseoWorktrees.has(worktreeRoot),
+        mainRepoRoot: worktreeRoot ? (paseoWorktrees.get(worktreeRoot) ?? null) : null,
       };
     },
+  });
+}
+
+function registerPaseoWorktree(repo: string, slug: string): string {
+  const worktree = path.join(tmpDir, "worktrees", "0abc1234", slug);
+  gitRoots.add(repo);
+  gitRoots.add(worktree);
+  gitBranches.set(worktree, slug);
+  paseoWorktrees.set(worktree, repo);
+  return worktree;
+}
+
+function createWorktreeWorkspace(repo: string, worktree: string) {
+  return provisioning.createWorkspaceForWorktree({
+    sourceCwd: repo,
+    repoRoot: repo,
+    cwd: worktree,
+    worktreeRoot: worktree,
+    branch: path.basename(worktree),
+    baseBranch: "main",
+    title: null,
   });
 }
 
@@ -90,6 +113,7 @@ beforeEach(async () => {
   tmpDir = mkdtempSync(path.join(os.tmpdir(), "workspace-provisioning-"));
   gitRoots = new Set();
   gitBranches = new Map();
+  paseoWorktrees = new Map();
   checkoutFailure = null;
   restoredMergedChangeRequestUrl = null;
   workspaceRegistry = new FileBackedWorkspaceRegistry(
@@ -570,6 +594,112 @@ test("createWorkspaceForDirectory classifies unknown and archived explicit proje
   ).rejects.toMatchObject({
     code: "archived_project",
   } satisfies Partial<WorkspaceProvisioningError>);
+});
+
+test("resolveOrCreateWorkspaceIdForCreateAgent inside a Paseo worktree mints a sibling under the main checkout's project", async () => {
+  // The bug this guards: a `paseo run` from inside a managed worktree arrived
+  // with only a cwd and rooted a new sidebar project at the worktree directory.
+  // The sibling workspace is expected; the slug-named project is not.
+  const repo = path.join(tmpDir, "repo");
+  const worktree = registerPaseoWorktree(repo, "lawful-armadillo");
+  const owner = await createWorktreeWorkspace(repo, worktree);
+
+  const id = await provisioning.resolveOrCreateWorkspaceIdForCreateAgent({
+    createdWorktree: null,
+    cwd: worktree,
+    initialTitle: "[Review] external gate",
+  });
+
+  const sibling = await workspaceRegistry.get(id);
+  expect(id).not.toBe(owner.workspaceId);
+  expect(sibling?.projectId).toBe(owner.projectId);
+  const projects = await projectRegistry.list();
+  expect(projects).toHaveLength(1);
+  expect(projects[0]?.rootPath).toBe(repo);
+});
+
+test("createWorkspaceForDirectory inside a Paseo worktree lands under the main checkout's project", async () => {
+  const repo = path.join(tmpDir, "repo");
+  const worktree = registerPaseoWorktree(repo, "lawful-armadillo");
+  const owner = await createWorktreeWorkspace(repo, worktree);
+
+  const opened = await provisioning.createWorkspaceForDirectory(worktree, "Reopened by path");
+
+  expect(opened.workspaceId).not.toBe(owner.workspaceId);
+  expect(opened.projectId).toBe(owner.projectId);
+  expect(await workspaceRegistry.list()).toHaveLength(2);
+  expect(await projectRegistry.list()).toHaveLength(1);
+});
+
+test("findOrCreateProjectForDirectory resolves a Paseo worktree to the main checkout's project", async () => {
+  const repo = path.join(tmpDir, "repo");
+  const worktree = registerPaseoWorktree(repo, "lawful-armadillo");
+  const owner = await createWorktreeWorkspace(repo, worktree);
+
+  const fromWorktree = await provisioning.findOrCreateProjectForDirectory(worktree);
+  const fromSubdir = await provisioning.findOrCreateProjectForDirectory(
+    path.join(worktree, "packages", "app"),
+  );
+
+  expect(fromWorktree.projectId).toBe(owner.projectId);
+  expect(fromSubdir.projectId).toBe(owner.projectId);
+  const projects = await projectRegistry.list();
+  expect(projects).toHaveLength(1);
+  expect(projects[0]?.rootPath).toBe(repo);
+});
+
+test("findOrCreateProjectForDirectory keeps the worktree's original project when a later sibling was homed elsewhere", async () => {
+  const repo = path.join(tmpDir, "repo");
+  const worktree = registerPaseoWorktree(repo, "lawful-armadillo");
+  const owner = await createWorktreeWorkspace(repo, worktree);
+  const foreign = await projectRegistry.getOrCreateActiveByRoot({
+    rootPath: path.join(tmpDir, "elsewhere"),
+    kind: "non_git",
+    displayName: "elsewhere",
+    timestamp: "2026-03-01T00:00:00.000Z",
+  });
+  const sibling = await provisioning.createWorkspaceForDirectory(worktree, null, foreign.projectId);
+  await workspaceRegistry.upsert({ ...sibling, createdAt: "2000-01-01T00:00:00.000Z" });
+
+  const project = await provisioning.findOrCreateProjectForDirectory(worktree);
+
+  expect(project.projectId).toBe(owner.projectId);
+});
+
+test("findOrCreateProjectForDirectory follows an archived owner whose project is still active", async () => {
+  const repo = path.join(tmpDir, "repo");
+  const worktree = registerPaseoWorktree(repo, "lawful-armadillo");
+  const owner = await createWorktreeWorkspace(repo, worktree);
+  await workspaceRegistry.archive(owner.workspaceId, ARCHIVED_AT);
+
+  const project = await provisioning.findOrCreateProjectForDirectory(worktree);
+
+  expect(project.projectId).toBe(owner.projectId);
+  expect(await projectRegistry.list()).toHaveLength(1);
+});
+
+test("findOrCreateProjectForDirectory skips an archived owning project and allocates at the main checkout", async () => {
+  const repo = path.join(tmpDir, "repo");
+  const worktree = registerPaseoWorktree(repo, "lawful-armadillo");
+  const owner = await createWorktreeWorkspace(repo, worktree);
+  await projectRegistry.archive(owner.projectId, ARCHIVED_AT);
+
+  const project = await provisioning.findOrCreateProjectForDirectory(worktree);
+
+  expect(project.projectId).not.toBe(owner.projectId);
+  expect(project.rootPath).toBe(repo);
+  expect(project.archivedAt).toBeNull();
+});
+
+test("findOrCreateProjectForDirectory allocates the main checkout's project for an unowned Paseo worktree", async () => {
+  const repo = path.join(tmpDir, "repo");
+  const worktree = registerPaseoWorktree(repo, "orphan-worktree");
+
+  const project = await provisioning.findOrCreateProjectForDirectory(worktree);
+
+  expect(project.rootPath).toBe(repo);
+  expect(project.displayName).toBe("repo");
+  expect(await projectRegistry.list()).toHaveLength(1);
 });
 
 test("findOrCreateProjectForDirectory keeps nested selected roots independent", async () => {
