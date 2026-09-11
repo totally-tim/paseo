@@ -72,6 +72,8 @@ export interface WorkspaceProvisioningService {
   ): Promise<PersistedWorkspaceRecord>;
 }
 
+type WorkspaceCheckout = Awaited<ReturnType<WorkspaceGitService["getCheckout"]>>;
+
 export type WorkspaceProvisioningErrorCode = "unknown_project" | "archived_project";
 
 export class WorkspaceProvisioningError extends Error {
@@ -174,6 +176,9 @@ export function createWorkspaceProvisioningService(deps: {
   async function findOrCreateProjectForDirectory(cwd: string): Promise<PersistedProjectRecord> {
     const rootPath = resolve(cwd);
     const checkout = await workspaceGitService.getCheckout(rootPath);
+    if (isPaseoWorktreeCheckout(checkout)) {
+      return resolveProjectForPaseoWorktree(checkout);
+    }
     const timestamp = new Date().toISOString();
     return projectRegistry.getOrCreateActiveByRoot({
       rootPath,
@@ -283,13 +288,17 @@ export function createWorkspaceProvisioningService(deps: {
       // Orphaned legacy workspace FKs fall through to exact-root allocation.
     }
 
-    const checkout = await workspaceGitService.getCheckout(input.repoRoot);
+    return allocateProjectForRepoRoot(input.repoRoot);
+  }
+
+  async function allocateProjectForRepoRoot(repoRoot: string): Promise<PersistedProjectRecord> {
+    const checkout = await workspaceGitService.getCheckout(repoRoot);
     const project = await projectRegistry.getOrCreateActiveByRoot({
-      rootPath: input.repoRoot,
+      rootPath: repoRoot,
       kind: "git",
-      displayName: basename(input.repoRoot) || input.repoRoot,
+      displayName: basename(repoRoot) || repoRoot,
       projectKey: deriveProjectKey({
-        rootPath: input.repoRoot,
+        rootPath: repoRoot,
         remoteUrl: checkout.remoteUrl,
         worktreeRoot: checkout.worktreeRoot,
         mainRepoRoot: checkout.mainRepoRoot,
@@ -298,6 +307,55 @@ export function createWorkspaceProvisioningService(deps: {
       timestamp: new Date().toISOString(),
     });
     return refreshProjectKind(project);
+  }
+
+  // A Paseo-owned worktree is never a project root. The daemon minted the
+  // directory for a workspace of the main checkout's project, so a bare path
+  // under the worktrees root (what `paseo run` sends from inside a worktree)
+  // resolves to that project instead of allocating a sidebar project named
+  // after the worktree slug. Hand-made linked worktrees are not covered: those
+  // can legitimately be their own project.
+  function isPaseoWorktreeCheckout(
+    checkout: WorkspaceCheckout,
+  ): checkout is WorkspaceCheckout & { worktreeRoot: string; mainRepoRoot: string } {
+    return (
+      checkout.isGit &&
+      checkout.isPaseoOwnedWorktree &&
+      checkout.worktreeRoot !== null &&
+      checkout.mainRepoRoot !== null
+    );
+  }
+
+  async function resolveProjectForPaseoWorktree(checkout: {
+    worktreeRoot: string;
+    mainRepoRoot: string;
+  }): Promise<PersistedProjectRecord> {
+    const matchesWorktreeRoot = createRealpathAwarePathMatcher(checkout.worktreeRoot);
+    const matchesMainRepoRoot = createRealpathAwarePathMatcher(checkout.mainRepoRoot);
+    // Active first, then oldest: the worktree flow minted the first record on
+    // this worktree. A later same-cwd sibling may have been homed elsewhere by
+    // an explicit project id, so a project rooted at the main checkout wins
+    // over registry order.
+    const candidates = (await workspaceRegistry.list())
+      .filter(
+        (workspace) =>
+          workspace.worktreeRoot !== null && matchesWorktreeRoot(workspace.worktreeRoot),
+      )
+      .sort(
+        (left, right) =>
+          Number(Boolean(left.archivedAt)) - Number(Boolean(right.archivedAt)) ||
+          Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
+          left.workspaceId.localeCompare(right.workspaceId),
+      );
+    const projects = new Map<string, PersistedProjectRecord>();
+    for (const candidate of candidates) {
+      const project = await projectRegistry.get(candidate.projectId);
+      if (project && !project.archivedAt) projects.set(project.projectId, project);
+    }
+    const owned = [...projects.values()];
+    const project = owned.find((candidate) => matchesMainRepoRoot(candidate.rootPath)) ?? owned[0];
+    if (project) return refreshProjectKind(project);
+    return allocateProjectForRepoRoot(checkout.mainRepoRoot);
   }
 
   async function findOrCreateWorkspaceForDirectory(cwd: string): Promise<PersistedWorkspaceRecord> {
@@ -431,7 +489,7 @@ export function createWorkspaceProvisioningService(deps: {
   async function refreshProjectKind(
     project: PersistedProjectRecord,
     workspaceCwd?: string,
-    workspaceCheckout?: Awaited<ReturnType<WorkspaceGitService["getCheckout"]>>,
+    workspaceCheckout?: WorkspaceCheckout,
   ): Promise<PersistedProjectRecord> {
     const projectCheckout =
       workspaceCwd && workspaceCheckout && areEquivalentPaths(project.rootPath, workspaceCwd)

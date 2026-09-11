@@ -34,6 +34,8 @@ type NewWorkspaceDaemonClient = Pick<
   | "removeProject"
   | "removePlugin"
   | "reloadPlugin"
+  | "scheduleCreate"
+  | "scheduleDelete"
   | "setWorkspaceTitle"
 >;
 

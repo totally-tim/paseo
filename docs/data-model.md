@@ -4,6 +4,8 @@
 
 Projects are allocated for the exact root selected by the caller, normalized lexically with `path.resolve` (never `realpath`). New project IDs are opaque `prj_<16 hex>` values. Existing remote-shaped or path-shaped IDs are retained as readable compatibility records and are never rekeyed. An active exact root is idempotent; archived-only matches do not resurrect an old project. Workspace `projectId` is stable membership: reconciliation may update git-derived kind and branch metadata, but never rehomes a workspace or changes a project's root, ID, or default name.
 
+A Paseo-owned worktree is never a project root. While git still recognizes the worktree, any path inside the daemon's worktrees root resolves to the project of the workspace that owns the worktree, or to the main checkout's exact root when no workspace owns it. Without this rule a bare `paseo run` from inside a worktree allocated a second project named after the worktree slug. The run still gets its own sibling workspace on the worktree, in line with same-cwd siblings being independent. Hand-made linked worktrees are not covered and can be their own project.
+
 `projectKey` is a persisted, opaque equivalence key used only to group the same logical project
 across hosts. It is separate from the host-local `projectId`; today's producer prefers a normalized
 Git remote and otherwise uses the local project root. Consumers never derive it from live Git.

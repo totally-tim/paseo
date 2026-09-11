@@ -33,6 +33,7 @@ import type {
   AgentCreateSessionOptions,
   AgentFeature,
   AgentLaunchContext,
+  AgentPermissionRequest,
   AgentPromptInput,
   AgentProvider,
   AgentPersistenceHandle,
@@ -8951,6 +8952,874 @@ test("permission request notifies once without forcing unread attention state", 
   }
 
   expect(attentionReasons).toContain("permission");
+});
+
+test("permission request without requestedAt is stamped with an ISO arrival time", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-permission-requested-at-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  class PermissionSession extends TestAgentSession {
+    override async startTurn(): Promise<{ turnId: string }> {
+      const turnId = "turn-perm-stamp";
+      setTimeout(() => {
+        this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+        this.pushEvent({
+          type: "permission_requested",
+          provider: this.provider,
+          request: {
+            id: "perm-stamp",
+            provider: this.provider,
+            kind: "tool",
+            name: "Read file",
+          },
+          turnId,
+        });
+      }, 0);
+      return { turnId };
+    }
+  }
+
+  class PermissionClient implements AgentClient {
+    readonly provider = "codex" as const;
+    readonly capabilities = TEST_CAPABILITIES;
+
+    async isAvailable(): Promise<boolean> {
+      return true;
+    }
+
+    async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new PermissionSession(config);
+    }
+
+    async resumeSession(config?: Partial<AgentSessionConfig>): Promise<AgentSession> {
+      return new PermissionSession({
+        provider: "codex",
+        cwd: config?.cwd ?? process.cwd(),
+      });
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: {
+      codex: new PermissionClient(),
+    },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000133",
+  });
+
+  const agent = await manager.createAgent(
+    {
+      provider: "codex",
+      cwd: workdir,
+      title: "Permission requestedAt stamp test",
+    },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  const before = new Date();
+  const stream = manager.streamAgent(agent.id, "permission flow");
+  await stream.next(); // turn_started
+  await stream.next(); // permission_requested
+  const after = new Date();
+
+  const pending = manager.getAgent(agent.id)?.pendingPermissions.get("perm-stamp");
+  expect(pending?.requestedAt).toBeDefined();
+  const requestedAt = new Date(pending?.requestedAt ?? "");
+  expect(requestedAt.getTime()).toBeGreaterThanOrEqual(before.getTime());
+  expect(requestedAt.getTime()).toBeLessThanOrEqual(after.getTime());
+});
+
+test("permission request with an existing requestedAt is not overwritten", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-permission-requested-at-kept-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const originalRequestedAt = "2020-01-01T00:00:00.000Z";
+
+  class PermissionSession extends TestAgentSession {
+    override async startTurn(): Promise<{ turnId: string }> {
+      const turnId = "turn-perm-keep";
+      setTimeout(() => {
+        this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+        this.pushEvent({
+          type: "permission_requested",
+          provider: this.provider,
+          request: {
+            id: "perm-keep",
+            provider: this.provider,
+            kind: "tool",
+            name: "Read file",
+            requestedAt: originalRequestedAt,
+          },
+          turnId,
+        });
+      }, 0);
+      return { turnId };
+    }
+  }
+
+  class PermissionClient implements AgentClient {
+    readonly provider = "codex" as const;
+    readonly capabilities = TEST_CAPABILITIES;
+
+    async isAvailable(): Promise<boolean> {
+      return true;
+    }
+
+    async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new PermissionSession(config);
+    }
+
+    async resumeSession(config?: Partial<AgentSessionConfig>): Promise<AgentSession> {
+      return new PermissionSession({
+        provider: "codex",
+        cwd: config?.cwd ?? process.cwd(),
+      });
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: {
+      codex: new PermissionClient(),
+    },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000134",
+  });
+
+  const agent = await manager.createAgent(
+    {
+      provider: "codex",
+      cwd: workdir,
+      title: "Permission requestedAt preserved test",
+    },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  const stream = manager.streamAgent(agent.id, "permission flow");
+  await stream.next(); // turn_started
+  await stream.next(); // permission_requested
+
+  const pending = manager.getAgent(agent.id)?.pendingPermissions.get("perm-keep");
+  expect(pending?.requestedAt).toBe(originalRequestedAt);
+});
+
+test("responding to one pending permission does not reset requestedAt on another", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-permission-requested-at-survives-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const untouchedRequestedAt = "2020-06-01T00:00:00.000Z";
+
+  // The provider's own bookkeeping never carries requestedAt - it's a daemon-only
+  // stamp - so getPendingPermissions must keep returning unstamped requests here
+  // for this test to prove refreshSessionState carries the stamp forward itself.
+  class TwoPendingPermissionsSession extends TestAgentSession {
+    private live = new Set(["perm-1", "perm-2"]);
+
+    override getPendingPermissions() {
+      return Array.from(this.live, (id) => ({
+        id,
+        provider: this.provider,
+        kind: "tool" as const,
+        name: "Read file",
+      }));
+    }
+
+    override async respondToPermission(requestId: string): Promise<void> {
+      this.live.delete(requestId);
+    }
+  }
+
+  class TwoPendingPermissionsClient implements AgentClient {
+    readonly provider = "codex" as const;
+    readonly capabilities = TEST_CAPABILITIES;
+
+    async isAvailable(): Promise<boolean> {
+      return true;
+    }
+
+    async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new TwoPendingPermissionsSession(config);
+    }
+
+    async resumeSession(config?: Partial<AgentSessionConfig>): Promise<AgentSession> {
+      return new TwoPendingPermissionsSession({
+        provider: "codex",
+        cwd: config?.cwd ?? process.cwd(),
+      });
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: {
+      codex: new TwoPendingPermissionsClient(),
+    },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000135",
+  });
+
+  const snapshot = await manager.createAgent(
+    {
+      provider: "codex",
+      cwd: workdir,
+      title: "Two pending permissions test",
+    },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  const agent = manager.getAgent(snapshot.id)!;
+  // Seed both pendingPermissions and the permissionRequestedAt side map, matching
+  // what onStreamPermissionRequested would have already done for a request that
+  // arrived earlier - the side map is the source of truth refreshSessionState
+  // reads from, so a test that only seeds pendingPermissions no longer simulates
+  // a previously-arrived request.
+  agent.pendingPermissions.set("perm-1", {
+    id: "perm-1",
+    provider: "codex",
+    kind: "tool",
+    name: "Read file",
+    requestedAt: "2020-01-01T00:00:00.000Z",
+  });
+  agent.permissionRequestedAt.set("perm-1", "2020-01-01T00:00:00.000Z");
+  agent.pendingPermissions.set("perm-2", {
+    id: "perm-2",
+    provider: "codex",
+    kind: "tool",
+    name: "Read file",
+    requestedAt: untouchedRequestedAt,
+  });
+  agent.permissionRequestedAt.set("perm-2", untouchedRequestedAt);
+
+  await manager.respondToPermission(snapshot.id, "perm-1", { behavior: "allow" });
+
+  const remaining = manager.getAgent(snapshot.id)?.pendingPermissions.get("perm-2");
+  expect(remaining?.requestedAt).toBe(untouchedRequestedAt);
+});
+
+test("a refreshSessionState failure prunes the side map, so recovery mints fresh requestedAt stamps", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-permission-requested-at-catch-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  // getPendingPermissions never carries requestedAt - providers hold the unstamped
+  // originals. When it throws, refreshSessionState's catch path clears
+  // pendingPermissions, and the unconditional prune that follows clears
+  // permissionRequestedAt right along with it: a throw says nothing about which
+  // requests are still pending, so it's safer to drop the stamps than to keep
+  // stale ones that might later attach to a request that reuses the same id.
+  // The next successful rebuild mints fresh restoredAt stamps.
+  class FlakyPermissionsSession extends TestAgentSession {
+    private readonly live = new Set(["perm-a", "perm-b"]);
+    shouldThrow = false;
+
+    override async startTurn(): Promise<{ turnId: string }> {
+      const turnId = "turn-perm-catch";
+      setTimeout(() => {
+        this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+        this.pushEvent({
+          type: "permission_requested",
+          provider: this.provider,
+          request: { id: "perm-a", provider: this.provider, kind: "tool", name: "Read file" },
+          turnId,
+        });
+        this.pushEvent({
+          type: "permission_requested",
+          provider: this.provider,
+          request: { id: "perm-b", provider: this.provider, kind: "tool", name: "Read file" },
+          turnId,
+        });
+      }, 0);
+      return { turnId };
+    }
+
+    override getPendingPermissions() {
+      if (this.shouldThrow) {
+        throw new Error("transient provider failure");
+      }
+      return Array.from(this.live, (id) => ({
+        id,
+        provider: this.provider,
+        kind: "tool" as const,
+        name: "Read file",
+      }));
+    }
+
+    override async respondToPermission(): Promise<void> {
+      // Neither perm-a nor perm-b actually resolves in this test - only
+      // refreshSessionState's rebuild behavior is under test.
+    }
+  }
+
+  let capturedSession: FlakyPermissionsSession | null = null;
+
+  class FlakyPermissionsClient implements AgentClient {
+    readonly provider = "codex" as const;
+    readonly capabilities = TEST_CAPABILITIES;
+
+    async isAvailable(): Promise<boolean> {
+      return true;
+    }
+
+    async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      capturedSession = new FlakyPermissionsSession(config);
+      return capturedSession;
+    }
+
+    async resumeSession(config?: Partial<AgentSessionConfig>): Promise<AgentSession> {
+      capturedSession = new FlakyPermissionsSession({
+        provider: "codex",
+        cwd: config?.cwd ?? process.cwd(),
+      });
+      return capturedSession;
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: {
+      codex: new FlakyPermissionsClient(),
+    },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000136",
+  });
+
+  const agent = await manager.createAgent(
+    {
+      provider: "codex",
+      cwd: workdir,
+      title: "Permission catch-path recovery test",
+    },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  const stream = manager.streamAgent(agent.id, "permission flow");
+  await stream.next(); // turn_started
+  await stream.next(); // permission_requested perm-a
+  await stream.next(); // permission_requested perm-b
+
+  // Pin both arrival stamps to fixed, distinct past values instead of the real
+  // mint time, so the "fresh stamp" assertions below can't flake on Date.now()
+  // calls landing in the same millisecond.
+  const originalA = "2020-01-01T00:00:00.000Z";
+  const originalB = "2020-06-01T00:00:00.000Z";
+  const seededAgent = manager.getAgent(agent.id)!;
+  const seededA = seededAgent.pendingPermissions.get("perm-a");
+  const seededB = seededAgent.pendingPermissions.get("perm-b");
+  if (!seededA || !seededB) {
+    throw new Error("expected perm-a and perm-b to be pending after arrival");
+  }
+  seededAgent.pendingPermissions.set("perm-a", { ...seededA, requestedAt: originalA });
+  seededAgent.permissionRequestedAt.set("perm-a", originalA);
+  seededAgent.pendingPermissions.set("perm-b", { ...seededB, requestedAt: originalB });
+  seededAgent.permissionRequestedAt.set("perm-b", originalB);
+
+  if (!capturedSession) {
+    throw new Error("expected session to be captured");
+  }
+
+  capturedSession.shouldThrow = true;
+  await manager.respondToPermission(agent.id, "perm-does-not-exist", { behavior: "allow" });
+  expect(manager.getAgent(agent.id)?.pendingPermissions.size).toBe(0);
+  // The side map is pruned unconditionally alongside pendingPermissions, so the
+  // catch path empties it too - neither stamp survives the failed rebuild.
+  expect(manager.getAgent(agent.id)?.permissionRequestedAt.size).toBe(0);
+
+  capturedSession.shouldThrow = false;
+  await manager.respondToPermission(agent.id, "perm-does-not-exist", { behavior: "allow" });
+
+  const rebuiltA = manager.getAgent(agent.id)?.pendingPermissions.get("perm-a");
+  const rebuiltB = manager.getAgent(agent.id)?.pendingPermissions.get("perm-b");
+  expect(rebuiltA?.requestedAt).toBeDefined();
+  expect(rebuiltB?.requestedAt).toBeDefined();
+  expect(rebuiltA?.requestedAt).not.toBe(originalA);
+  expect(rebuiltB?.requestedAt).not.toBe(originalB);
+});
+
+test("respondToPermission clears the side-map stamp even when the trailing refreshSessionState throws", async () => {
+  const workdir = mkdtempSync(
+    join(tmpdir(), "agent-manager-permission-requested-at-resolve-throw-"),
+  );
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  // getPendingPermissions always throws here, so respondToPermission's trailing
+  // refreshSessionState call (wrapped in a swallow-all try/catch) always fails.
+  // The id must still be gone from permissionRequestedAt afterward, because
+  // respondToPermission deletes it directly rather than leaving cleanup to
+  // refreshSessionState's own (best-effort) prune.
+  class ThrowingRefreshSession extends TestAgentSession {
+    override async startTurn(): Promise<{ turnId: string }> {
+      const turnId = "turn-perm-resolve-throw";
+      setTimeout(() => {
+        this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+        this.pushEvent({
+          type: "permission_requested",
+          provider: this.provider,
+          request: { id: "perm-a", provider: this.provider, kind: "tool", name: "Read file" },
+          turnId,
+        });
+      }, 0);
+      return { turnId };
+    }
+
+    override async respondToPermission(): Promise<void> {
+      // Resolved on the provider's side - nothing further to do here.
+    }
+
+    override getPendingPermissions(): AgentPermissionRequest[] {
+      throw new Error("transient provider failure");
+    }
+  }
+
+  let capturedSession: ThrowingRefreshSession | null = null;
+
+  class ThrowingRefreshClient implements AgentClient {
+    readonly provider = "codex" as const;
+    readonly capabilities = TEST_CAPABILITIES;
+
+    async isAvailable(): Promise<boolean> {
+      return true;
+    }
+
+    async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      capturedSession = new ThrowingRefreshSession(config);
+      return capturedSession;
+    }
+
+    async resumeSession(config?: Partial<AgentSessionConfig>): Promise<AgentSession> {
+      capturedSession = new ThrowingRefreshSession({
+        provider: "codex",
+        cwd: config?.cwd ?? process.cwd(),
+      });
+      return capturedSession;
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: {
+      codex: new ThrowingRefreshClient(),
+    },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000138",
+  });
+
+  const agent = await manager.createAgent(
+    {
+      provider: "codex",
+      cwd: workdir,
+      title: "Respond-then-throw side-map cleanup test",
+    },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  const stream = manager.streamAgent(agent.id, "permission flow");
+  await stream.next(); // turn_started
+  await stream.next(); // permission_requested perm-a
+
+  // Pin the arrival stamp to a fixed past value instead of the real mint time,
+  // so the "fresh stamp" assertion below can't flake on two Date.now() calls
+  // landing in the same millisecond.
+  const originalRequestedAt = "2020-01-01T00:00:00.000Z";
+  const seededAgent = manager.getAgent(agent.id)!;
+  const seededRequest = seededAgent.pendingPermissions.get("perm-a");
+  if (!seededRequest) {
+    throw new Error("expected perm-a to be pending after arrival");
+  }
+  seededAgent.pendingPermissions.set("perm-a", {
+    ...seededRequest,
+    requestedAt: originalRequestedAt,
+  });
+  seededAgent.permissionRequestedAt.set("perm-a", originalRequestedAt);
+
+  await manager.respondToPermission(agent.id, "perm-a", { behavior: "allow" });
+
+  expect(manager.getAgent(agent.id)?.permissionRequestedAt.has("perm-a")).toBe(false);
+
+  if (!capturedSession) {
+    throw new Error("expected session to be captured");
+  }
+
+  // A provider that reuses request ids across turns sends a new request with
+  // the same id. Push it directly - the turn already completed, so there is
+  // no active startTurn to piggyback on.
+  capturedSession.pushEvent({
+    type: "permission_requested",
+    provider: "codex",
+    request: { id: "perm-a", provider: "codex", kind: "tool", name: "Read file" },
+    turnId: "turn-perm-resolve-throw",
+  });
+  await stream.next(); // permission_requested perm-a (reused id)
+
+  const reArrived = manager.getAgent(agent.id)?.pendingPermissions.get("perm-a");
+  expect(reArrived?.requestedAt).toBeDefined();
+  expect(reArrived?.requestedAt).not.toBe(originalRequestedAt);
+});
+
+test("a stale side-map entry for a no-longer-pending id does not leak into a reused request id", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-permission-requested-at-stale-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  class StalePermissionSession extends TestAgentSession {
+    override async startTurn(): Promise<{ turnId: string }> {
+      const turnId = "turn-perm-stale";
+      setTimeout(() => {
+        this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+        this.pushEvent({
+          type: "permission_requested",
+          provider: this.provider,
+          request: { id: "perm-stale", provider: this.provider, kind: "tool", name: "Read file" },
+          turnId,
+        });
+      }, 0);
+      return { turnId };
+    }
+  }
+
+  let capturedSession: StalePermissionSession | null = null;
+
+  class StalePermissionClient implements AgentClient {
+    readonly provider = "codex" as const;
+    readonly capabilities = TEST_CAPABILITIES;
+
+    async isAvailable(): Promise<boolean> {
+      return true;
+    }
+
+    async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      capturedSession = new StalePermissionSession(config);
+      return capturedSession;
+    }
+
+    async resumeSession(config?: Partial<AgentSessionConfig>): Promise<AgentSession> {
+      capturedSession = new StalePermissionSession({
+        provider: "codex",
+        cwd: config?.cwd ?? process.cwd(),
+      });
+      return capturedSession;
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: {
+      codex: new StalePermissionClient(),
+    },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000142",
+  });
+
+  const agent = await manager.createAgent(
+    {
+      provider: "codex",
+      cwd: workdir,
+      title: "Stale side-map entry test",
+    },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  const stream = manager.streamAgent(agent.id, "permission flow");
+  await stream.next(); // turn_started
+  await stream.next(); // permission_requested perm-stale
+
+  const managedAgent = manager.getAgent(agent.id)!;
+  const arrivedRequest = managedAgent.pendingPermissions.get("perm-stale");
+  expect(arrivedRequest?.requestedAt).toBeDefined();
+
+  // Pin the stale stamp to a fixed past value instead of the real mint time,
+  // so the "fresh stamp" assertion below can't flake on two Date.now() calls
+  // landing in the same millisecond.
+  const originalRequestedAt = "2020-01-01T00:00:00.000Z";
+
+  // Resolve the request through a path that forgets to clean up the side map
+  // (bypassing respondToPermission/onStreamPermissionResolved, both of which
+  // already delete their own id). This simulates a stale entry surviving by
+  // some other route, so the id is no longer pending but permissionRequestedAt
+  // still has an entry for it.
+  managedAgent.pendingPermissions.delete("perm-stale");
+  managedAgent.permissionRequestedAt.set("perm-stale", originalRequestedAt);
+  expect(managedAgent.permissionRequestedAt.get("perm-stale")).toBe(originalRequestedAt);
+
+  if (!capturedSession) {
+    throw new Error("expected session to be captured");
+  }
+
+  // The provider reuses "perm-stale" for a brand new, unrelated request.
+  capturedSession.pushEvent({
+    type: "permission_requested",
+    provider: "codex",
+    request: { id: "perm-stale", provider: "codex", kind: "tool", name: "Read file" },
+    turnId: "turn-perm-stale",
+  });
+  await stream.next(); // permission_requested perm-stale (reused id)
+
+  const reArrived = manager.getAgent(agent.id)?.pendingPermissions.get("perm-stale");
+  expect(reArrived?.requestedAt).toBeDefined();
+  expect(reArrived?.requestedAt).not.toBe(originalRequestedAt);
+});
+
+test("the dispatched permission_requested stream event carries the requestedAt stamp", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-permission-requested-at-event-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  class PermissionSession extends TestAgentSession {
+    override async startTurn(): Promise<{ turnId: string }> {
+      const turnId = "turn-perm-event";
+      setTimeout(() => {
+        this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+        this.pushEvent({
+          type: "permission_requested",
+          provider: this.provider,
+          request: {
+            id: "perm-event",
+            provider: this.provider,
+            kind: "tool",
+            name: "Read file",
+          },
+          turnId,
+        });
+      }, 0);
+      return { turnId };
+    }
+  }
+
+  class PermissionClient implements AgentClient {
+    readonly provider = "codex" as const;
+    readonly capabilities = TEST_CAPABILITIES;
+
+    async isAvailable(): Promise<boolean> {
+      return true;
+    }
+
+    async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new PermissionSession(config);
+    }
+
+    async resumeSession(config?: Partial<AgentSessionConfig>): Promise<AgentSession> {
+      return new PermissionSession({
+        provider: "codex",
+        cwd: config?.cwd ?? process.cwd(),
+      });
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: {
+      codex: new PermissionClient(),
+    },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000137",
+  });
+
+  const agent = await manager.createAgent(
+    {
+      provider: "codex",
+      cwd: workdir,
+      title: "Permission event stamp test",
+    },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  const permissionRequestedEvents: Array<
+    Extract<AgentStreamEvent, { type: "permission_requested" }>
+  > = [];
+  const unsubscribe = manager.subscribe(
+    (event) => {
+      if (event.type === "agent_stream" && event.event.type === "permission_requested") {
+        permissionRequestedEvents.push(event.event);
+      }
+    },
+    { agentId: agent.id, replayState: false },
+  );
+
+  const stream = manager.streamAgent(agent.id, "permission flow");
+  await stream.next(); // turn_started
+  await stream.next(); // permission_requested
+  unsubscribe();
+
+  expect(permissionRequestedEvents).toHaveLength(1);
+  const dispatchedRequest = permissionRequestedEvents[0]?.request;
+  expect(dispatchedRequest?.id).toBe("perm-event");
+  expect(dispatchedRequest?.requestedAt).toBeDefined();
+
+  const snapshotRequest = manager.getAgent(agent.id)?.pendingPermissions.get("perm-event");
+  expect(dispatchedRequest?.requestedAt).toBe(snapshotRequest?.requestedAt);
+});
+
+test("a replayed permission_requested for an already-pending id keeps the original requestedAt stamp", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-permission-requested-at-replay-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  class ReplayedPermissionSession extends TestAgentSession {
+    override async startTurn(): Promise<{ turnId: string }> {
+      const turnId = "turn-perm-replay";
+      setTimeout(() => {
+        this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+        this.pushEvent({
+          type: "permission_requested",
+          provider: this.provider,
+          request: { id: "perm-replay", provider: this.provider, kind: "tool", name: "Read file" },
+          turnId,
+        });
+        this.pushEvent({
+          type: "permission_requested",
+          provider: this.provider,
+          request: { id: "perm-replay", provider: this.provider, kind: "tool", name: "Read file" },
+          turnId,
+        });
+      }, 0);
+      return { turnId };
+    }
+  }
+
+  class ReplayedPermissionClient implements AgentClient {
+    readonly provider = "codex" as const;
+    readonly capabilities = TEST_CAPABILITIES;
+
+    async isAvailable(): Promise<boolean> {
+      return true;
+    }
+
+    async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new ReplayedPermissionSession(config);
+    }
+
+    async resumeSession(config?: Partial<AgentSessionConfig>): Promise<AgentSession> {
+      return new ReplayedPermissionSession({
+        provider: "codex",
+        cwd: config?.cwd ?? process.cwd(),
+      });
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: {
+      codex: new ReplayedPermissionClient(),
+    },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000139",
+  });
+
+  const agent = await manager.createAgent(
+    {
+      provider: "codex",
+      cwd: workdir,
+      title: "Replayed permission test",
+    },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  const permissionRequestedEvents: Array<
+    Extract<AgentStreamEvent, { type: "permission_requested" }>
+  > = [];
+  const unsubscribe = manager.subscribe(
+    (event) => {
+      if (event.type === "agent_stream" && event.event.type === "permission_requested") {
+        permissionRequestedEvents.push(event.event);
+      }
+    },
+    { agentId: agent.id, replayState: false },
+  );
+
+  const stream = manager.streamAgent(agent.id, "permission flow");
+  await stream.next(); // turn_started
+  await stream.next(); // permission_requested (first)
+  await stream.next(); // permission_requested (replay)
+  unsubscribe();
+
+  expect(permissionRequestedEvents).toHaveLength(2);
+  const firstStamp = permissionRequestedEvents[0]?.request.requestedAt;
+  const secondStamp = permissionRequestedEvents[1]?.request.requestedAt;
+  expect(firstStamp).toBeDefined();
+  expect(secondStamp).toBe(firstStamp);
+});
+
+test("turn_failed with a pending permission clears the requestedAt side map entry", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-permission-requested-at-turn-failed-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  class TurnFailedWithPermissionSession extends TestAgentSession {
+    override async startTurn(): Promise<{ turnId: string }> {
+      const turnId = "turn-perm-fail";
+      setTimeout(() => {
+        this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+        this.pushEvent({
+          type: "permission_requested",
+          provider: this.provider,
+          request: { id: "perm-fail", provider: this.provider, kind: "tool", name: "Read file" },
+          turnId,
+        });
+        this.pushEvent({
+          type: "turn_failed",
+          provider: this.provider,
+          error: "provider crashed",
+          turnId,
+        });
+      }, 0);
+      return { turnId };
+    }
+  }
+
+  class TurnFailedWithPermissionClient implements AgentClient {
+    readonly provider = "codex" as const;
+    readonly capabilities = TEST_CAPABILITIES;
+
+    async isAvailable(): Promise<boolean> {
+      return true;
+    }
+
+    async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new TurnFailedWithPermissionSession(config);
+    }
+
+    async resumeSession(config?: Partial<AgentSessionConfig>): Promise<AgentSession> {
+      return new TurnFailedWithPermissionSession({
+        provider: "codex",
+        cwd: config?.cwd ?? process.cwd(),
+      });
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: {
+      codex: new TurnFailedWithPermissionClient(),
+    },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000140",
+  });
+
+  const agent = await manager.createAgent(
+    {
+      provider: "codex",
+      cwd: workdir,
+      title: "Turn failed with pending permission test",
+    },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  await expect(manager.runAgent(agent.id, "hello")).rejects.toThrow("provider crashed");
+
+  const snapshot = manager.getAgent(agent.id);
+  expect(snapshot?.pendingPermissions.size).toBe(0);
+  expect(snapshot?.permissionRequestedAt.size).toBe(0);
 });
 
 test("respondToPermission updates currentModeId after plan approval", async () => {

@@ -198,6 +198,9 @@ jobs:
       - name: Typecheck plugin examples
         run: npm run typecheck --workspace=@getpaseo/plugin
 
+      - name: Run plugin example tests
+        run: npx vitest run plugin-examples --bail=1
+
       - name: Run protocol tests
         run: npm run test --workspace=@getpaseo/protocol
 

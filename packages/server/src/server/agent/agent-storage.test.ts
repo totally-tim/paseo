@@ -112,6 +112,7 @@ function createManagedAgent(overrides: ManagedAgentOverrides = {}): ManagedAgent
     availableModes: overrides.availableModes ?? [],
     currentModeId: overrides.currentModeId ?? core.config.modeId ?? null,
     pendingPermissions: overrides.pendingPermissions ?? new Map<string, AgentPermissionRequest>(),
+    permissionRequestedAt: new Map<string, string>(),
     activeForegroundTurnId: core.activeForegroundTurnId,
     foregroundTurnWaiters: new Set(),
     unsubscribeSession: null,

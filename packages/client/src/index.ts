@@ -3,6 +3,8 @@ export type { OwnedSubscription, SubscriptionObserver } from "./connection/index
 import type { DaemonClientConfig } from "./daemon-client.js";
 import type {
   AgentSnapshotPayload,
+  CheckoutPrStatusResponse,
+  CheckoutStatusResponse,
   CreateAgentRequestMessage,
   FetchWorkspacesRequestMessage,
   FetchWorkspacesResponseMessage,
@@ -20,6 +22,7 @@ import type {
   ProviderDiagnosticResponseMessage,
   ProviderUsageListResponseMessage,
   ProjectPlacementPayload,
+  SubscribeCheckoutDiffResponse,
   WorkspaceProjectDescriptorPayload,
   RefreshProvidersSnapshotResponseMessage,
   SendAgentMessageRequest,
@@ -480,6 +483,40 @@ export interface PaseoConfigActions {
   ): Promise<{ requestId: string; config: MutableDaemonConfig }>;
 }
 
+export type PaseoCheckoutStatusResult = CheckoutStatusResponse["payload"];
+export type PaseoCheckoutPrStatusResult = CheckoutPrStatusResponse["payload"];
+export type PaseoCheckoutDiffResult = Omit<
+  SubscribeCheckoutDiffResponse["payload"],
+  "subscriptionId"
+>;
+export interface PaseoCheckoutDiffCompare {
+  mode: "uncommitted" | "base";
+  baseRef?: string;
+  ignoreWhitespace?: boolean;
+}
+export interface PaseoCheckoutActions {
+  /** Git status for a checkout: branch, dirty state, ahead/behind. */
+  status(cwd: string, requestId?: string): Promise<PaseoCheckoutStatusResult>;
+  /** Change-request status for a checkout: PR/MR state, checks, review decision. */
+  prStatus(cwd: string, requestId?: string): Promise<PaseoCheckoutPrStatusResult>;
+  /** One-shot parsed diff. Prefer file metadata over `files[].hunks` for summaries. */
+  diff(
+    cwd: string,
+    compare: PaseoCheckoutDiffCompare,
+    requestId?: string,
+  ): Promise<PaseoCheckoutDiffResult>;
+}
+
+/** `schedules.list` throws on the daemon's `error`, so the result never carries one. */
+export type PaseoScheduleListResult = Omit<
+  Extract<SessionOutboundMessage, { type: "schedule/list/response" }>["payload"],
+  "error"
+>;
+export type PaseoScheduleSummary = PaseoScheduleListResult["schedules"][number];
+export interface PaseoScheduleActions {
+  list(requestId?: string): Promise<PaseoScheduleListResult>;
+}
+
 export interface PaseoApi {
   dispose(): Promise<void>;
   observeEvents: DaemonClient["observeEvents"];
@@ -489,6 +526,10 @@ export interface PaseoApi {
   readonly agents: PaseoAgentActions;
   readonly providers: PaseoProviderActions;
   readonly config: PaseoConfigActions;
+  /** Absent on hosts older than the checkout feature contract — probe before use. */
+  readonly checkout?: PaseoCheckoutActions;
+  /** Absent on hosts older than the schedules feature contract — probe before use. */
+  readonly schedules?: PaseoScheduleActions;
 }
 
 export interface PaseoClient extends PaseoApi {
@@ -505,19 +546,25 @@ export function createPaseoClient(config: PaseoClientConfig): PaseoClient {
     clientType: "cli",
   });
   const api = createPaseoApi(daemonClient);
-  return {
-    ...api,
-    connect: () => daemonClient.connect(),
-    close: async () => {
-      try {
-        await api.dispose();
-      } finally {
-        await daemonClient.close();
-      }
+  // Object spread would evaluate the checkout/schedules getters on createPaseoApi's
+  // result once, at construction time, and freeze whatever they returned then -
+  // almost always undefined, since server_info hasn't arrived yet. Copying property
+  // descriptors instead keeps those getters live on the returned client.
+  return Object.defineProperties(
+    {
+      connect: () => daemonClient.connect(),
+      close: async () => {
+        try {
+          await api.dispose();
+        } finally {
+          await daemonClient.close();
+        }
+      },
+      ensureConnected: () => daemonClient.ensureConnected(),
+      getConnectionState: () => daemonClient.getConnectionState(),
     },
-    ensureConnected: () => daemonClient.ensureConnected(),
-    getConnectionState: () => daemonClient.getConnectionState(),
-  };
+    Object.getOwnPropertyDescriptors(api),
+  ) as PaseoClient;
 }
 
 export function createPaseoApi(
@@ -597,6 +644,18 @@ export function createPaseoApi(
     terminals,
     listenWorkspaces,
   );
+  const checkoutActions: PaseoCheckoutActions = {
+    status: (cwd, requestId) => daemonClient.getCheckoutStatus(cwd, { requestId }),
+    prStatus: (cwd, requestId) => daemonClient.checkoutPrStatus(cwd, requestId),
+    diff: (cwd, compare, requestId) => daemonClient.getCheckoutDiff(cwd, compare, requestId),
+  };
+  const scheduleActions: PaseoScheduleActions = {
+    list: async (requestId) => {
+      const payload = await daemonClient.scheduleList(requestId);
+      if (payload.error) throw new Error(payload.error);
+      return payload;
+    },
+  };
 
   let disposal: Promise<void> | null = null;
   const dispose = (): Promise<void> => {
@@ -752,6 +811,18 @@ export function createPaseoApi(
     config: {
       get: (requestId) => daemonClient.getDaemonConfig(requestId),
       patch: (patch, requestId) => daemonClient.patchDaemonConfig(patch, requestId),
+    },
+    // COMPAT(sdk-checkout-schedules): added in v0.8.0 (fork), remove after 2026-12-01.
+    // Before server_info arrives the host is unknown, so the group stays available and its RPCs fail loudly like every other call; only a host that has reported its features without the flag hides the group.
+    get checkout() {
+      const info = daemonClient.getLastServerInfoMessage();
+      return info && info.features?.checkoutInspection !== true ? undefined : checkoutActions;
+    },
+    // COMPAT(sdk-checkout-schedules): added in v0.8.0 (fork), remove after 2026-12-01.
+    // Before server_info arrives the host is unknown, so the group stays available and its RPCs fail loudly like every other call; only a host that has reported its features without the flag hides the group.
+    get schedules() {
+      const info = daemonClient.getLastServerInfoMessage();
+      return info && info.features?.scheduleList !== true ? undefined : scheduleActions;
     },
   };
 }

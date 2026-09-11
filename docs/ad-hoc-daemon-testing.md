@@ -89,7 +89,7 @@ await client.close();
 await daemon.close(); // stops daemon + cleans up temp dirs
 ```
 
-The test helper does **not** expose `providerOverrides`. In test harnesses, use `createPaseoDaemon` directly when you need it (see quick start above).
+To create agents without a real provider, pass `isDev: true` together with `agentClients: { mock: new MockLoadTestAgentClient() }`. The mock provider is registered in dev builds only, so without `isDev` the daemon answers `Provider mock is not configured`. The helper also accepts `providerOverrides` to disable the real providers.
 
 ## Common client methods
 

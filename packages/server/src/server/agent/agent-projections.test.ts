@@ -77,6 +77,7 @@ function createManagedAgent(overrides: ManagedAgentOverrides = {}): ManagedAgent
     ],
     currentModeId: "plan",
     pendingPermissions: pendingPermissionsOverride ?? new Map<string, AgentPermissionRequest>(),
+    permissionRequestedAt: new Map<string, string>(),
     activeForegroundTurnId: activeForegroundTurnIdValue,
     activeTurnId: activeForegroundTurnIdValue,
     activeTurnStartedAt: lifecycle === "running" ? new Date("2025-01-01T00:00:01.000Z") : null,

@@ -524,6 +524,8 @@ export interface AgentPermissionRequest {
   suggestions?: AgentPermissionUpdate[];
   actions?: AgentPermissionAction[];
   metadata?: AgentMetadata;
+  /** ISO 8601 timestamp set by the daemon when the request is first seen. */
+  requestedAt?: string;
 }
 
 export type AgentPermissionResponse =

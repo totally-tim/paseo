@@ -91,6 +91,7 @@ function makeManagedAgent(args: {
     availableModes: [],
     currentModeId: null,
     pendingPermissions: new Map(),
+    permissionRequestedAt: new Map(),
     bufferedPermissionResolutions: new Map(),
     inFlightPermissionResponses: new Set(),
     pendingReplacement: false,

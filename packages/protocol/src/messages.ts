@@ -559,6 +559,7 @@ export const AgentPermissionRequestPayloadSchema: z.ZodType<AgentPermissionReque
     suggestions: z.array(AgentPermissionUpdateSchema).optional(),
     actions: z.array(AgentPermissionActionSchema).optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
+    requestedAt: z.string().optional(),
   });
 
 const UnknownValueSchema = z.union([
@@ -3870,6 +3871,12 @@ export const ServerInfoStatusPayloadSchema = z
         agentProfiles: z.boolean().optional(),
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.
         agentConfigApply: z.boolean().optional(),
+        // COMPAT(permissionRequestedAt): added in v0.8.0, remove gate after 2027-03-11 once daemon floor >= v0.8.0. Pending permission requests carry requestedAt.
+        permissionRequestedAt: z.boolean().optional(),
+        // COMPAT(checkoutInspection): added in v0.8.0, remove gate after 2027-03-11 once daemon floor >= v0.8.0. The daemon serves checkout_status, checkout_pr_status, and one-shot checkout diff requests.
+        checkoutInspection: z.boolean().optional(),
+        // COMPAT(scheduleList): added in v0.8.0, remove gate after 2027-03-11 once daemon floor >= v0.8.0. The daemon serves schedule/list.
+        scheduleList: z.boolean().optional(),
       })
       .optional(),
   })
