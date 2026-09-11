@@ -53,7 +53,9 @@ From a human shell, a bare `paseo run` creates a new local workspace for the cur
 
 Worktree creation accepts `--worktree-mode branch-off|checkout-branch|checkout-pr` plus the matching `--new-branch`/`--base`, `--branch`, or `--pr-number`/`--forge` options. Use `--worktree-slug` to choose the managed directory slug.
 
-When an existing Paseo agent runs the same command, Paseo recognizes it through `PASEO_AGENT_ID`. Without explicit placement, the new agent becomes its subagent in the same workspace. `--workspace` can place that subagent elsewhere without changing its parent.
+When an existing Paseo agent runs the same command, Paseo recognizes it through `PASEO_AGENT_ID`. Without explicit placement, the new agent becomes its subagent in the same workspace, editing the same checkout as its parent. `--workspace` can place that subagent elsewhere without changing its parent.
+
+Set `PASEO_AGENT_SPAWN_ISOLATION=worktree` in the agent environment to make every agent-spawned run mint its own managed worktree instead of sharing the parent checkout. The variable only takes the value `worktree`; anything else keeps the default. Export it from your shell profile, or per provider with `agents.providers.<id>.env` in the daemon config, so every `paseo run` from an agent gets an isolated working tree.
 
 Use `--output-schema` to return only matching JSON output. You can pass a schema file path or an inline JSON schema object. This mode cannot be used with `--background`.
 
@@ -356,7 +358,7 @@ paseo wait "$agent_id"
 paseo logs "$agent_id" --tail 5
 ```
 
-Because Agent A's ID is present in the environment, Agent B is created as its subagent in the same workspace unless `--workspace` is specified.
+Because Agent A's ID is present in the environment, Agent B is created as its subagent in the same workspace unless `--workspace` is specified. Agents editing the same checkout overwrite each other's files, so give parallel workers their own checkout with `--new-workspace worktree`, or set `PASEO_AGENT_SPAWN_ISOLATION=worktree` to make that the default.
 
 Simple implement + verify loop:
 
