@@ -3322,6 +3322,256 @@ export const SubscriptionReleaseResponseSchema = z.object({
   payload: z.object({ requestId: z.string(), subscriptionId: z.string() }),
 });
 
+// ============================================================================
+// Coordinator Messages
+// ============================================================================
+
+/**
+ * What a wake may do without asking. Each level is a strict superset of the one
+ * below; milestone 1 daemons only run coordinators at `observe`.
+ */
+export const CoordinatorTrustLevelSchema = z.enum(["observe", "propose", "ship", "autopilot"]);
+export type CoordinatorTrustLevel = z.infer<typeof CoordinatorTrustLevelSchema>;
+
+/** What a project coordinator watches: its repository plus (everything) or excluding (project) your own sessions. */
+export const CoordinatorScopeSchema = z.enum(["everything", "project"]);
+export type CoordinatorScope = z.infer<typeof CoordinatorScopeSchema>;
+
+/**
+ * A provider-plus-selections launch bundle, fielded the way `AgentSessionConfig`
+ * carries them. Used for the coordinator session itself (`profile`) and for each
+ * named delegate profile (`profiles`).
+ */
+export const CoordinatorProfileSelectionSchema = z.object({
+  provider: AgentProviderSchema,
+  accountSelection: AccountSelectionSchema.optional(),
+  model: z.string().optional(),
+  modeId: z.string().optional(),
+  thinkingOptionId: z.string().optional(),
+  featureValues: z.record(z.string(), z.unknown()).optional(),
+});
+export type CoordinatorProfileSelection = z.infer<typeof CoordinatorProfileSelectionSchema>;
+
+/**
+ * Delegate launch selections by role name (investigator, implementer, reviewer,
+ * fallback). Open record on purpose: compiled goal rules reference profiles by
+ * name, and later milestones add roles without a schema change.
+ */
+export const CoordinatorProfilesSchema = z.record(z.string(), CoordinatorProfileSelectionSchema);
+export type CoordinatorProfiles = z.infer<typeof CoordinatorProfilesSchema>;
+
+/** Soft monthly numbers per project; crossing one writes a board row and pauses nothing. */
+export const CoordinatorUsageExpectationSchema = z.object({
+  monthlySpawns: z.number().int().positive().optional(),
+  monthlyTokens: z.number().int().positive().optional(),
+});
+export type CoordinatorUsageExpectation = z.infer<typeof CoordinatorUsageExpectationSchema>;
+
+export const CoordinatorDecisionBoardRowSchema = z.object({
+  kind: z.literal("decision"),
+  id: z.string(),
+  projectId: z.string(),
+  /** The session asking. */
+  agentId: z.string(),
+  /** The permission request this row resolves through. */
+  requestId: z.string(),
+  question: z.string(),
+  askedAt: z.string(),
+  /** Renderable answers; the id maps to the permission request's action id. */
+  actions: z.array(z.object({ id: z.string(), label: z.string() })),
+  /** The answer the daemon applies when `dueAt` passes. Decision timers ship in a later milestone. */
+  defaultAnswerLabel: z.string().optional(),
+  dueAt: z.string().optional(),
+  waitingMs: z.number().int().nonnegative().optional(),
+});
+export type CoordinatorDecisionBoardRow = z.infer<typeof CoordinatorDecisionBoardRowSchema>;
+
+export const CoordinatorWorkingBoardRowSchema = z.object({
+  kind: z.literal("working"),
+  id: z.string(),
+  projectId: z.string(),
+  agentId: z.string(),
+  /** First line of the session's goal or your first message. */
+  goal: z.string(),
+  startedAt: z.string(),
+  provider: z.string(),
+  /** True for your own sessions under `everything` scope. */
+  yours: z.boolean(),
+});
+export type CoordinatorWorkingBoardRow = z.infer<typeof CoordinatorWorkingBoardRowSchema>;
+
+export const CoordinatorDoneBoardRowLinkSchema = z.object({
+  url: z.string().optional(),
+  agentId: z.string().optional(),
+  filePath: z.string().optional(),
+});
+export type CoordinatorDoneBoardRowLink = z.infer<typeof CoordinatorDoneBoardRowLinkSchema>;
+
+export const CoordinatorDoneBoardRowSchema = z.object({
+  kind: z.literal("done"),
+  id: z.string(),
+  projectId: z.string(),
+  /** Verb-first outcome line. */
+  text: z.string(),
+  at: z.string(),
+  link: CoordinatorDoneBoardRowLinkSchema.optional(),
+});
+export type CoordinatorDoneBoardRow = z.infer<typeof CoordinatorDoneBoardRowSchema>;
+
+/** One per project; the daemon keeps the latest wake only. */
+export const CoordinatorWakeBoardRowSchema = z.object({
+  kind: z.literal("wake"),
+  id: z.string(),
+  projectId: z.string(),
+  text: z.string(),
+  level: CoordinatorTrustLevelSchema,
+  at: z.string(),
+});
+export type CoordinatorWakeBoardRow = z.infer<typeof CoordinatorWakeBoardRowSchema>;
+
+export const CoordinatorBoardRowSchema = z.discriminatedUnion("kind", [
+  CoordinatorDecisionBoardRowSchema,
+  CoordinatorWorkingBoardRowSchema,
+  CoordinatorDoneBoardRowSchema,
+  CoordinatorWakeBoardRowSchema,
+]);
+export type CoordinatorBoardRow = z.infer<typeof CoordinatorBoardRowSchema>;
+
+/**
+ * One project's board. `done` arrives capped and sorted server-side. The global
+ * board is the union of per-project snapshots; a global snapshot type lands with
+ * the global tier in a later milestone.
+ */
+export const CoordinatorBoardSnapshotSchema = z.object({
+  projectId: z.string(),
+  projectName: z.string().optional(),
+  needsYou: z.array(CoordinatorDecisionBoardRowSchema),
+  working: z.array(CoordinatorWorkingBoardRowSchema),
+  done: z.array(CoordinatorDoneBoardRowSchema),
+  wake: CoordinatorWakeBoardRowSchema.nullable(),
+  /** The live coordinator session; null while none is running. */
+  coordinatorAgentId: z.string().nullable(),
+  trustLevel: CoordinatorTrustLevelSchema,
+  scope: CoordinatorScopeSchema,
+  enabled: z.boolean(),
+});
+export type CoordinatorBoardSnapshot = z.infer<typeof CoordinatorBoardSnapshotSchema>;
+
+/** The canonical coordinator record returned by every `coordinator.project.*` response. */
+export const ProjectCoordinatorStateSchema = z.object({
+  projectId: z.string(),
+  /** The coordinator session; null while none is running (disabled or not yet created). */
+  agentId: z.string().nullable(),
+  enabled: z.boolean(),
+  trustLevel: CoordinatorTrustLevelSchema,
+  scope: CoordinatorScopeSchema,
+  /** The coordinator session's own launch bundle. */
+  profile: CoordinatorProfileSelectionSchema.optional(),
+  profiles: CoordinatorProfilesSchema.optional(),
+  usageExpectation: CoordinatorUsageExpectationSchema.optional(),
+});
+export type ProjectCoordinatorState = z.infer<typeof ProjectCoordinatorStateSchema>;
+
+export const CoordinatorProjectEnableRequestSchema = z.object({
+  type: z.literal("coordinator.project.enable.request"),
+  requestId: z.string(),
+  projectId: z.string(),
+  /** Launch bundle for the coordinator session itself. */
+  profile: CoordinatorProfileSelectionSchema,
+  profiles: CoordinatorProfilesSchema.optional(),
+  /** Both default server-side: trust to `observe`, scope to `everything`. */
+  trustLevel: CoordinatorTrustLevelSchema.optional(),
+  scope: CoordinatorScopeSchema.optional(),
+});
+export type CoordinatorProjectEnableRequest = z.infer<typeof CoordinatorProjectEnableRequestSchema>;
+
+export const CoordinatorProjectDisableRequestSchema = z.object({
+  type: z.literal("coordinator.project.disable.request"),
+  requestId: z.string(),
+  projectId: z.string(),
+});
+export type CoordinatorProjectDisableRequest = z.infer<
+  typeof CoordinatorProjectDisableRequestSchema
+>;
+
+export const CoordinatorProjectUpdateRequestSchema = z.object({
+  type: z.literal("coordinator.project.update.request"),
+  requestId: z.string(),
+  projectId: z.string(),
+  profile: CoordinatorProfileSelectionSchema.optional(),
+  profiles: CoordinatorProfilesSchema.optional(),
+  trustLevel: CoordinatorTrustLevelSchema.optional(),
+  scope: CoordinatorScopeSchema.optional(),
+  /** Null clears the expectation. */
+  usageExpectation: CoordinatorUsageExpectationSchema.nullable().optional(),
+});
+export type CoordinatorProjectUpdateRequest = z.infer<typeof CoordinatorProjectUpdateRequestSchema>;
+
+export const CoordinatorProjectGetRequestSchema = z.object({
+  type: z.literal("coordinator.project.get.request"),
+  requestId: z.string(),
+  projectId: z.string(),
+});
+export type CoordinatorProjectGetRequest = z.infer<typeof CoordinatorProjectGetRequestSchema>;
+
+const CoordinatorProjectStateResultSchema = z.object({
+  requestId: z.string(),
+  coordinator: ProjectCoordinatorStateSchema.nullable(),
+  error: z.string().nullable(),
+});
+
+export const CoordinatorProjectEnableResponseSchema = z.object({
+  type: z.literal("coordinator.project.enable.response"),
+  payload: CoordinatorProjectStateResultSchema,
+});
+export const CoordinatorProjectDisableResponseSchema = z.object({
+  type: z.literal("coordinator.project.disable.response"),
+  payload: CoordinatorProjectStateResultSchema,
+});
+export const CoordinatorProjectUpdateResponseSchema = z.object({
+  type: z.literal("coordinator.project.update.response"),
+  payload: CoordinatorProjectStateResultSchema,
+});
+export const CoordinatorProjectGetResponseSchema = z.object({
+  type: z.literal("coordinator.project.get.response"),
+  payload: CoordinatorProjectStateResultSchema,
+});
+
+/**
+ * Subscribing creates an owned subscription: the response carries the initial
+ * snapshots and later `coordinator.board.changed` messages arrive with the same
+ * `subscriptionId`. `projectId` absent means every project on the daemon.
+ */
+export const CoordinatorBoardSubscribeRequestSchema = z.object({
+  type: z.literal("coordinator.board.subscribe.request"),
+  requestId: z.string(),
+  projectId: z.string().optional(),
+});
+export type CoordinatorBoardSubscribeRequest = z.infer<
+  typeof CoordinatorBoardSubscribeRequestSchema
+>;
+
+export const CoordinatorBoardSubscribeResponseSchema = z.object({
+  type: z.literal("coordinator.board.subscribe.response"),
+  payload: z.object({
+    requestId: z.string(),
+    subscriptionId: z.string(),
+    /** Echoes the request filter; null when subscribed to every project. */
+    projectId: z.string().nullable(),
+    snapshots: z.array(CoordinatorBoardSnapshotSchema),
+    error: z.string().nullable(),
+  }),
+});
+
+export const CoordinatorBoardChangedSchema = z.object({
+  type: z.literal("coordinator.board.changed"),
+  payload: z.object({
+    subscriptionId: z.string().optional(),
+    projectId: z.string(),
+    snapshot: CoordinatorBoardSnapshotSchema,
+  }),
+});
+
 export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   BrowserHostRegisterRequestSchema,
   SubscriptionReleaseRequestSchema,
@@ -3534,6 +3784,11 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   LoopInspectRequestSchema,
   LoopLogsRequestSchema,
   LoopStopRequestSchema,
+  CoordinatorProjectEnableRequestSchema,
+  CoordinatorProjectDisableRequestSchema,
+  CoordinatorProjectUpdateRequestSchema,
+  CoordinatorProjectGetRequestSchema,
+  CoordinatorBoardSubscribeRequestSchema,
 ]);
 
 export type SessionInboundMessage = z.infer<typeof SessionInboundMessageSchema>;
@@ -3877,6 +4132,8 @@ export const ServerInfoStatusPayloadSchema = z
         checkoutInspection: z.boolean().optional(),
         // COMPAT(scheduleList): added in v0.8.0, remove gate after 2027-03-11 once daemon floor >= v0.8.0. The daemon serves schedule/list.
         scheduleList: z.boolean().optional(),
+        // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-11. The daemon serves coordinator.project.* and coordinator.board.* and pushes coordinator.board.changed.
+        coordinator: z.boolean().optional(),
       })
       .optional(),
   })
@@ -7069,6 +7326,12 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   LoopStopResponseSchema,
   DaemonUpdateProgressMessageSchema,
   DaemonUpdateResponseSchema,
+  CoordinatorProjectEnableResponseSchema,
+  CoordinatorProjectDisableResponseSchema,
+  CoordinatorProjectUpdateResponseSchema,
+  CoordinatorProjectGetResponseSchema,
+  CoordinatorBoardSubscribeResponseSchema,
+  CoordinatorBoardChangedSchema,
 ]);
 
 export type SessionOutboundMessage = z.infer<typeof SessionOutboundMessageSchema>;

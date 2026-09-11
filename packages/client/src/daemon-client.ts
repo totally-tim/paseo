@@ -116,6 +116,12 @@ import type {
   PaseoConfigRevision,
   WorkspaceCreateRequest,
   WorkspaceRecoveryState,
+  CoordinatorProfileSelection,
+  CoordinatorProfiles,
+  CoordinatorScope,
+  CoordinatorTrustLevel,
+  CoordinatorUsageExpectation,
+  ProjectCoordinatorState,
   PluginListItem,
   PluginLogEntry,
   PluginSourceStatusItem,
@@ -561,6 +567,41 @@ type ScheduleUpdatePayload = Extract<
 >["payload"];
 export type FetchAgentTimelinePayload = FetchAgentTimelineResponseMessage["payload"];
 export type AgentForkContextPayload = AgentForkContextResponseMessage["payload"];
+
+export type CoordinatorBoardSubscribePayload = Extract<
+  SessionOutboundMessage,
+  { type: "coordinator.board.subscribe.response" }
+>["payload"];
+
+export interface EnableProjectCoordinatorOptions {
+  projectId: string;
+  /** Launch bundle for the coordinator session itself. */
+  profile: CoordinatorProfileSelection;
+  /** Named delegate launch selections (investigator, implementer, ...). */
+  profiles?: CoordinatorProfiles;
+  trustLevel?: CoordinatorTrustLevel;
+  scope?: CoordinatorScope;
+  requestId?: string;
+}
+
+export interface UpdateProjectCoordinatorOptions {
+  projectId: string;
+  profile?: CoordinatorProfileSelection;
+  profiles?: CoordinatorProfiles;
+  trustLevel?: CoordinatorTrustLevel;
+  scope?: CoordinatorScope;
+  /** Null clears the expectation. */
+  usageExpectation?: CoordinatorUsageExpectation | null;
+  requestId?: string;
+}
+
+export interface ObserveCoordinatorBoardOptions {
+  /** Absent means every project on the daemon. */
+  projectId?: string;
+  signal?: AbortSignal;
+  requestId?: string;
+  timeout?: number;
+}
 
 export type FetchAgentTimelineDirection = FetchAgentTimelinePayload["direction"];
 export type FetchAgentTimelineProjection = FetchAgentTimelinePayload["projection"];
@@ -2112,13 +2153,20 @@ export class DaemonClient {
   private observe<T extends CorrelatedResponseType>(
     responseType: T,
     message: { type: SessionInboundMessage["type"] } & Record<string, unknown>,
-    options?: { requestId?: string; timeout?: number; signal?: AbortSignal },
+    options?: {
+      requestId?: string;
+      timeout?: number;
+      signal?: AbortSignal;
+      /** Checked when the (re)subscription request runs, after server_info arrives. */
+      requireFeature?: () => void;
+    },
   ): OwnedSubscription<CorrelatedResponsePayload<T>> {
     let resetSource = false;
     return this.owned.observe<CorrelatedResponsePayload<T>>(
       async (accept) => {
         resetSource = false;
         this.requireOwnedSubscriptions();
+        options?.requireFeature?.();
         const requestId = this.createRequestId(options?.requestId);
         const request = SessionInboundMessageSchema.parse({ ...message, requestId });
         try {
@@ -2906,6 +2954,119 @@ export class DaemonClient {
     if (!payload.accepted) {
       throw new Error(payload.error ?? "updateAgent rejected");
     }
+  }
+
+  // ============================================================================
+  // Coordinator
+  // ============================================================================
+
+  private requireCoordinatorSupport(): void {
+    if (this.lastServerInfoMessage?.features?.coordinator !== true) {
+      throw new Error("Update this host to use project coordinators.");
+    }
+  }
+
+  async enableProjectCoordinator(
+    options: EnableProjectCoordinatorOptions,
+  ): Promise<ProjectCoordinatorState> {
+    this.requireCoordinatorSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.project.enable.response">({
+        requestId: options.requestId,
+        message: {
+          type: "coordinator.project.enable.request",
+          projectId: options.projectId,
+          profile: options.profile,
+          ...(options.profiles ? { profiles: options.profiles } : {}),
+          ...(options.trustLevel ? { trustLevel: options.trustLevel } : {}),
+          ...(options.scope ? { scope: options.scope } : {}),
+        },
+      });
+    if (payload.error || !payload.coordinator) {
+      throw new Error(payload.error ?? "enableProjectCoordinator rejected");
+    }
+    return payload.coordinator;
+  }
+
+  async disableProjectCoordinator(
+    projectId: string,
+    requestId?: string,
+  ): Promise<ProjectCoordinatorState> {
+    this.requireCoordinatorSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.project.disable.response">({
+        requestId,
+        message: { type: "coordinator.project.disable.request", projectId },
+      });
+    if (payload.error || !payload.coordinator) {
+      throw new Error(payload.error ?? "disableProjectCoordinator rejected");
+    }
+    return payload.coordinator;
+  }
+
+  async updateProjectCoordinator(
+    options: UpdateProjectCoordinatorOptions,
+  ): Promise<ProjectCoordinatorState> {
+    this.requireCoordinatorSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.project.update.response">({
+        requestId: options.requestId,
+        message: {
+          type: "coordinator.project.update.request",
+          projectId: options.projectId,
+          ...(options.profile ? { profile: options.profile } : {}),
+          ...(options.profiles ? { profiles: options.profiles } : {}),
+          ...(options.trustLevel ? { trustLevel: options.trustLevel } : {}),
+          ...(options.scope ? { scope: options.scope } : {}),
+          ...(options.usageExpectation !== undefined
+            ? { usageExpectation: options.usageExpectation }
+            : {}),
+        },
+      });
+    if (payload.error || !payload.coordinator) {
+      throw new Error(payload.error ?? "updateProjectCoordinator rejected");
+    }
+    return payload.coordinator;
+  }
+
+  /** The project's coordinator state, or null when none is configured. */
+  async getProjectCoordinator(
+    projectId: string,
+    requestId?: string,
+  ): Promise<ProjectCoordinatorState | null> {
+    this.requireCoordinatorSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.project.get.response">({
+        requestId,
+        message: { type: "coordinator.project.get.request", projectId },
+      });
+    if (payload.error) {
+      throw new Error(payload.error);
+    }
+    return payload.coordinator;
+  }
+
+  /**
+   * Subscribes to coordinator board snapshots. Observers receive the response
+   * snapshot and every later `coordinator.board.changed` routed by subscriptionId;
+   * `client.on("coordinator.board.changed", handler)` sees the same messages raw.
+   */
+  observeCoordinatorBoard(
+    options: ObserveCoordinatorBoardOptions = {},
+  ): OwnedSubscription<CoordinatorBoardSubscribePayload> {
+    return this.observe(
+      "coordinator.board.subscribe.response",
+      {
+        type: "coordinator.board.subscribe.request",
+        ...(options.projectId !== undefined ? { projectId: options.projectId } : {}),
+      },
+      {
+        signal: options.signal,
+        requestId: options.requestId,
+        timeout: options.timeout,
+        requireFeature: () => this.requireCoordinatorSupport(),
+      },
+    );
   }
 
   async renameProject(

@@ -731,6 +731,7 @@ test("advertises client capabilities in hello", async () => {
       timeline_notifications: true,
       plugin_timeline_items: true,
       workspace_setup_blocked: true,
+      coordinator: true,
       browser_host: {
         supportedCommands: ["list_tabs"],
         hostKind: "desktop app",
@@ -6307,4 +6308,227 @@ test("wire snapshot callers own expansion and receive hash references unchanged"
     wrapSessionMessage({ type: "get_providers_snapshot_response", payload: body }),
   );
   expect(await request).toEqual(body);
+});
+
+test("enables a project coordinator and resolves its state", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "coordinator-enable",
+    logger: createMockLogger(),
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen({ features: { ownedSubscriptions: true, coordinator: true } });
+  await connectPromise;
+
+  const state = {
+    projectId: "project-1",
+    agentId: "agent-coordinator",
+    enabled: true,
+    trustLevel: "observe",
+    scope: "everything",
+  };
+  const promise = client.enableProjectCoordinator({
+    projectId: "project-1",
+    profile: { provider: "claude", model: "opus" },
+    profiles: { investigator: { provider: "codex" } },
+  });
+  await vi.waitFor(() => expect(mock.sent).toHaveLength(1));
+  const request = parseSentFrame(mock.sent[0]);
+  expect(request).toEqual({
+    type: "coordinator.project.enable.request",
+    requestId: request.requestId,
+    projectId: "project-1",
+    profile: { provider: "claude", model: "opus" },
+    profiles: { investigator: { provider: "codex" } },
+  });
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "coordinator.project.enable.response",
+      payload: { requestId: request.requestId, coordinator: state, error: null },
+    }),
+  );
+  await expect(promise).resolves.toEqual(state);
+});
+
+test("reads and updates a project coordinator", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "coordinator-get",
+    logger: createMockLogger(),
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen({ features: { ownedSubscriptions: true, coordinator: true } });
+  await connectPromise;
+
+  const getPromise = client.getProjectCoordinator("project-1");
+  await vi.waitFor(() => expect(mock.sent).toHaveLength(1));
+  const getRequest = parseSentFrame(mock.sent[0]);
+  expect(getRequest).toEqual({
+    type: "coordinator.project.get.request",
+    requestId: getRequest.requestId,
+    projectId: "project-1",
+  });
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "coordinator.project.get.response",
+      payload: { requestId: getRequest.requestId, coordinator: null, error: null },
+    }),
+  );
+  await expect(getPromise).resolves.toBeNull();
+
+  const updated = {
+    projectId: "project-1",
+    agentId: "agent-coordinator",
+    enabled: true,
+    trustLevel: "propose",
+    scope: "project",
+  };
+  const updatePromise = client.updateProjectCoordinator({
+    projectId: "project-1",
+    trustLevel: "propose",
+    scope: "project",
+    usageExpectation: null,
+  });
+  await vi.waitFor(() => expect(mock.sent).toHaveLength(2));
+  const updateRequest = parseSentFrame(mock.sent[1]);
+  expect(updateRequest).toEqual({
+    type: "coordinator.project.update.request",
+    requestId: updateRequest.requestId,
+    projectId: "project-1",
+    trustLevel: "propose",
+    scope: "project",
+    usageExpectation: null,
+  });
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "coordinator.project.update.response",
+      payload: { requestId: updateRequest.requestId, coordinator: updated, error: null },
+    }),
+  );
+  await expect(updatePromise).resolves.toEqual(updated);
+});
+
+test("observes a project board and routes changed pushes by subscriptionId", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "coordinator-board",
+    logger: createMockLogger(),
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen({ features: { ownedSubscriptions: true, coordinator: true } });
+  await connectPromise;
+
+  const observation = client.observeCoordinatorBoard({ projectId: "project-1" });
+  await vi.waitFor(() => expect(mock.sent).toHaveLength(1));
+  const request = parseSentFrame(mock.sent[0]);
+  expect(request).toEqual({
+    type: "coordinator.board.subscribe.request",
+    requestId: request.requestId,
+    projectId: "project-1",
+  });
+
+  const snapshot = {
+    projectId: "project-1",
+    needsYou: [],
+    working: [],
+    done: [],
+    wake: null,
+    coordinatorAgentId: "agent-coordinator",
+    trustLevel: "observe",
+    scope: "everything",
+    enabled: true,
+  };
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "coordinator.board.subscribe.response",
+      payload: {
+        requestId: request.requestId,
+        subscriptionId: "board-sub-1",
+        projectId: "project-1",
+        snapshots: [snapshot],
+        error: null,
+      },
+    }),
+  );
+  await expect(observation.ready).resolves.toEqual({
+    requestId: request.requestId,
+    subscriptionId: "board-sub-1",
+    projectId: "project-1",
+    snapshots: [snapshot],
+    error: null,
+  });
+
+  const updates: unknown[] = [];
+  const unsubscribe = observation.subscribe({
+    snapshot: () => {},
+    update: (message) => updates.push(message),
+  });
+  const changed = {
+    type: "coordinator.board.changed",
+    payload: { subscriptionId: "board-sub-1", projectId: "project-1", snapshot },
+  };
+  mock.triggerMessage(wrapSessionMessage(changed));
+  expect(updates).toEqual([changed]);
+  unsubscribe();
+});
+
+test("coordinator RPCs reject when the host does not advertise the feature", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "coordinator-gated",
+    logger: createMockLogger(),
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen({ features: { ownedSubscriptions: true } });
+  await connectPromise;
+
+  await expect(
+    client.enableProjectCoordinator({ projectId: "project-1", profile: { provider: "claude" } }),
+  ).rejects.toThrow("Update this host to use project coordinators.");
+  await expect(client.getProjectCoordinator("project-1")).rejects.toThrow(
+    "Update this host to use project coordinators.",
+  );
+
+  const observation = client.observeCoordinatorBoard({ projectId: "project-1" });
+  await expect(observation.ready).rejects.toThrow("Update this host to use project coordinators.");
+  expect(mock.sent).toHaveLength(0);
+});
+
+test("advertises the coordinator client capability in hello", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "coordinator-caps",
+    logger: createMockLogger(),
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen({ preserveSent: true });
+  await connectPromise;
+
+  const hello = JSON.parse(assertStr(mock.sent[0]));
+  expect(hello.capabilities[CLIENT_CAPS.coordinator]).toBe(true);
 });
