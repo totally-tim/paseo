@@ -563,10 +563,22 @@ export function resolveAgentSpawnIsolation(
   return undefined;
 }
 
+// An agent-spawned run with no explicit placement treats
+// PASEO_AGENT_SPAWN_ISOLATION=worktree as if --new-workspace worktree had been
+// passed, so option validation, workspace precedence, and the worktree options
+// all see the same kind.
+export function applyAgentSpawnIsolation(options: AgentRunOptions): AgentRunOptions {
+  if (resolveNewWorkspaceKind(options) || options.workspace?.trim()) return options;
+  if (!resolveRunCallerAgentId()) return options;
+  const isolation = resolveAgentSpawnIsolation();
+  return isolation ? { ...options, newWorkspace: isolation } : options;
+}
+
 // Workspace policy for `paseo run`. Precedence:
 //   1. --workspace <id>            -> run in that existing workspace
-//   2. $PASEO_AGENT_ID             -> caller's workspace, or a worktree when
-//                                     $PASEO_AGENT_SPAWN_ISOLATION=worktree
+//   2. $PASEO_AGENT_ID             -> caller's workspace, unless
+//                                     applyAgentSpawnIsolation turned the run
+//                                     into --new-workspace worktree
 //   3. $PASEO_WORKSPACE_ID         -> exported by workspace terminals
 //   4. --new-workspace <kind>      -> mint a new workspace explicitly
 //   5. bare run                    -> mint a new local-backed workspace for cwd
@@ -583,10 +595,6 @@ export async function resolveRunWorkspace(
   }
 
   if (!newWorkspace && resolveRunCallerAgentId()) {
-    const spawnIsolation = resolveAgentSpawnIsolation();
-    if (spawnIsolation) {
-      return createRunWorkspace(client, { ...options, newWorkspace: spawnIsolation }, cwd);
-    }
     console.error(
       `Sharing the calling agent's checkout at ${cwd}. Pass --new-workspace worktree for an isolated copy.`,
     );
@@ -631,9 +639,10 @@ async function createRunWorkspace(
 
 export async function runRunCommand(
   prompt: string,
-  options: AgentRunOptions,
+  rawOptions: AgentRunOptions,
   _command: Command,
 ): Promise<SingleResult<AgentRunResult>> {
+  const options = applyAgentSpawnIsolation(rawOptions);
   const host = getDaemonHost({ host: options.host });
   const outputSchema = options.outputSchema ? loadOutputSchema(options.outputSchema) : undefined;
 
