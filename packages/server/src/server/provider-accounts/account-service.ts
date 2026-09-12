@@ -1,4 +1,7 @@
-import { getAccountUsageWindows as applicableWindows } from "@getpaseo/protocol/provider-accounts";
+import {
+  effectiveCapacityLimit,
+  getAccountUsageWindows as applicableWindows,
+} from "@getpaseo/protocol/provider-accounts";
 import pLimit from "p-limit";
 import { randomUUID } from "node:crypto";
 import type {
@@ -12,10 +15,15 @@ import type {
 import { AccountProviderSchema } from "@getpaseo/protocol/provider-accounts";
 import { compareByCapacity, describeRank } from "./account-ranking.js";
 import type { AccountRankMode } from "./account-ranking.js";
-import type { ProviderUsage } from "../messages.js";
+import type { ProviderAccountResetCreditOutcome, ProviderUsage } from "../messages.js";
 import { unavailableUsage } from "../../services/quota-fetcher/usage.js";
 import type { ProviderAccountContext } from "../agent/provider-account-context.js";
 import { ProviderAccountStore } from "./account-store.js";
+import {
+  claudeRateLimitEventUpdate,
+  codexRateLimitsUpdate,
+  mergeAccountUsageUpdate,
+} from "./usage-updates.js";
 
 export interface AccountBackend {
   inspect(): Promise<ProviderAccountIdentity | null>;
@@ -26,6 +34,19 @@ export interface AccountBackend {
   }): Promise<ProviderAccountIdentity>;
   logout(): Promise<void>;
   usage(): Promise<ProviderUsage>;
+  /**
+   * Spend one banked provider reset credit. `idempotencyKey` identifies one logical attempt;
+   * the caller reuses it across retries so a lost response cannot spend a second credit.
+   */
+  consumeResetCredit?(input: {
+    idempotencyKey: string;
+  }): Promise<ProviderAccountResetCreditOutcome>;
+}
+
+export interface ResetCreditRedemption {
+  outcome: ProviderAccountResetCreditOutcome;
+  /** False when the post-spend usage re-read failed, so the displayed state may lag. */
+  confirmed: boolean;
 }
 
 export interface AccountLease {
@@ -50,6 +71,8 @@ export interface AccountChoice {
 export interface RecoveryAccountChoice extends AccountChoice {
   needsAttention: boolean;
   resetsAt?: string;
+  /** Permitted accounts whose last read still reports a banked reset credit. */
+  resetCreditAccountIds?: string[];
 }
 
 export class AccountOperationError extends Error {}
@@ -72,7 +95,7 @@ export class ProviderAccountService {
   private readonly leases = new Map<string, number>();
   private readonly usageCache = new Map<
     string,
-    { revision: number; at: number; usage: ProviderUsage }
+    { revision: number; at: number; usage: ProviderUsage; partial?: boolean }
   >();
   private readonly usageRequests = new Map<string, Promise<ProviderUsage>>();
   private readonly inspections = new Map<string, Promise<ProviderAccount>>();
@@ -82,8 +105,11 @@ export class ProviderAccountService {
   private admissionQueue: Promise<unknown> = Promise.resolve();
   private readonly usageLimit = pLimit(2);
   private readonly updates = new Map<string, Promise<unknown>>();
+  private readonly redemptions = new Map<string, Promise<unknown>>();
   private identityQueue: Promise<unknown> = Promise.resolve();
   private readonly listeners = new Set<(account: ProviderAccount) => void>();
+  private readonly capacityListeners = new Set<(accountId: string) => void>();
+  private readonly pendingCapacityChanges = new Set<string>();
 
   constructor(
     readonly store: ProviderAccountStore,
@@ -115,6 +141,12 @@ export class ProviderAccountService {
   onChange(listener: (account: ProviderAccount) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /** Capacity reopened without changing account metadata (for example, a reset credit). */
+  onCapacityChange(listener: (accountId: string) => void): () => void {
+    this.capacityListeners.add(listener);
+    return () => this.capacityListeners.delete(listener);
   }
 
   activeLogins(): AccountLogin[] {
@@ -153,7 +185,7 @@ export class ProviderAccountService {
     >,
   ): Promise<ProviderAccount> {
     this.assertOpen();
-    if (this.busy.has(id))
+    if (this.busy.has(id) || this.redemptions.has(id))
       throw new AccountOperationError("An account operation is still in progress.");
     this.busy.add(id);
     try {
@@ -193,7 +225,7 @@ export class ProviderAccountService {
 
   private async inspectAccount(id: string): Promise<ProviderAccount> {
     const account = this.store.get(id);
-    if (this.busy.has(id)) return account;
+    if (this.busy.has(id) || this.redemptions.has(id)) return account;
     this.busy.add(id);
     try {
       const identity = await this.backend(account, this.store.context(id)).inspect();
@@ -318,7 +350,9 @@ export class ProviderAccountService {
     identity: ProviderAccountIdentity,
   ): Promise<ProviderAccount> {
     const commit = this.identityQueue.then(async () => {
-      const duplicate = this.duplicateOf(account, identity);
+      // Queued commits are serialized, so re-read the record an earlier commit may have moved.
+      const current = this.store.get(account.id);
+      const duplicate = this.duplicateOf(current, identity);
       if (duplicate)
         return this.update(account.id, {
           authState: "error",
@@ -329,8 +363,14 @@ export class ProviderAccountService {
       return this.update(account.id, {
         authState: "ready",
         identity,
-        enabled: account.enabled,
+        enabled: current.enabled,
         error: null,
+        // A remembered rejection belongs to the subscription that reported it. The host CLI
+        // login can be switched outside Paseo, so a different verified identity must not
+        // inherit the previous one's limit.
+        ...(current.identity && current.identity.key !== identity.key
+          ? { capacityLimit: null }
+          : {}),
       });
     });
     this.identityQueue = commit.catch(() => undefined);
@@ -376,8 +416,142 @@ export class ProviderAccountService {
   }
 
   async reportCapacity(id: string, model?: string, resetsAt?: string): Promise<void> {
+    const identityKey = this.store.get(id).identity?.key;
     await this.update(id, {
-      capacityLimit: { observedAt: new Date(this.now()).toISOString(), model, resetsAt },
+      capacityLimit: {
+        observedAt: new Date(this.now()).toISOString(),
+        model,
+        resetsAt,
+        // Bound to the verified login that reported it; a host login switched outside Paseo
+        // must not inherit another subscription's limit.
+        ...(identityKey ? { identityKey } : {}),
+      },
+    });
+  }
+
+  /**
+   * Spend one banked reset credit on the account. Attempts serialize per account, and the
+   * idempotency key survives a failed attempt so retrying it can never spend two credits.
+   */
+  async redeemResetCredit(id: string): Promise<ResetCreditRedemption> {
+    this.resetCreditAccount(id);
+    const run = (this.redemptions.get(id) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(() =>
+        this.usageLimit(async () => {
+          const account = this.resetCreditAccount(id);
+          const backend = this.backend(account, this.store.context(id));
+          if (!backend.consumeResetCredit)
+            throw new AccountOperationError("This provider does not support reset credits.");
+          const key = await this.store.resetCreditKey(id);
+          try {
+            const outcome = await backend.consumeResetCredit({ idempotencyKey: key });
+            await this.store.completeResetCredit(id, key);
+            return outcome;
+          } catch (error) {
+            if (error instanceof AccountHelperShutdownError) this.busy.add(id);
+            throw error;
+          }
+        }),
+      )
+      .then((outcome) => this.confirmResetCredit(id, outcome));
+    this.redemptions.set(id, run);
+    void run
+      .finally(() => {
+        if (this.redemptions.get(id) !== run) return;
+        this.redemptions.delete(id);
+        if (this.pendingCapacityChanges.delete(id))
+          for (const listener of this.capacityListeners) listener(id);
+      })
+      .catch(() => undefined);
+    return run;
+  }
+
+  private resetCreditAccount(id: string): ProviderAccount {
+    this.assertOpen();
+    const account = this.list().find((entry) => entry.id === id);
+    if (!account) throw new AccountOperationError("Account not found.");
+    if (account.provider !== "codex")
+      throw new AccountOperationError("Only Codex accounts hold reset credits.");
+    if (account.removedAt)
+      throw new AccountOperationError("Restore the account before using a reset credit.");
+    if (account.authState !== "ready")
+      throw new AccountOperationError("Sign in to the account before using a reset credit.");
+    if (this.busy.has(id))
+      throw new AccountOperationError("An account operation is still in progress.");
+    return account;
+  }
+
+  private async confirmResetCredit(
+    id: string,
+    outcome: ProviderAccountResetCreditOutcome,
+  ): Promise<ResetCreditRedemption> {
+    // A forced read normally joins an in-flight probe. Drain older reads first so the
+    // confirmation and credit count come from a request started after the spend.
+    await Promise.allSettled(
+      [...this.usageRequests.entries()]
+        .filter(([key]) => key.startsWith(`${id}:`))
+        .map(([, request]) => request),
+    );
+    const usage = await this.usage(id, true);
+    const confirmed = usage.status === "available";
+    if (outcome !== "noCredit") this.pendingCapacityChanges.add(id);
+    if (outcome !== "noCredit" && this.store.get(id).capacityLimit) {
+      // The remembered rejection predates this outcome; a provider saying nothing was left to
+      // reset is still saying the account is not blocked. Preserve the just-fetched usage.
+      await this.update(id, { capacityLimit: null }, true);
+    }
+    return { outcome, confirmed };
+  }
+
+  /** Permitted accounts whose last usage read still reports a banked reset credit. */
+  resetCreditAccounts(provider: AccountProvider, ids: string[]): string[] {
+    const byId = new Map(this.list().map((account) => [account.id, account] as const));
+    return ids.filter((id) => {
+      const account = byId.get(id);
+      if (
+        !account ||
+        account.provider !== provider ||
+        account.removedAt ||
+        account.authState !== "ready"
+      )
+        return false;
+      const cached = this.usageCache.get(id);
+      if (cached?.revision !== account.revision) return false;
+      return (cached.usage.resetCredits?.availableCount ?? 0) > 0;
+    });
+  }
+
+  /**
+   * Fold a provider's mid-turn rate-limit event into the cached usage snapshot. Events are
+   * sparse; a snapshot seeded only by events stays partial so admission still probes for a
+   * complete reading rather than trusting the windows one event happened to name.
+   */
+  applyLiveUsage(id: string, raw: unknown): void {
+    const account = this.list().find((entry) => entry.id === id);
+    if (!account || account.removedAt || account.authState !== "ready") return;
+    const update =
+      account.provider === "codex" ? codexRateLimitsUpdate(raw) : claudeRateLimitEventUpdate(raw);
+    if (!update) return;
+    const cached = this.usageCache.get(id);
+    const current = cached?.revision === account.revision ? cached : null;
+    const at = this.now();
+    // Sparse events cannot renew the complete reading's age, including untouched windows.
+    const probedAt = current?.at ?? at;
+    const usage = mergeAccountUsageUpdate({
+      previous: current?.usage ?? null,
+      update,
+      providerId: account.provider,
+      displayName: account.label,
+      fetchedAt: new Date(at).toISOString(),
+      nextRefreshAt: new Date(probedAt + USAGE_TTL_MS).toISOString(),
+    });
+    if (!usage) return;
+    this.usageCache.set(id, {
+      revision: account.revision,
+      at: probedAt,
+      usage,
+      partial: current ? current.partial : true,
     });
   }
 
@@ -434,14 +608,27 @@ export class ProviderAccountService {
 
   refreshUsage(): void {
     if (this.closed || this.usageRefresh) return;
-    // The user can sign in to a provider CLI after the daemon started; nothing tells us.
-    for (const account of this.list())
-      if (account.ownership === "external" && account.authState !== "ready")
-        void this.inspect(account.id).catch(() => undefined);
-    const accounts = this.list().filter(
-      (account) => account.authState === "ready" && !account.removedAt,
-    );
+    // The user can sign in to — or switch — a provider CLI after the daemon started; nothing
+    // tells us. Re-verify the host identity on the usage cadence so a switched login does not
+    // keep wearing the previous subscription's identity and remembered limits.
+    const inspections = this.list()
+      .filter((account) => account.ownership === "external" && !account.removedAt)
+      .map((account) => {
+        const cached = this.usageCache.get(account.id);
+        const due =
+          account.authState !== "ready" ||
+          !cached ||
+          cached.revision !== account.revision ||
+          this.now() - cached.at >= USAGE_TTL_MS;
+        return due ? this.inspect(account.id).catch(() => undefined) : null;
+      });
     this.usageRefresh = (async () => {
+      // Settle identity first: a commit bumps the revision, which would discard a usage read
+      // that was already in flight for the account it just changed.
+      await Promise.allSettled(inspections);
+      const accounts = this.list().filter(
+        (account) => account.authState === "ready" && !account.removedAt,
+      );
       for (let offset = 0; offset < accounts.length && !this.closed; offset += 2) {
         await Promise.allSettled(
           accounts.slice(offset, offset + 2).map((account) => this.usage(account.id)),
@@ -459,7 +646,12 @@ export class ProviderAccountService {
     if (account.removedAt || account.authState !== "ready" || this.busy.has(id))
       return unavailable();
     const cached = this.usageCache.get(id);
-    if (!fresh && cached?.revision === account.revision && this.now() - cached.at < USAGE_TTL_MS)
+    if (
+      !fresh &&
+      !cached?.partial &&
+      cached?.revision === account.revision &&
+      this.now() - cached.at < USAGE_TTL_MS
+    )
       return cached.usage;
     const key = `${id}:${account.revision}`;
     const pending = this.usageRequests.get(key);
@@ -534,7 +726,7 @@ export class ProviderAccountService {
         }
         // Inspection and usage both return the stored value while another operation holds the
         // account. A skipped read is not a reading, so it cannot establish capacity.
-        if (this.busy.has(account.id)) return;
+        if (this.busy.has(account.id) || this.redemptions.has(account.id)) return;
         const usage = await this.usage(account.id, true);
         if (usage.status === "available") readings.set(account.id, usage);
       }),
@@ -574,6 +766,12 @@ export class ProviderAccountService {
     const resets = considered
       .map((account) => this.recoveryReset(account, input.model))
       .filter((value): value is number => value !== null);
+    // A rejected account may hold a banked credit the user can spend to reopen it, so the
+    // offer covers every permitted account, not just the ones excluded so far.
+    const resetCreditAccountIds = this.resetCreditAccounts(
+      input.provider,
+      considered.map((account) => account.id),
+    );
     return {
       accountId: null,
       needsAttention: considered.length === 0,
@@ -581,6 +779,7 @@ export class ProviderAccountService {
         ? "Waiting for confirmed account capacity"
         : "The permitted accounts need attention. Check their login and enabled state.",
       ...(resets.length ? { resetsAt: new Date(Math.min(...resets)).toISOString() } : {}),
+      ...(resetCreditAccountIds.length ? { resetCreditAccountIds } : {}),
     };
   }
 
@@ -607,8 +806,9 @@ export class ProviderAccountService {
           100 - window.usedPct <= (account.reservePercent ?? 0),
       )
       .map((window) => Date.parse(window.resetsAt ?? ""));
-    if (!account.capacityLimit?.model || account.capacityLimit.model === model)
-      deadlines.push(Date.parse(account.capacityLimit?.resetsAt ?? ""));
+    const limit = effectiveCapacityLimit(account);
+    if (limit && (!limit.model || limit.model === model))
+      deadlines.push(Date.parse(limit.resetsAt ?? ""));
     const future = deadlines.filter((at) => Number.isFinite(at) && at > this.now());
     // Every blocking window must reset before this account can run again.
     return future.length ? Math.max(...future) : null;
@@ -719,8 +919,7 @@ export class ProviderAccountService {
     if (!unattended || account.interactiveOnly) return false;
     const usage = this.currentUsage(account);
     const windows = applicableWindows(usage, model);
-    if (capacityRejection(account.capacityLimit, usage, windows.length, model, this.now()))
-      return false;
+    if (capacityRejection(account, usage, windows.length, model, this.now())) return false;
     if (
       windows.some(
         (window) =>
@@ -879,6 +1078,7 @@ export class ProviderAccountService {
     this.closed = true;
     for (const active of this.logins.values()) active.abort.abort();
     await Promise.allSettled([...this.logins.values()].map((login) => login.done));
+    await Promise.allSettled(this.redemptions.values());
     await Promise.allSettled(this.usageRequests.values());
     await Promise.allSettled(this.inspections.values());
     await Promise.allSettled(this.updates.values());
@@ -902,13 +1102,7 @@ export class ProviderAccountService {
       return no("This account is reserved for interactive work.");
     const usage = this.currentUsage(account);
     const windows = applicableWindows(usage, model);
-    const capacityError = capacityRejection(
-      account.capacityLimit,
-      usage,
-      windows.length,
-      model,
-      this.now(),
-    );
+    const capacityError = capacityRejection(account, usage, windows.length, model, this.now());
     if (capacityError) return no(capacityError);
     const blocked = windows.find(
       (window) => typeof window.usedPct === "number" && window.usedPct >= 100,
@@ -950,7 +1144,11 @@ export class ProviderAccountService {
 
   private currentUsage(account: ProviderAccount): ProviderUsage | null {
     const cached = this.usageCache.get(account.id);
-    if (cached?.revision !== account.revision || this.now() - cached.at >= USAGE_TTL_MS)
+    if (
+      cached?.partial ||
+      cached?.revision !== account.revision ||
+      this.now() - cached.at >= USAGE_TTL_MS
+    )
       return null;
     return cached.usage;
   }
@@ -1023,7 +1221,7 @@ export class ProviderAccountService {
       throw new AccountOperationError(
         "Manage the host CLI login in its own terminal. Add an account for a separate Paseo login.",
       );
-    if (this.busy.has(id))
+    if (this.busy.has(id) || this.redemptions.has(id))
       throw new AccountOperationError("An account operation is still in progress.");
     if (this.hasRuntime(id))
       throw new AccountOperationError("Close this account's agents before changing its login.");
@@ -1060,12 +1258,13 @@ function automaticAccountKey(
 }
 
 function capacityRejection(
-  capacity: ProviderAccount["capacityLimit"],
+  account: ProviderAccount,
   usage: ProviderUsage | null,
   windowCount: number,
   model: string | undefined,
   now: number,
 ): string | null {
+  const capacity = effectiveCapacityLimit(account);
   if (
     !capacity ||
     (capacity.model && capacity.model !== model) ||

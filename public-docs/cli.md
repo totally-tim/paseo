@@ -57,6 +57,8 @@ When an existing Paseo agent runs the same command, Paseo recognizes it through 
 
 Set `PASEO_AGENT_SPAWN_ISOLATION=worktree` in the agent environment to make every agent-spawned run mint its own managed worktree instead of sharing the parent checkout. The variable only takes the value `worktree`; any other value keeps the default and prints a warning on stderr. The caller's checkout has to be a git repository, because the isolated run branches a worktree off it. Agents inherit the daemon's environment, so set it where the daemon reads it: per provider with `agents.providers.<id>.env` in the daemon config, or in the login shell environment before the daemon starts. The desktop app reads the login shell environment at launch, so restart it after exporting the variable. Worktree options such as `--branch` or `--worktree-mode` work with the default in place, the same as with `--new-workspace worktree`.
 
+The same default applies to `create_agent`: without an explicit `workspaceId`, isolation creates a worktree from the caller checkout's current commit, including linked worktrees and detached checkouts. Uncommitted edits stay in the caller checkout. Per-agent launch overrides, including `agent.create` and `agent.session_open` plugin hooks, take precedence over provider settings and the daemon environment. An empty override disables an inherited isolation default.
+
 Use `--output-schema` to return only matching JSON output. You can pass a schema file path or an inline JSON schema object. This mode cannot be used with `--background`.
 
 By default, `paseo run` waits for completion. Use `--background` to return immediately while the agent keeps running.

@@ -40,6 +40,8 @@ export const ProviderAccountSchema = z.object({
       observedAt: z.string(),
       resetsAt: z.string().optional(),
       model: z.string().optional(),
+      /** Verified identity that reported the rejection; absent on records written before the binding existed. */
+      identityKey: z.string().optional(),
     })
     .nullable()
     .optional(),
@@ -97,6 +99,7 @@ export const AccountOperationSchema = z.discriminatedUnion("kind", [
     credentials: z.enum(["retain", "logout"]),
   }),
   z.object({ kind: z.literal("restore"), accountId: z.string() }),
+  z.object({ kind: z.literal("consume-reset-credit"), accountId: z.string() }),
   z.object({ kind: z.literal("policy"), policy: AccountPolicySchema }),
   z.object({ kind: z.literal("reorder"), accountIds: z.array(z.string()).max(34) }),
 ]);
@@ -120,6 +123,22 @@ export const ProviderAccountCatalogRequestSchema = z.object({
   model: z.string().optional(),
   cwd: z.string().optional(),
 });
+
+/**
+ * The account's remembered capacity rejection, or null when it cannot be attributed to the
+ * account's current verified identity. Records written before the binding existed carry no
+ * identityKey; on an external account the host login can change outside Paseo, so an
+ * unattributable record is ignored there. A managed identity is directory-pinned, so a
+ * legacy record still applies. Shared by daemon admission and the account display.
+ */
+export function effectiveCapacityLimit(
+  account: ProviderAccount,
+): NonNullable<ProviderAccount["capacityLimit"]> | null {
+  const limit = account.capacityLimit;
+  if (!limit) return null;
+  if (limit.identityKey === undefined) return account.ownership === "managed" ? limit : null;
+  return limit.identityKey === account.identity?.key ? limit : null;
+}
 
 /** Shared by admission and the running account tooltip; unidentified scopes stay conservative. */
 export function getAccountUsageWindows(

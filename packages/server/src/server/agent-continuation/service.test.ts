@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
@@ -26,6 +26,7 @@ async function setup(input: { close?: () => Promise<void>; holdSourceCompletion?
   const logger = createTestLogger();
   let now = Date.parse("2026-09-05T10:00:00Z");
   const used = new Map<string, number>();
+  const credits = new Set<string>();
   let sourceCompleted!: () => void;
   const sourceCompletion = new Promise<void>((resolve) => {
     sourceCompleted = resolve;
@@ -33,17 +34,25 @@ async function setup(input: { close?: () => Promise<void>; holdSourceCompletion?
   const sourceEvents: AgentStreamEvent[] = [];
   const starts: Array<{ accountId: string; prompt: string }> = [];
   const emitters = new Map<string, (event: AgentStreamEvent) => void>();
+  const hostConfigDir = path.join(directory, "host-config");
+  await mkdir(hostConfigDir);
   const accounts = new ProviderAccountService(
-    new ProviderAccountStore(directory),
+    new ProviderAccountStore(directory, { resolveHostConfigDir: () => hostConfigDir }),
     (account) => ({
       inspect: async () => ({ key: account.id }),
       login: async () => ({ key: account.id }),
       logout: async () => {},
+      consumeResetCredit: async () => {
+        used.set(account.id, 10);
+        credits.delete(account.id);
+        return "reset";
+      },
       usage: async () => ({
         providerId: account.provider,
         displayName: account.label,
         status: "available",
         planLabel: null,
+        resetCredits: credits.has(account.id) ? { availableCount: 1 } : undefined,
         windows: [
           {
             id: "weekly",
@@ -189,6 +198,7 @@ async function setup(input: { close?: () => Promise<void>; holdSourceCompletion?
     a,
     b,
     used,
+    credits,
     starts,
     clients,
     emitters,
@@ -851,6 +861,49 @@ test("a rejection with no reported reset waits with a growing backoff instead of
   expect(second.status).toBe("waiting");
   expect(second.backoffMs!).toBeGreaterThan(first.backoffMs!);
   expect(f.starts).toHaveLength(0);
+});
+
+test("a waiting recovery wakes on a permitted account's capacity signal, not its label", async () => {
+  const f = await setup();
+  f.used.set(f.a, 100);
+  f.used.set(f.b, 100);
+  await f.accounts.reportCapacity(f.a);
+  await f.accounts.reportCapacity(f.b);
+  await f.service.reportCapacity(f.source.id, "limit-1");
+  await f.service.flush();
+  expect(f.store.forAgent(f.source.id)!.recovery!.status).toBe("waiting");
+
+  // Edits and identity probes fire onChange without a signal change, so neither may wake the
+  // wait — recovery's own inspections would otherwise loop it into itself.
+  const spy = vi.spyOn(f.accounts, "recoveryChoice");
+  await f.accounts.edit(f.b, { label: "B renamed" });
+  await f.accounts.inspect(f.b);
+  await f.service.flush();
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(spy).not.toHaveBeenCalled();
+
+  // A replacement rejection whose reset already passed reopens B; the signal change retries
+  // the wait now instead of at nextCheckAt.
+  f.used.set(f.b, 10);
+  await f.accounts.reportCapacity(f.b, undefined, "2026-09-05T09:00:00Z");
+  await vi.waitFor(() => expect(f.starts).toHaveLength(1));
+  expect(f.starts[0].accountId).toBe(f.b);
+});
+
+test("a reset wakes waiting recovery when the destination has no remembered rejection", async () => {
+  const f = await setup();
+  f.used.set(f.a, 100);
+  f.used.set(f.b, 100);
+  f.credits.add(f.b);
+  await f.accounts.reportCapacity(f.a);
+  await f.service.reportCapacity(f.source.id, "reset-without-rejection");
+  await f.service.flush();
+  expect(f.store.forAgent(f.source.id)!.recovery!.status).toBe("waiting");
+  expect(f.store.forAgent(f.source.id)!.recovery!.resetCreditAccountIds).toEqual([f.b]);
+  expect(f.accounts.list().find((account) => account.id === f.b)?.capacityLimit).toBeUndefined();
+  expect(await f.accounts.redeemResetCredit(f.b)).toEqual({ outcome: "reset", confirmed: true });
+  await vi.waitFor(() => expect(f.starts).toHaveLength(1));
+  expect(f.starts[0].accountId).toBe(f.b);
 });
 
 test("a capacity notification from a settled stopped turn cannot pause later queued work", async () => {

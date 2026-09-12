@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync, lstatSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { expect, test, vi } from "vitest";
@@ -137,6 +138,64 @@ test("account RPCs preserve both providers' handoff pins and historical context 
   } finally {
     await ctx.cleanup();
     factory.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60000);
+
+test("managed account homes link the host user layer and keep account state private", async () => {
+  const root = await mkdtemp(join(tmpdir(), "account-user-layer-e2e-"));
+  const claudeHost = join(root, "host-claude");
+  const codexHost = join(root, "host-codex");
+  await mkdir(claudeHost, { recursive: true });
+  await mkdir(codexHost, { recursive: true });
+  await mkdir(join(claudeHost, "skills", "host-skill"), { recursive: true });
+  await mkdir(join(claudeHost, "agents"));
+  await writeFile(join(claudeHost, "settings.json"), "{}");
+  await writeFile(join(claudeHost, "CLAUDE.md"), "# user instructions");
+  await writeFile(join(codexHost, "AGENTS.md"), "# agent rules");
+  await writeFile(join(codexHost, "config.toml"), "model = 'x'");
+  await mkdir(join(codexHost, "skills", "host-skill"), { recursive: true });
+  await mkdir(join(codexHost, "skills", ".system"), { recursive: true });
+
+  const ctx = await createDaemonTestContext({
+    paseoHomeRoot: root,
+    staticDir: join(root, "static"),
+    cleanup: false,
+    dependencies: {
+      accountStoreOptions: {
+        resolveHostConfigDir: (provider) => (provider === "claude" ? claudeHost : codexHost),
+      },
+    },
+  });
+  try {
+    const claude = (
+      await ctx.client.manageProviderAccount({ kind: "add", provider: "claude", label: "C" })
+    ).account!;
+    const codex = (
+      await ctx.client.manageProviderAccount({ kind: "add", provider: "codex", label: "X" })
+    ).account!;
+    const claudeHome = join(ctx.daemon.paseoHome, "provider-accounts", claude.id);
+    const codexHome = join(ctx.daemon.paseoHome, "provider-accounts", codex.id);
+
+    expect(readlinkSync(join(claudeHome, "skills"))).toBe(join(claudeHost, "skills"));
+    expect(readlinkSync(join(claudeHome, "settings.json"))).toBe(join(claudeHost, "settings.json"));
+    expect(readlinkSync(join(claudeHome, "CLAUDE.md"))).toBe(join(claudeHost, "CLAUDE.md"));
+    // Account state is not shared in: no host .claude.json or projects are linked.
+    expect(existsSync(join(claudeHome, ".claude.json"))).toBe(false);
+    expect(existsSync(join(claudeHome, "projects"))).toBe(false);
+
+    expect(readlinkSync(join(codexHome, "AGENTS.md"))).toBe(join(codexHost, "AGENTS.md"));
+    expect(readlinkSync(join(codexHome, "config.toml"))).toBe(join(codexHost, "config.toml"));
+    const codexSkills = lstatSync(join(codexHome, "skills"));
+    expect(codexSkills.isDirectory()).toBe(true);
+    expect(codexSkills.isSymbolicLink()).toBe(false);
+    expect(readlinkSync(join(codexHome, "skills", "host-skill"))).toBe(
+      join(codexHost, "skills", "host-skill"),
+    );
+    expect(existsSync(join(codexHome, "skills", ".system"))).toBe(false);
+    expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
+  } finally {
+    await ctx.cleanup();
     await rm(root, { recursive: true, force: true });
   }
 }, 60000);

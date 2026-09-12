@@ -7,6 +7,7 @@ import type {
 } from "../messages.js";
 import { AgentContinuationStatusSchema } from "@getpaseo/protocol/agent-continuation";
 import type { ProviderAccountService } from "../provider-accounts/account-service.js";
+import type { ProviderAccount } from "@getpaseo/protocol/provider-accounts";
 import {
   handoffAgent,
   type HandoffDependencies,
@@ -34,8 +35,11 @@ export class AgentContinuationService {
   private readonly pendingCapacity = new Set<string>();
   private readonly capacityTrigger = new CapacityRecoveryTrigger();
   private readonly listeners = new Set<(rootAgentId: string, agentId: string) => void>();
+  private readonly accountSignals = new Map<string, string>();
   private readonly now: () => number;
   private unsubscribe?: () => void;
+  private unsubscribeAccounts?: () => void;
+  private unsubscribeCapacity?: () => void;
   private closed = false;
 
   constructor(private readonly deps: Dependencies) {
@@ -96,7 +100,37 @@ export class AgentContinuationService {
       },
       { replayState: false },
     );
+    // A cleared capacity rejection, a finished login, or a re-enabled account can all reopen
+    // a waiting task before its next scheduled check. Only those fields wake the task —
+    // recovery's own identity probes fire onChange without touching them, and waking on every
+    // write would loop recovery into itself.
+    for (const account of this.deps.accounts.list())
+      this.accountSignals.set(account.id, accountSignal(account));
+    this.unsubscribeAccounts = this.deps.accounts.onChange((account) => {
+      if (this.closed) return;
+      const signal = accountSignal(account);
+      if (this.accountSignals.get(account.id) === signal) return;
+      this.accountSignals.set(account.id, signal);
+      this.wakeWaitingForAccount(account.id);
+    });
+    this.unsubscribeCapacity = this.deps.accounts.onCapacityChange((id) =>
+      this.wakeWaitingForAccount(id),
+    );
     for (const record of this.deps.store.list()) this.wake(record.agentId);
+  }
+
+  private wakeWaitingForAccount(accountId: string): void {
+    if (this.closed) return;
+    for (const record of this.deps.store.list()) {
+      if (record.recovery?.status !== "waiting") continue;
+      if (!record.policy?.accountIds.includes(accountId)) continue;
+      const agentId = record.agentId;
+      void this.change(record.rootAgentId, (current) => {
+        if (current.recovery?.status === "waiting") current.recovery.nextCheckAt = undefined;
+      })
+        .then(() => this.wake(agentId))
+        .catch(() => undefined);
+    }
   }
 
   private observeCapacity(agentId: string, eventId: string, turnId: string): void {
@@ -137,6 +171,8 @@ export class AgentContinuationService {
   async close(): Promise<void> {
     this.closed = true;
     this.unsubscribe?.();
+    this.unsubscribeAccounts?.();
+    this.unsubscribeCapacity?.();
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
     await Promise.allSettled(this.jobs.values());
@@ -281,6 +317,7 @@ export class AgentContinuationService {
               : "Automatic continuation was cancelled.",
           updatedAt: this.timestamp(),
           nextCheckAt: undefined,
+          resetCreditAccountIds: undefined,
           cancelledTurnId,
         });
     });
@@ -589,10 +626,14 @@ export class AgentContinuationService {
         return choice;
       exclude.push(choice.accountId);
     }
+    // Every permitted account may hold a credit that reopens it, including ones already
+    // rejected this episode — spending a credit is how the rejection lifts.
+    const resetCreditAccountIds = this.deps.accounts.resetCreditAccounts(provider, accountIds);
     return {
       accountId: null,
       needsAttention: false,
       reason: "Waiting for confirmed account capacity",
+      ...(resetCreditAccountIds.length ? { resetCreditAccountIds } : {}),
     };
   }
 
@@ -740,6 +781,7 @@ export class AgentContinuationService {
         backoffMs,
         nextCheckAt: new Date(next).toISOString(),
         resetsAt: choice.resetsAt,
+        resetCreditAccountIds: choice.resetCreditAccountIds,
         updatedAt: this.timestamp(),
       });
     });
@@ -785,6 +827,7 @@ export class AgentContinuationService {
           record.recovery.eventId === "manual"
             ? "The task continued through a manual handoff."
             : "The task continued after an account capacity limit.",
+        resetCreditAccountIds: undefined,
       });
       record.queuePaused = false;
     });
@@ -977,6 +1020,7 @@ export class AgentContinuationService {
         reason,
         updatedAt: this.timestamp(),
         nextCheckAt: undefined,
+        resetCreditAccountIds: undefined,
       });
       record.queuePaused = true;
     });
@@ -1019,6 +1063,7 @@ export class AgentContinuationService {
   private timestamp(): string {
     return new Date(this.now()).toISOString();
   }
+
   private background(agentId: string, run: () => Promise<void>): void {
     const record = this.deps.store.forAgent(agentId);
     if (!record || this.closed) return;
@@ -1036,4 +1081,20 @@ export class AgentContinuationService {
     void next.then(cleanup, cleanup);
     return next;
   }
+}
+
+/**
+ * The account fields a waiting recovery can act on: sign-in finishing, removal, enable
+ * toggles, and a reported or cleared capacity rejection. Anything else — a label edit, the
+ * usage-preserved writes recovery itself causes — produces the same signal and no wake.
+ */
+function accountSignal(account: ProviderAccount): string {
+  return [
+    account.authState,
+    account.enabled,
+    account.removedAt ?? "",
+    account.capacityLimit?.observedAt ?? "",
+    account.capacityLimit?.resetsAt ?? "",
+    account.capacityLimit?.model ?? "",
+  ].join(":");
 }

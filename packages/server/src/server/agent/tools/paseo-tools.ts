@@ -119,6 +119,7 @@ import {
   type CoordinatorSubagentKind,
 } from "@getpaseo/protocol/agent-labels";
 import { stripAgentToolLabels } from "../daemon-managed-labels.js";
+import { runGitCommand } from "../../../utils/run-git-command.js";
 
 export interface PaseoToolHostDependencies {
   agentManager: AgentManager;
@@ -1765,7 +1766,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     {
       title: "Create agent",
       description:
-        "Create an agent. Agent-scoped creation defaults to your workspace and creates your subagent. Top-level creation without workspaceId creates a new local workspace. Requires provider/model (for example codex/gpt-5.4) and an initial prompt. Do not guess; call list_providers and list_models first if uncertain.",
+        "Create an agent. Agent-scoped creation defaults to your workspace (a fresh worktree from your current commit when your environment sets PASEO_AGENT_SPAWN_ISOLATION=worktree) and creates your subagent. Top-level creation without workspaceId creates a new local workspace. Requires provider/model (for example codex/gpt-5.4) and an initial prompt. Do not guess; call list_providers and list_models first if uncertain.",
       inputSchema: createAgentInputSchema,
       outputSchema: {
         agentId: z.string(),
@@ -1904,16 +1905,17 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         };
       }
       const parsed = agentToAgentCreateAgentArgsSchema.parse(args);
-      const { cwd, workspaceId } = await resolveCanonicalCreateAgentWorkspace(parsed.workspaceId, {
-        prompt: parsed.initialPrompt,
-      });
+      const { cwd, workspaceId, worktree } = await resolveCanonicalCreateAgentWorkspace(
+        parsed.workspaceId,
+        { prompt: parsed.initialPrompt },
+      );
       return {
         kind: "agent-scoped",
         parsedArgs: parsed,
         detached: false,
         cwd,
         workspaceId,
-        worktree: undefined,
+        worktree,
       };
     }
     if (hasLegacyCreateAgentPlacement(args)) {
@@ -1941,7 +1943,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       };
     }
     const parsedArgs = canonicalTopLevelCreateAgentArgsSchema.parse(args);
-    const { cwd, workspaceId } = await resolveCanonicalCreateAgentWorkspace(
+    const { cwd, workspaceId, worktree } = await resolveCanonicalCreateAgentWorkspace(
       parsedArgs.workspaceId,
       { prompt: parsedArgs.initialPrompt },
     );
@@ -1951,7 +1953,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       detached: false,
       cwd,
       workspaceId,
-      worktree: undefined,
+      worktree,
     };
   }
 
@@ -1972,16 +1974,39 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     ].some((key) => input[key] !== undefined);
   }
 
+  // Session launch overrides (including plugin hooks) take precedence over
+  // provider settings and the daemon environment, as they do for `paseo run`.
+  function resolveAgentSpawnIsolation(caller: ManagedAgent): "worktree" | undefined {
+    const value = (
+      caller.spawnIsolationOverride ??
+      providerSnapshotManager.getAccountRuntimeSettings(caller.provider)?.env
+        ?.PASEO_AGENT_SPAWN_ISOLATION ??
+      process.env.PASEO_AGENT_SPAWN_ISOLATION
+    )?.trim();
+    if (!value) {
+      return undefined;
+    }
+    if (value !== "worktree") {
+      childLogger.warn(
+        { value },
+        'Ignoring PASEO_AGENT_SPAWN_ISOLATION: the only supported value is "worktree".',
+      );
+      return undefined;
+    }
+    return "worktree";
+  }
+
   async function resolveCanonicalCreateAgentWorkspace(
     workspaceId?: string,
     firstAgentContext?: FirstAgentContext,
   ): Promise<{
     cwd: string | undefined;
-    workspaceId: string;
+    workspaceId: string | undefined;
+    worktree: CreateAgentFromMcpInput["worktree"];
   }> {
     if (workspaceId) {
       const resolved = await resolveCreateAgentWorkspace({ kind: "existing", workspaceId });
-      return { cwd: resolved.cwd, workspaceId };
+      return { cwd: resolved.cwd, workspaceId, worktree: undefined };
     }
     if (!callerAgentId) {
       if (!options.ensureWorkspaceForCreate) {
@@ -1991,13 +2016,25 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       return {
         cwd,
         workspaceId: await options.ensureWorkspaceForCreate(cwd, firstAgentContext),
+        worktree: undefined,
       };
     }
     const caller = resolveCallerAgent();
     if (!caller?.workspaceId) {
       throw new Error(`Caller agent ${callerAgentId} has no current workspace`);
     }
-    return { cwd: undefined, workspaceId: caller.workspaceId };
+    if (resolveAgentSpawnIsolation(caller) === "worktree") {
+      const cwd = resolveScopedCwd(undefined, { required: true });
+      // Worktree creation resolves the main repository, whose HEAD may differ
+      // from a caller in a linked worktree or detached checkout.
+      const { stdout } = await runGitCommand(["rev-parse", "--verify", "HEAD^{commit}"], { cwd });
+      return {
+        cwd,
+        workspaceId: undefined,
+        worktree: { action: "branch-off", baseBranch: stdout.trim() },
+      };
+    }
+    return { cwd: undefined, workspaceId: caller.workspaceId, worktree: undefined };
   }
 
   /**

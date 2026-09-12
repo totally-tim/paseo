@@ -1,9 +1,9 @@
 npmRebuild: false
 appId: sh.paseo.desktop
-productName: Paseo
-executableName: Paseo
+productName: Forkeo
+executableName: Forkeo
 protocols:
-  - name: Paseo agent link
+  - name: Forkeo agent link
     schemes:
       - paseo
 afterPack: ./scripts/after-pack.js
@@ -39,7 +39,7 @@ publish:
   owner: totally-tim
   repo: paseo
 mac:
-  artifactName: "Paseo-${version}-${arch}.${ext}"
+  artifactName: "Forkeo-${version}-${arch}.${ext}"
   minimumSystemVersion: "13.0.0"
   category: public.app-category.developer-tools
   icon: assets/icon.icns
@@ -58,9 +58,9 @@ mac:
 linux:
   category: Development
   icon: assets
-  artifactName: "Paseo-${version}-${arch}.${ext}"
+  artifactName: "Forkeo-${version}-${arch}.${ext}"
   maintainer: "Mohamed Boudra <hello@moboudra.com>"
-  vendor: "Paseo"
+  vendor: "Forkeo"
   extraResources:
     - from: bin/paseo
       to: bin/paseo
@@ -75,15 +75,15 @@ rpm:
   afterInstall: scripts/linux-sandbox/after-install.tpl
 appImage:
   # A nonempty argument list replaces builder's hardcoded --no-sandbox default.
-  executableArgs: ["--class=Paseo"]
+  executableArgs: ["--class=Forkeo"]
   # Keep the AppImage filename stable across versions (no ${version}) so
   # electron-updater overwrites the file in place instead of renaming it to a new
   # versioned path. A rename orphans the old binary, breaks desktop shortcuts, and
   # dangles the ~/.local/bin/paseo CLI symlink, which points at $APPIMAGE. The
   # version stays discoverable via the release tag and the in-app version.
-  artifactName: "Paseo-${arch}.${ext}"
+  artifactName: "Forkeo-${arch}.${ext}"
 win:
-  artifactName: "Paseo-Setup-${version}-${arch}.${ext}"
+  artifactName: "Forkeo-Setup-${version}-${arch}.${ext}"
   icon: assets/icon.ico
   extraResources:
     - from: bin/paseo.cmd

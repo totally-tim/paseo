@@ -83,3 +83,25 @@ test("a capacity limit on another model leaves this start alone", () => {
   expect(activeCapacityLimit({ ...account, capacityLimit }, "opus", now)).toBeNull();
   expect(activeCapacityLimit({ ...account, capacityLimit }, "sonnet", now)).toEqual(capacityLimit);
 });
+
+test("a capacity limit bound to another identity does not apply", () => {
+  const capacityLimit = {
+    observedAt: "2026-09-09T11:55:00.000Z",
+    resetsAt: "2026-09-13T04:00:00.000Z",
+    identityKey: "claude:other@example.com",
+  };
+  expect(activeCapacityLimit({ ...account, capacityLimit }, "opus", now)).toBeNull();
+  const own = { ...capacityLimit, identityKey: "claude:tim@example.com:org" };
+  expect(activeCapacityLimit({ ...account, capacityLimit: own }, "opus", now)).toEqual(own);
+});
+
+test("a capacity limit recorded before the identity binding applies only to managed accounts", () => {
+  const capacityLimit = {
+    observedAt: "2026-09-09T11:55:00.000Z",
+    resetsAt: "2026-09-13T04:00:00.000Z",
+  };
+  expect(
+    activeCapacityLimit({ ...account, ownership: "external", capacityLimit }, "opus", now),
+  ).toBeNull();
+  expect(activeCapacityLimit({ ...account, capacityLimit }, "opus", now)).toEqual(capacityLimit);
+});

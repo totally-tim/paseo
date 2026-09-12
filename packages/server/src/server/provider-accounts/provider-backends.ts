@@ -6,6 +6,10 @@ import type {
   ProviderAccountIdentity,
 } from "@getpaseo/protocol/provider-accounts";
 import type { ProviderUsage } from "../messages.js";
+import {
+  ProviderAccountResetCreditOutcomeSchema,
+  type ProviderAccountResetCreditOutcome,
+} from "../messages.js";
 import { AccountHelperShutdownError, type AccountBackend } from "./account-service.js";
 import type { ProviderAccountContext } from "../agent/provider-account-context.js";
 import {
@@ -415,6 +419,21 @@ class CodexAccountBackend extends ProviderAccountBackend implements AccountBacke
     return this.withClient(async (client) => {
       const result = await client.request("account/rateLimits/read", {}, CONTROL_TIMEOUT_MS);
       return normalizeCodexAccountUsage(this.options.account.label, result);
+    });
+  }
+
+  async consumeResetCredit(input: {
+    idempotencyKey: string;
+  }): Promise<ProviderAccountResetCreditOutcome> {
+    return this.withClient(async (client) => {
+      const result = await client.request(
+        "account/rateLimitResetCredit/consume",
+        { idempotencyKey: input.idempotencyKey },
+        CONTROL_TIMEOUT_MS,
+      );
+      // An unrecognized outcome is a thrown error, so the caller keeps the idempotency key
+      // and a retry reuses it rather than risking a second spend.
+      return z.object({ outcome: ProviderAccountResetCreditOutcomeSchema }).parse(result).outcome;
     });
   }
 }
