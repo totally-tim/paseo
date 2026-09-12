@@ -763,6 +763,9 @@ describe("board derivation", () => {
     expect(row).toBeDefined();
     expect(row!.requestKind).toBe("question");
     expect(row!.questionHeader).toBe("Project");
+    expect(row!.questionCount).toBe(1);
+    // No description on the request, so the question's own text is quoted.
+    expect(row!.quoteText).toBe("Does this summary look right?");
     expect(row!.actions).toEqual([
       { id: "q0:opt:0", label: "Looks right" },
       { id: "q0:opt:1", label: "Correct it", composerQuote: true },
@@ -774,6 +777,108 @@ describe("board derivation", () => {
       .flatMap((board) => board.needsYou)
       .map((entry) => entry.requestId);
     expect(emittedRequestIds).toContain("q-1");
+  });
+
+  test("a multi-question request keeps its header but ships no tappable actions", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    await harness.service.start();
+
+    const session = harness.client.sessions.at(-1)!;
+    session.push({
+      type: "permission_requested",
+      provider: "codex",
+      request: {
+        id: "q-multi",
+        provider: "codex",
+        name: "question",
+        kind: "question",
+        title: "Question",
+        input: {
+          questions: [
+            {
+              question: "Pick a target?",
+              header: "Target",
+              options: [{ label: "A" }, { label: "B" }],
+            },
+            {
+              question: "Pick a mode?",
+              header: "Mode",
+              options: [{ label: "Fast" }, { label: "Safe" }],
+            },
+          ],
+        },
+      },
+    });
+    await flushBoard();
+
+    const snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    const row = snapshot.needsYou.find((candidate) => candidate.requestId === "q-multi");
+    expect(row).toBeDefined();
+    expect(row!.agentId).toBe(state.agentId);
+    expect(row!.requestKind).toBe("question");
+    expect(row!.questionHeader).toBe("Target");
+    expect(row!.questionCount).toBe(2);
+    // A tap would answer question[0] only; the client routes the row to chat.
+    expect(row!.actions).toEqual([]);
+  });
+
+  test("a composerQuote action quotes the request description over the question text", async () => {
+    await harness.service.enableProjectCoordinator(enableInput());
+    await harness.service.start();
+
+    const session = harness.client.sessions.at(-1)!;
+    const push = (request: AgentPermissionRequest) =>
+      session.push({ type: "permission_requested", provider: "codex", request });
+    push({
+      id: "q-desc",
+      provider: "codex",
+      name: "question",
+      kind: "question",
+      title: "Question",
+      description: "The proposal body the user corrects",
+      input: {
+        questions: [
+          {
+            question: "Does this plan look right?",
+            header: "Plan",
+            options: [{ label: "Approve" }, { label: "Correct it" }],
+          },
+        ],
+      },
+    });
+    // No composerQuote option on the row, so no quoteText.
+    push({
+      id: "q-plain",
+      provider: "codex",
+      name: "question",
+      kind: "question",
+      title: "Question",
+      input: {
+        questions: [
+          {
+            question: "Proceed?",
+            header: "Proceed",
+            options: [{ label: "Yes" }, { label: "No" }],
+          },
+        ],
+      },
+    });
+    // Tool-kind rows never quote: their actions come from the request.
+    push({
+      id: "perm-tool",
+      provider: "codex",
+      name: "Bash",
+      kind: "tool",
+      title: "Run npm test?",
+      actions: [{ id: "allow", label: "Allow", behavior: "allow" }],
+    });
+    await flushBoard();
+
+    const snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    const row = (id: string) => snapshot.needsYou.find((entry) => entry.requestId === id);
+    expect(row("q-desc")!.quoteText).toBe("The proposal body the user corrects");
+    expect(row("q-plain")!.quoteText).toBeUndefined();
+    expect(row("perm-tool")!.quoteText).toBeUndefined();
   });
 
   test("answered decisions write distinct Done rows per agent", async () => {
@@ -889,6 +994,74 @@ describe("board derivation", () => {
     await harness.service.enableProjectCoordinator(enableInput());
     await flushBoard();
     expect(snapshots).toContain(PROJECT_ID);
+  });
+});
+
+describe("agent MCP availability", () => {
+  test("losing the endpoint writes a wake row on every enabled project's board", async () => {
+    await harness.service.enableProjectCoordinator(enableInput());
+
+    const otherDir = path.join(harness.root, "other-project");
+    mkdirSync(otherDir, { recursive: true });
+    harness.projectRegistry.add(makeProject("prj_other", otherDir));
+    await harness.service.enableProjectCoordinator({
+      projectId: "prj_other",
+      profile: CODEX_PROFILE,
+    });
+
+    // A project whose coordinator is disabled keeps its old wake row.
+    const disabledDir = path.join(harness.root, "disabled-project");
+    mkdirSync(disabledDir, { recursive: true });
+    harness.projectRegistry.add(makeProject("prj_disabled", disabledDir));
+    await harness.service.enableProjectCoordinator({
+      projectId: "prj_disabled",
+      profile: CODEX_PROFILE,
+    });
+    await harness.service.disableProjectCoordinator("prj_disabled");
+
+    const emitted = new Set<string>();
+    harness.service.subscribeBoard((snapshot) => {
+      if (snapshot.wake?.text.includes("tools endpoint")) emitted.add(snapshot.projectId);
+    });
+
+    await harness.service.handleAgentMcpAvailability(false);
+    await flushBoard();
+
+    for (const projectId of [PROJECT_ID, "prj_other"]) {
+      const snapshot = await harness.service.getBoardSnapshot(projectId);
+      expect(snapshot.wake?.text).toContain("Paseo tools endpoint is off");
+      expect(snapshot.wake?.text).toContain("mcp.enabled");
+    }
+    const disabled = await harness.service.getBoardSnapshot("prj_disabled");
+    expect(disabled.wake?.text ?? "").not.toContain("tools endpoint");
+    expect(emitted).toEqual(new Set([PROJECT_ID, "prj_other"]));
+  });
+
+  test("the first report only sets a baseline; each real edge writes one row", async () => {
+    await harness.service.enableProjectCoordinator(enableInput());
+
+    const wakeTexts: (string | undefined)[] = [];
+    harness.service.subscribeBoard((snapshot) => {
+      if (snapshot.projectId === PROJECT_ID) wakeTexts.push(snapshot.wake?.text);
+    });
+
+    // Booting with the endpoint on is the baseline — no board row.
+    await harness.service.handleAgentMcpAvailability(true);
+    await flushBoard();
+    let snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    expect(snapshot.wake?.text).toContain("Woke: coordinator enabled");
+
+    await harness.service.handleAgentMcpAvailability(false);
+    await harness.service.handleAgentMcpAvailability(false);
+    await flushBoard();
+    snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    expect(snapshot.wake?.text).toContain("tools endpoint is off");
+    expect(wakeTexts.filter((text) => text?.includes("is off"))).toHaveLength(1);
+
+    await harness.service.handleAgentMcpAvailability(true);
+    await flushBoard();
+    snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    expect(snapshot.wake?.text).toContain("reachable again");
   });
 });
 

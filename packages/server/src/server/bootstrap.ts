@@ -1690,7 +1690,11 @@ export async function createPaseoDaemon(
               agentManager.setMcpBaseUrl(mcpEnabled ? mcpBaseUrl : null);
               agentManager.setPaseoToolsEnabled(mcpEnabled && inject);
               setAgentProviderToolsEnabled(mcpEnabled && inject);
+              void coordinatorService.handleAgentMcpAvailability(mcpEnabled);
             });
+            // Booting with the endpoint off strands resident coordinators'
+            // tools the same way a live toggle does.
+            void coordinatorService.handleAgentMcpAvailability(mcpEnabled);
             daemonConfigStore.onFieldChange("mcp.injectIntoAgents", (value) => {
               agentManager.setMcpBaseUrl(mcpEnabled ? mcpBaseUrl : null);
               agentManager.setPaseoToolsEnabled(mcpEnabled && value !== false);

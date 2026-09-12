@@ -149,6 +149,12 @@ interface DecisionQuestion {
   options: DecisionQuestionOption[];
 }
 
+interface DecisionQuestions {
+  /** Entries on `input.questions`; more than one cannot be answered by a single tap. */
+  count: number;
+  first: DecisionQuestion | null;
+}
+
 function isRecordValue(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -158,15 +164,16 @@ function nonEmptyValue(value: unknown): string | undefined {
 }
 
 /**
- * Question-kind requests carry `input.questions[]` instead of actions. M1
- * answers the first question single-select, so only its options become row
- * actions.
+ * Question-kind requests carry `input.questions[]` instead of actions (Codex
+ * `request_user_input` can ask several at once). M1 answers the first question
+ * single-select, so only its options become row actions — and only when it is
+ * the request's only question.
  */
-function firstDecisionQuestion(request: AgentPermissionRequest): DecisionQuestion | null {
+function decisionQuestions(request: AgentPermissionRequest): DecisionQuestions | null {
   const questions = request.input?.questions;
   if (!Array.isArray(questions)) return null;
   const first = questions.find(isRecordValue);
-  if (!first) return null;
+  if (!first) return { count: questions.length, first: null };
   const options = Array.isArray(first.options)
     ? first.options.flatMap((option): DecisionQuestionOption[] => {
         if (typeof option === "string") {
@@ -179,7 +186,10 @@ function firstDecisionQuestion(request: AgentPermissionRequest): DecisionQuestio
     : [];
   const header = nonEmptyValue(first.header);
   const text = nonEmptyValue(first.question);
-  return { ...(text ? { text } : {}), ...(header ? { header } : {}), options };
+  return {
+    count: questions.length,
+    first: { ...(text ? { text } : {}), ...(header ? { header } : {}), options },
+  };
 }
 
 function decisionRowActions(
@@ -214,6 +224,23 @@ function decisionRowActions(
     if (action.variant) row.variant = action.variant;
     return row;
   });
+}
+
+/**
+ * The spec's Correct-it path quotes the proposal body, not the bare question
+ * line: the request description when it has one, else the question's own
+ * text, else title/name.
+ */
+function decisionQuoteText(
+  request: AgentPermissionRequest,
+  question: DecisionQuestion | null,
+): string {
+  return (
+    nonEmptyValue(request.description) ??
+    question?.text ??
+    nonEmptyValue(request.title) ??
+    request.name
+  );
 }
 
 function firstLine(text: string, maxLength = 140): string {
@@ -255,6 +282,7 @@ export class CoordinatorService {
   private readonly agentCoverage = new Map<string, CoordinatorCoverageEntry>();
   private readonly knownDecisionQuestions = new Map<string, string>();
   private readonly dirtyBoards = new Set<string>();
+  private agentMcpAvailable: boolean | undefined;
   private boardFlushScheduled = false;
   private unsubscribers: Array<() => void> = [];
   private started = false;
@@ -571,6 +599,44 @@ export class CoordinatorService {
     return this.buildBoardSnapshot(projectId);
   }
 
+  /**
+   * The daemon's `mcp.enabled` toggle can cut the agent MCP endpoint under a
+   * resident coordinator — its required tools then 404 while the board still
+   * reads enabled. Each availability edge writes a wake row on every enabled
+   * project's board so the outage surfaces where the coordinator is watched.
+   */
+  async handleAgentMcpAvailability(available: boolean): Promise<void> {
+    const previous = this.agentMcpAvailable;
+    if (previous === available) return;
+    this.agentMcpAvailable = available;
+    // Booting with the endpoint already on is the default, not a transition.
+    let text: string | null = null;
+    if (!available) {
+      text =
+        "Paseo tools endpoint is off — the coordinator's tools are unreachable until daemon mcp.enabled is set";
+    } else if (previous === false) {
+      text = "Paseo tools endpoint is back — the coordinator's tools are reachable again";
+    }
+    if (text === null) return;
+    let storedProjectIds: string[] = [];
+    try {
+      storedProjectIds = await this.store.listProjectIds();
+    } catch (error) {
+      this.logger.warn({ err: error }, "Failed to list coordinator projects for MCP availability");
+    }
+    const projectIds = new Set<string>(storedProjectIds);
+    for (const projectId of this.states.keys()) projectIds.add(projectId);
+    for (const projectId of projectIds) {
+      try {
+        const state = await this.getState(projectId);
+        if (!state?.enabled) continue;
+        await this.appendWakeRow(projectId, text);
+      } catch (error) {
+        this.logger.warn({ err: error, projectId }, "Failed to record MCP availability on board");
+      }
+    }
+  }
+
   private async buildBoardSnapshot(projectId: string): Promise<CoordinatorBoardSnapshot> {
     const [state, board, project, workspaces] = await Promise.all([
       this.getState(projectId),
@@ -645,11 +711,16 @@ export class CoordinatorService {
           request.requestedAt ??
           agent.permissionRequestedAt.get(request.id) ??
           new Date(now).toISOString();
-        const question = request.kind === "question" ? firstDecisionQuestion(request) : null;
+        const questions = request.kind === "question" ? decisionQuestions(request) : null;
+        const question = questions?.first ?? null;
         // Codex/OpenCode title their question requests literally "Question";
         // the actual text lives in input.questions[0].question.
         const questionText = question?.text ?? decisionQuestionText(request);
         this.knownDecisionQuestions.set(this.decisionKey(agent.id, request.id), questionText);
+        // A tap answers question[0] only, so a request asking several questions
+        // gets no actions — the client routes the row to the session's chat.
+        const actions =
+          questions && questions.count > 1 ? [] : decisionRowActions(request, question);
         needsYou.push({
           kind: "decision",
           id: `decision:${agent.id}:${request.id}`,
@@ -660,7 +731,11 @@ export class CoordinatorService {
           askedAt,
           ...(request.kind === "question" ? { requestKind: "question" } : {}),
           ...(question?.header ? { questionHeader: question.header } : {}),
-          actions: decisionRowActions(request, question),
+          ...(questions && questions.count > 0 ? { questionCount: questions.count } : {}),
+          ...(actions.some((action) => action.composerQuote === true)
+            ? { quoteText: decisionQuoteText(request, question) }
+            : {}),
+          actions,
           waitingMs: Math.max(0, now - Date.parse(askedAt)),
         });
       }
