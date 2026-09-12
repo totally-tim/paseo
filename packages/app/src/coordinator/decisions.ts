@@ -81,25 +81,47 @@ export function resolveBoardActions(
 }
 
 /**
+ * A multi-question request cannot be answered with one tap — the row routes to
+ * the asking session's chat, where the full question form renders.
+ */
+export function isMultiQuestionRow(
+  row: Pick<CoordinatorDecisionBoardRow, "questionCount">,
+): boolean {
+  return (row.questionCount ?? 0) > 1;
+}
+
+/**
  * The response a board action produces. Question-kind rows carry no live
  * request the app can rely on, so their answer is built from the row alone:
  * the option label, keyed by the question's header, inside
- * `updatedInput.answers` — the shape question providers consume.
+ * `updatedInput.answers` — the shape question providers consume. A row with
+ * more than one question never gets that shape — one tap cannot answer the
+ * whole request.
  */
 export function buildBoardActionResponse(
-  row: Pick<CoordinatorDecisionBoardRow, "requestKind" | "questionHeader">,
+  row: Pick<CoordinatorDecisionBoardRow, "requestKind" | "questionHeader" | "questionCount">,
   action: Pick<BoardAction, "id" | "label" | "behavior">,
 ): AgentPermissionResponse {
   if (action.behavior === "deny") {
     return { behavior: "deny", selectedActionId: action.id, message: "Denied by user" };
   }
-  if (row.requestKind === "question" && row.questionHeader) {
+  if (row.requestKind === "question" && row.questionHeader && !isMultiQuestionRow(row)) {
     return {
       behavior: "allow",
       updatedInput: { answers: { [row.questionHeader]: action.label } },
     };
   }
   return { behavior: "allow", selectedActionId: action.id };
+}
+
+/**
+ * The text a composerQuote action quotes — the proposal body when the wire
+ * carries one, the row's question otherwise.
+ */
+export function resolveComposerQuoteSource(
+  row: Pick<CoordinatorDecisionBoardRow, "question" | "quoteText">,
+): string {
+  return row.quoteText ?? row.question;
 }
 
 /**

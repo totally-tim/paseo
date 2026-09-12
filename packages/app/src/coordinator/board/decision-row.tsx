@@ -2,7 +2,7 @@ import { useCallback, useMemo } from "react";
 import { Pressable, Text, View, type PressableStateCallbackType } from "react-native";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { Check, X } from "lucide-react-native";
+import { Check, MessagesSquare, X } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { CoordinatorDecisionBoardRow } from "@getpaseo/protocol/messages";
 import type { Theme } from "@/styles/theme";
@@ -11,10 +11,11 @@ import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { getStatusDotColor } from "@/utils/status-dot-color";
 import { formatDuration } from "@/utils/time";
 import type { PendingPermission } from "@/types/shared";
-import { resolveBoardActions, type BoardAction } from "@/coordinator/decisions";
+import { isMultiQuestionRow, resolveBoardActions, type BoardAction } from "@/coordinator/decisions";
 
 const ThemedCheckIcon = withUnistyles(Check);
 const ThemedXIcon = withUnistyles(X);
+const ThemedMessagesSquareIcon = withUnistyles(MessagesSquare);
 const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
 
 const primaryColorMapping = (theme: Theme) => ({
@@ -103,6 +104,30 @@ export function DecisionActionButton({
 }
 
 /**
+ * The single affordance on a multi-question row — one tap cannot answer a
+ * request with several questions, so it routes to the asking session's chat
+ * where the full question form renders.
+ */
+export function AnswerInChatButton({ onPress, testID }: { onPress: () => void; testID?: string }) {
+  const { t } = useTranslation();
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
+      style={actionButtonStyle}
+      testID={testID}
+    >
+      <View style={styles.actionContent}>
+        <ThemedMessagesSquareIcon size={14} uniProps={primaryColorMapping} />
+        <Text style={[styles.actionLabel, styles.actionLabelPrimary]}>
+          {t("coordinator.board.answerInChat")}
+        </Text>
+      </View>
+    </Pressable>
+  );
+}
+
+/**
  * The line under a decision question: who is asking, how long it has waited,
  * and the daemon default with its countdown.
  */
@@ -151,6 +176,7 @@ export function DecisionRow({
   compact,
   onRespond,
   onPeek,
+  onOpenAgent,
 }: {
   row: CoordinatorDecisionBoardRow;
   agentTitle: string | null;
@@ -160,6 +186,7 @@ export function DecisionRow({
   compact: boolean;
   onRespond: (rowId: string, action: BoardAction) => void;
   onPeek: (rowId: string) => void;
+  onOpenAgent: (agentId: string) => void;
 }) {
   const { t } = useTranslation();
   const handleRespond = useCallback(
@@ -167,6 +194,10 @@ export function DecisionRow({
     [onRespond, row.id],
   );
   const handlePeek = useCallback(() => onPeek(row.id), [onPeek, row.id]);
+  const handleAnswerInChat = useCallback(
+    () => onOpenAgent(row.agentId),
+    [onOpenAgent, row.agentId],
+  );
   const actions = useMemo(() => resolveBoardActions(row, permission), [row, permission]);
   const meta = useMemo(
     () => describeDecisionMeta({ row, agentTitle, now, t }),
@@ -193,15 +224,22 @@ export function DecisionRow({
           </Pressable>
         </View>
         <View style={[styles.actionRow, compact && styles.actionRowCompact]}>
-          {actions.map((action, index) => (
-            <DecisionActionButton
-              key={action.id}
-              action={action}
-              state={state}
-              onPress={handleRespond}
-              testID={`coordinator-decision-${row.id}-action-${index}`}
+          {isMultiQuestionRow(row) ? (
+            <AnswerInChatButton
+              onPress={handleAnswerInChat}
+              testID={`coordinator-decision-${row.id}-answer-in-chat`}
             />
-          ))}
+          ) : (
+            actions.map((action, index) => (
+              <DecisionActionButton
+                key={action.id}
+                action={action}
+                state={state}
+                onPress={handleRespond}
+                testID={`coordinator-decision-${row.id}-action-${index}`}
+              />
+            ))
+          )}
         </View>
       </View>
       {state.error ? (
@@ -222,6 +260,7 @@ export function DecisionPeekSheet({
   now,
   onRespond,
   onClose,
+  onOpenAgent,
 }: {
   row: CoordinatorDecisionBoardRow | null;
   agentTitle: string | null;
@@ -230,6 +269,7 @@ export function DecisionPeekSheet({
   now: number;
   onRespond: (action: BoardAction) => void;
   onClose: () => void;
+  onOpenAgent: (agentId: string) => void;
 }) {
   const { t } = useTranslation();
   const actions = useMemo(
@@ -237,6 +277,13 @@ export function DecisionPeekSheet({
     [row, permission],
   );
   const header = useMemo(() => ({ title: t("coordinator.board.peekTitle") }), [t]);
+  const handleAnswerInChat = useCallback(() => {
+    if (!row) {
+      return;
+    }
+    onClose();
+    onOpenAgent(row.agentId);
+  }, [row, onClose, onOpenAgent]);
   if (!row) {
     return null;
   }
@@ -259,14 +306,21 @@ export function DecisionPeekSheet({
         {meta ? <Text style={styles.peekMeta}>{meta}</Text> : null}
         {state.error ? <Text style={styles.rowError}>{state.error}</Text> : null}
         <View style={styles.peekActions}>
-          {actions.map((action) => (
-            <DecisionActionButton
-              key={action.id}
-              action={action}
-              state={state}
-              onPress={onRespond}
+          {isMultiQuestionRow(row) ? (
+            <AnswerInChatButton
+              onPress={handleAnswerInChat}
+              testID="coordinator-decision-peek-answer-in-chat"
             />
-          ))}
+          ) : (
+            actions.map((action) => (
+              <DecisionActionButton
+                key={action.id}
+                action={action}
+                state={state}
+                onPress={onRespond}
+              />
+            ))
+          )}
         </View>
       </View>
     </AdaptiveModalSheet>
