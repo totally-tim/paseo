@@ -3377,8 +3377,31 @@ export const CoordinatorDecisionBoardRowSchema = z.object({
   requestId: z.string(),
   question: z.string(),
   askedAt: z.string(),
-  /** Renderable answers; the id maps to the permission request's action id. */
-  actions: z.array(z.object({ id: z.string(), label: z.string() })),
+  /**
+   * The raising request's kind. Question-kind requests carry options, not
+   * actions, so the row states it explicitly — the answer buttons render and
+   * respond correctly even before the live request reaches the client.
+   */
+  requestKind: z.string().optional(),
+  /** Question-kind answer key (the question's header) for `updatedInput.answers`. */
+  questionHeader: z.string().optional(),
+  /**
+   * Renderable answers; the id maps to the permission request's action id for
+   * actioned kinds, or indexes the question's options for question-kind.
+   * `behavior`/`variant` mirror the request action so a deny stays a deny when
+   * the live request has not landed yet. `composerQuote` marks the spec's
+   * Correct-it/Edit path: the tap still resolves the request and also focuses
+   * the composer with the row's context quoted for a free-text correction.
+   */
+  actions: z.array(
+    z.object({
+      id: z.string(),
+      label: z.string(),
+      behavior: z.enum(["allow", "deny"]).optional(),
+      variant: z.string().optional(),
+      composerQuote: z.boolean().optional(),
+    }),
+  ),
   /** The answer the daemon applies when `dueAt` passes. Decision timers ship in a later milestone. */
   defaultAnswerLabel: z.string().optional(),
   dueAt: z.string().optional(),
