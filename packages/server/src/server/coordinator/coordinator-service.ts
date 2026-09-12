@@ -144,6 +144,7 @@ interface DecisionQuestionOption {
 }
 
 interface DecisionQuestion {
+  text?: string;
   header?: string;
   options: DecisionQuestionOption[];
 }
@@ -177,7 +178,8 @@ function firstDecisionQuestion(request: AgentPermissionRequest): DecisionQuestio
       })
     : [];
   const header = nonEmptyValue(first.header);
-  return { ...(header ? { header } : {}), options };
+  const text = nonEmptyValue(first.question);
+  return { ...(text ? { text } : {}), ...(header ? { header } : {}), options };
 }
 
 function decisionRowActions(
@@ -643,18 +645,18 @@ export class CoordinatorService {
           request.requestedAt ??
           agent.permissionRequestedAt.get(request.id) ??
           new Date(now).toISOString();
-        this.knownDecisionQuestions.set(
-          this.decisionKey(agent.id, request.id),
-          decisionQuestionText(request),
-        );
         const question = request.kind === "question" ? firstDecisionQuestion(request) : null;
+        // Codex/OpenCode title their question requests literally "Question";
+        // the actual text lives in input.questions[0].question.
+        const questionText = question?.text ?? decisionQuestionText(request);
+        this.knownDecisionQuestions.set(this.decisionKey(agent.id, request.id), questionText);
         needsYou.push({
           kind: "decision",
           id: `decision:${agent.id}:${request.id}`,
           projectId,
           agentId: agent.id,
           requestId: request.id,
-          question: decisionQuestionText(request),
+          question: questionText,
           askedAt,
           ...(request.kind === "question" ? { requestKind: "question" } : {}),
           ...(question?.header ? { questionHeader: question.header } : {}),
