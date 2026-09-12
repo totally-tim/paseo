@@ -227,17 +227,18 @@ function decisionRowActions(
 }
 
 /**
- * The spec's Correct-it path quotes the proposal body, not the bare question
- * line: the request description when it has one, else the question's own
- * text, else title/name.
+ * The spec's Correct-it path quotes the proposal body. Claude fills
+ * description with the joined option labels on question requests, so the
+ * question's own text wins for question-kind; description is only a fallback
+ * for actioned kinds.
  */
 function decisionQuoteText(
   request: AgentPermissionRequest,
   question: DecisionQuestion | null,
 ): string {
   return (
-    nonEmptyValue(request.description) ??
     question?.text ??
+    nonEmptyValue(request.description) ??
     nonEmptyValue(request.title) ??
     request.name
   );
@@ -605,17 +606,19 @@ export class CoordinatorService {
    * reads enabled. Each availability edge writes a wake row on every enabled
    * project's board so the outage surfaces where the coordinator is watched.
    */
-  async handleAgentMcpAvailability(available: boolean): Promise<void> {
+  async handleAgentMcpAvailability(
+    available: boolean,
+    flag: "mcp.enabled" | "mcp.injectIntoAgents" = "mcp.enabled",
+  ): Promise<void> {
     const previous = this.agentMcpAvailable;
     if (previous === available) return;
     this.agentMcpAvailable = available;
     // Booting with the endpoint already on is the default, not a transition.
     let text: string | null = null;
     if (!available) {
-      text =
-        "Paseo tools endpoint is off — the coordinator's tools are unreachable until daemon mcp.enabled is set";
+      text = `Paseo tools are off (daemon ${flag}) — the coordinator's tools are unreachable until it is set`;
     } else if (previous === false) {
-      text = "Paseo tools endpoint is back — the coordinator's tools are reachable again";
+      text = "Paseo tools are back — the coordinator's tools are reachable again";
     }
     if (text === null) return;
     let storedProjectIds: string[] = [];

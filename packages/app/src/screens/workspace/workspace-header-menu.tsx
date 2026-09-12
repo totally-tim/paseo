@@ -152,10 +152,26 @@ function workspaceHeaderMenuButtonStyle({
   return iconButtonChromeStyle({ size: "large", state: { hovered, pressed, open } });
 }
 
+export interface WorkspaceHeaderMenuDesktopProps extends WorkspaceHeaderWorkspaceActions {
+  /** The workspace's project while its coordinator is enabled — unlocks the board item. */
+  coordinatorProjectId: string | null;
+  /** The project coordinator session, when one is running — unlocks the chat item. */
+  coordinatorAgentId: string | null;
+  onOpenCoordinatorBoard: () => void;
+  onOpenCoordinatorChat: () => void;
+}
+
 /**
- * Wide layouts make tabs from the tab strip's `+` menu, so this one carries workspace actions only.
+ * Wide layouts make tabs from the tab strip's `+` menu, so this one carries workspace actions
+ * plus the coordinator entries a closed board would otherwise strand.
  */
-export function WorkspaceHeaderMenuDesktop(props: WorkspaceHeaderWorkspaceActions) {
+export function WorkspaceHeaderMenuDesktop({
+  coordinatorProjectId,
+  coordinatorAgentId,
+  onOpenCoordinatorBoard,
+  onOpenCoordinatorChat,
+  ...props
+}: WorkspaceHeaderMenuDesktopProps) {
   const { t } = useTranslation();
   return (
     <DropdownMenu>
@@ -168,6 +184,24 @@ export function WorkspaceHeaderMenuDesktop(props: WorkspaceHeaderWorkspaceAction
         <WorkspaceHeaderMenuTriggerIcon />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" width={220} testID="workspace-header-menu">
+        {coordinatorProjectId ? (
+          <DropdownMenuItem
+            testID="workspace-header-open-coordinator-board"
+            leading={MENU_COORDINATOR_BOARD_ICON}
+            onSelect={onOpenCoordinatorBoard}
+          >
+            {t("coordinator.board.openBoard")}
+          </DropdownMenuItem>
+        ) : null}
+        {coordinatorAgentId ? (
+          <DropdownMenuItem
+            testID="workspace-header-open-coordinator-chat"
+            leading={MENU_COORDINATOR_CHAT_ICON}
+            onSelect={onOpenCoordinatorChat}
+          >
+            {t("coordinator.board.openChat")}
+          </DropdownMenuItem>
+        ) : null}
         <WorkspaceHeaderWorkspaceActionItems {...props} />
       </DropdownMenuContent>
     </DropdownMenu>

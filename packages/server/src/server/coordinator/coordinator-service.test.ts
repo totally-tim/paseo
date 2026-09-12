@@ -822,7 +822,7 @@ describe("board derivation", () => {
     expect(row!.actions).toEqual([]);
   });
 
-  test("a composerQuote action quotes the request description over the question text", async () => {
+  test("a composerQuote action quotes the question text over the request description", async () => {
     await harness.service.enableProjectCoordinator(enableInput());
     await harness.service.start();
 
@@ -876,7 +876,8 @@ describe("board derivation", () => {
 
     const snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
     const row = (id: string) => snapshot.needsYou.find((entry) => entry.requestId === id);
-    expect(row("q-desc")!.quoteText).toBe("The proposal body the user corrects");
+    // Providers abuse description for option labels; the question text wins.
+    expect(row("q-desc")!.quoteText).toBe("Does this plan look right?");
     expect(row("q-plain")!.quoteText).toBeUndefined();
     expect(row("perm-tool")!.quoteText).toBeUndefined();
   });
@@ -1021,7 +1022,7 @@ describe("agent MCP availability", () => {
 
     const emitted = new Set<string>();
     harness.service.subscribeBoard((snapshot) => {
-      if (snapshot.wake?.text.includes("tools endpoint")) emitted.add(snapshot.projectId);
+      if (snapshot.wake?.text.includes("tools are off")) emitted.add(snapshot.projectId);
     });
 
     await harness.service.handleAgentMcpAvailability(false);
@@ -1029,11 +1030,11 @@ describe("agent MCP availability", () => {
 
     for (const projectId of [PROJECT_ID, "prj_other"]) {
       const snapshot = await harness.service.getBoardSnapshot(projectId);
-      expect(snapshot.wake?.text).toContain("Paseo tools endpoint is off");
+      expect(snapshot.wake?.text).toContain("Paseo tools are off");
       expect(snapshot.wake?.text).toContain("mcp.enabled");
     }
     const disabled = await harness.service.getBoardSnapshot("prj_disabled");
-    expect(disabled.wake?.text ?? "").not.toContain("tools endpoint");
+    expect(disabled.wake?.text ?? "").not.toContain("tools are off");
     expect(emitted).toEqual(new Set([PROJECT_ID, "prj_other"]));
   });
 
@@ -1055,13 +1056,23 @@ describe("agent MCP availability", () => {
     await harness.service.handleAgentMcpAvailability(false);
     await flushBoard();
     snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
-    expect(snapshot.wake?.text).toContain("tools endpoint is off");
-    expect(wakeTexts.filter((text) => text?.includes("is off"))).toHaveLength(1);
+    expect(snapshot.wake?.text).toContain("tools are off");
+    expect(wakeTexts.filter((text) => text?.includes("are off"))).toHaveLength(1);
 
     await harness.service.handleAgentMcpAvailability(true);
     await flushBoard();
     snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
     expect(snapshot.wake?.text).toContain("reachable again");
+  });
+
+  test("the wake row names the flag that cut the tools", async () => {
+    await harness.service.enableProjectCoordinator(enableInput());
+
+    await harness.service.handleAgentMcpAvailability(false, "mcp.injectIntoAgents");
+    await flushBoard();
+
+    const snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    expect(snapshot.wake?.text).toContain("mcp.injectIntoAgents");
   });
 });
 

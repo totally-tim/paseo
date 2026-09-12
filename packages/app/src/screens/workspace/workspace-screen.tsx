@@ -1090,6 +1090,10 @@ function WorkspaceHeaderTitleBar({
             onCopyWorkspacePath={onCopyWorkspacePath}
             onCopyBranchName={onCopyBranchName}
             onOpenSetupTab={onOpenSetupTab}
+            coordinatorProjectId={coordinatorProjectId}
+            coordinatorAgentId={coordinatorAgentId}
+            onOpenCoordinatorBoard={onOpenCoordinatorBoard}
+            onOpenCoordinatorChat={onOpenCoordinatorChat}
           />
         )}
         {isMobile && workspaceScripts.length > 0 ? (

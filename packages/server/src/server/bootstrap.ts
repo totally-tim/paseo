@@ -1684,21 +1684,35 @@ export async function createPaseoDaemon(
             agentMcpBaseUrl = mcpEnabled ? mcpBaseUrl : null;
             agentManager.setMcpBaseUrl(agentMcpBaseUrl);
             agentManager.setPaseoToolsEnabled(mcpEnabled && config.mcpInjectIntoAgents !== false);
+            // A coordinator's required tools die when either flag goes off —
+            // the endpoint needs mcp.enabled, the injection needs injectIntoAgents.
+            const coordinatorToolsAvailable = () =>
+              mcpEnabled && daemonConfigStore.get().mcp.injectIntoAgents !== false;
             daemonConfigStore.onFieldChange("mcp.enabled", (value) => {
               mcpEnabled = value !== false;
               const inject = daemonConfigStore.get().mcp.injectIntoAgents !== false;
               agentManager.setMcpBaseUrl(mcpEnabled ? mcpBaseUrl : null);
               agentManager.setPaseoToolsEnabled(mcpEnabled && inject);
               setAgentProviderToolsEnabled(mcpEnabled && inject);
-              void coordinatorService.handleAgentMcpAvailability(mcpEnabled);
+              void coordinatorService.handleAgentMcpAvailability(
+                coordinatorToolsAvailable(),
+                "mcp.enabled",
+              );
             });
             // Booting with the endpoint off strands resident coordinators'
             // tools the same way a live toggle does.
-            void coordinatorService.handleAgentMcpAvailability(mcpEnabled);
+            void coordinatorService.handleAgentMcpAvailability(
+              coordinatorToolsAvailable(),
+              "mcp.enabled",
+            );
             daemonConfigStore.onFieldChange("mcp.injectIntoAgents", (value) => {
               agentManager.setMcpBaseUrl(mcpEnabled ? mcpBaseUrl : null);
               agentManager.setPaseoToolsEnabled(mcpEnabled && value !== false);
               setAgentProviderToolsEnabled(mcpEnabled && value !== false);
+              void coordinatorService.handleAgentMcpAvailability(
+                coordinatorToolsAvailable(),
+                "mcp.injectIntoAgents",
+              );
             });
             daemonConfigStore.onFieldChange("appendSystemPrompt", (value) => {
               agentManager.setAppendSystemPrompt(typeof value === "string" ? value : "");
