@@ -3195,8 +3195,19 @@ export class Session {
     >,
     source?: object,
   ): Promise<void> {
+    const service = this.coordinatorService;
+    // Optional on the schema: the CI-config check rides every project RPC so
+    // the setup sheet can say the watch has nothing to poll (story 34).
+    const ciConfigured = service
+      ? await service.resolveCiConfigured(msg.projectId).catch(() => undefined)
+      : undefined;
     const respond = (coordinator: ProjectCoordinatorState | null, error: string | null) => {
-      const payload = { requestId: msg.requestId, coordinator, error };
+      const payload = {
+        requestId: msg.requestId,
+        coordinator,
+        error,
+        ...(ciConfigured !== undefined ? { ciConfigured } : {}),
+      };
       switch (msg.type) {
         case "coordinator.project.enable.request":
           this.emitForSource({ type: "coordinator.project.enable.response", payload }, source);
@@ -3212,7 +3223,6 @@ export class Session {
           return;
       }
     };
-    const service = this.coordinatorService;
     if (!service) {
       respond(null, "Coordinator support is not available on this daemon");
       return;

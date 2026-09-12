@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, mkdirSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -20,11 +20,17 @@ import { createTestLogger } from "../../test-utils/test-logger.js";
 import { createProviderSnapshotManagerStub } from "../test-utils/session-stubs.js";
 import { AgentManager } from "../agent/agent-manager.js";
 import { AgentStorage } from "../agent/agent-storage.js";
+import { LifecycleBus } from "../agent/lifecycle-bus.js";
 import {
   createPaseoToolCatalog,
   type PaseoToolHostDependencies,
 } from "../agent/tools/paseo-tools.js";
-import type { ForgeService } from "../../services/forge-service.js";
+import type {
+  CurrentPullRequestStatus,
+  ForgeService,
+  PullRequestSummary,
+} from "../../services/forge-service.js";
+import type { ForgeResolution } from "../../services/forge-resolver.js";
 import type {
   AgentCapabilityFlags,
   AgentClient,
@@ -43,7 +49,11 @@ import type {
   WorkspaceMutation,
 } from "../workspace-registry.js";
 
-import { CoordinatorRequestError, CoordinatorService } from "./coordinator-service.js";
+import {
+  CoordinatorRequestError,
+  CoordinatorService,
+  type CoordinatorServiceDeps,
+} from "./coordinator-service.js";
 import { CoordinatorToolDeniedError } from "./tool-policy.js";
 
 const logger = createTestLogger();
@@ -77,10 +87,12 @@ class StubAgentSession implements AgentSession {
   }
 
   readonly prompts: AgentPromptInput[] = [];
+  lastTurnId: string | null = null;
 
   async startTurn(prompt: AgentPromptInput): Promise<{ turnId: string }> {
     this.prompts.push(prompt);
     const turnId = `turn-${randomUUID()}`;
+    this.lastTurnId = turnId;
     setTimeout(() => {
       this.push({ type: "turn_started", provider: this.provider, turnId });
       if (!this.holdTurn) {
@@ -277,12 +289,25 @@ interface Harness {
   client: StubAgentClient;
   agentManager: AgentManager;
   service: CoordinatorService;
+  lifecycleBus: LifecycleBus;
 }
+
+type HarnessOptions = Partial<
+  Pick<
+    CoordinatorServiceDeps,
+    | "workspaceGitService"
+    | "readProjectUsage"
+    | "changeRequestPollIntervalMs"
+    | "stallSweepIntervalMs"
+    | "stallThresholdMs"
+    | "now"
+  >
+>;
 
 const PROJECT_ID = "prj_test";
 const CODEX_PROFILE: CoordinatorProfileSelection = { provider: "codex" };
 
-function makeHarness(): Harness {
+function makeHarness(options: HarnessOptions = {}): Harness {
   const root = mkdtempSync(path.join(tmpdir(), "coordinator-test-"));
   const paseoHome = path.join(root, "paseo-home");
   const projectDir = path.join(root, "project");
@@ -297,11 +322,13 @@ function makeHarness(): Harness {
 
   const agentStorage = new AgentStorage(path.join(paseoHome, "agents"), logger);
   const client = new StubAgentClient("codex");
+  const lifecycleBus = new LifecycleBus(logger);
   const agentManager = new AgentManager({
     clients: { codex: client },
     registry: agentStorage,
     logger,
     mcpBaseUrl: "http://127.0.0.1:6767/mcp/agents",
+    lifecycleBus,
   });
 
   const service = new CoordinatorService({
@@ -317,6 +344,8 @@ function makeHarness(): Harness {
     },
     paseoHome,
     logger,
+    lifecycleBus,
+    ...options,
   });
 
   return {
@@ -331,7 +360,18 @@ function makeHarness(): Harness {
     client,
     agentManager,
     service,
+    lifecycleBus,
   };
+}
+
+/** Rebuilds the harness with extra service deps, disposing the current one. */
+async function reinitHarness(options: HarnessOptions): Promise<void> {
+  await harness.service.stop().catch(() => undefined);
+  for (const agent of harness.agentManager.listAgents()) {
+    await harness.agentManager.closeAgent(agent.id).catch(() => undefined);
+  }
+  rmSync(harness.root, { recursive: true, force: true });
+  harness = makeHarness(options);
 }
 
 let harness: Harness;
@@ -1607,5 +1647,530 @@ describe("change request tools", () => {
     await expect(tool.handler({ cwd: harness.projectDir, prNumber: 9 }, {})).rejects.toThrow(
       /not supported on Gitea/,
     );
+// ---------------------------------------------------------------------------
+// Milestone 2: wakes, stall detection, lifecycle observation, CR poll
+// ---------------------------------------------------------------------------
+
+function stalledPermissionRequest(id: string): AgentPermissionRequest {
+  return {
+    id,
+    provider: "codex",
+    name: "Bash",
+    kind: "tool",
+    title: "Run npm test?",
+    requestedAt: new Date(Date.now() - 45 * 60_000).toISOString(),
+    actions: [{ id: "allow", label: "Allow", behavior: "allow" }],
+  };
+}
+
+/** System-envelope prompts delivered to a session (wake deliveries only). */
+function wakePrompts(session: StubAgentSession): string[] {
+  return session.prompts.filter(
+    (prompt): prompt is string => typeof prompt === "string" && prompt.startsWith("<paseo-system>"),
+  );
+}
+
+/** Wake prompts containing `needle`; top-level to stay under callback-nesting limits. */
+function wakesContaining(session: StubAgentSession, needle: string): string[] {
+  return wakePrompts(session).filter((prompt) => prompt.includes(needle));
+}
+
+/** Waits until the coordinator's first-contact turn is no longer in flight. */
+async function coordinatorIdle(agentId: string): Promise<void> {
+  await vi.waitFor(() => {
+    expect(harness.agentManager.hasInFlightRun(agentId)).toBe(false);
+  });
+}
+
+describe("wake delivery and the stall sweep", () => {
+  test("a permission pending past the 30-minute threshold wakes the coordinator once", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    await harness.service.start();
+    const coordinatorSession = harness.client.sessions[0];
+    await coordinatorIdle(state.agentId!);
+
+    await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir, title: "My session" },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    const session = harness.client.sessions.at(-1)!;
+    session.push({
+      type: "permission_requested",
+      provider: "codex",
+      request: stalledPermissionRequest("perm-stall-1"),
+    });
+    await flushBoard();
+
+    await harness.service.sweepStalledSessions();
+    await vi.waitFor(() => {
+      const wakes = wakesContaining(coordinatorSession, "Stalled session");
+      expect(wakes).toHaveLength(1);
+      expect(wakes[0]).toContain("Run npm test?");
+      expect(wakes[0]).toContain("Trust: observe · Scope: everything");
+    });
+
+    // The same still-pending request does not wake a second time.
+    await harness.service.sweepStalledSessions();
+    await flushBoard();
+    expect(wakesContaining(coordinatorSession, "Stalled session")).toHaveLength(1);
+
+    const snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    expect(snapshot.wake?.text).toContain("Stalled session");
+    expect(snapshot.wake?.text).toContain("Level: Observe");
+    expect(snapshot.wake?.level).toBe("observe");
+  });
+
+  test("resolving the permission clears the stall so a new request wakes again", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    await harness.service.start();
+    const coordinatorSession = harness.client.sessions[0];
+    await coordinatorIdle(state.agentId!);
+
+    await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir, title: "My session" },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    const session = harness.client.sessions.at(-1)!;
+    session.push({
+      type: "permission_requested",
+      provider: "codex",
+      request: stalledPermissionRequest("perm-stall-1"),
+    });
+    await flushBoard();
+    await harness.service.sweepStalledSessions();
+    await vi.waitFor(() => {
+      expect(wakesContaining(coordinatorSession, "Stalled session")).toHaveLength(1);
+    });
+
+    session.push({
+      type: "permission_resolved",
+      provider: "codex",
+      requestId: "perm-stall-1",
+      resolution: { behavior: "allow" },
+    });
+    await harness.service.sweepStalledSessions();
+
+    session.push({
+      type: "permission_requested",
+      provider: "codex",
+      request: stalledPermissionRequest("perm-stall-2"),
+    });
+    await flushBoard();
+    await harness.service.sweepStalledSessions();
+    await vi.waitFor(() => {
+      expect(wakesContaining(coordinatorSession, "Stalled session")).toHaveLength(2);
+    });
+  });
+
+  test("a fresh permission under the threshold does not wake", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    await harness.service.start();
+    const coordinatorSession = harness.client.sessions[0];
+    await coordinatorIdle(state.agentId!);
+
+    await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir, title: "My session" },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    harness.client.sessions.at(-1)!.push({
+      type: "permission_requested",
+      provider: "codex",
+      request: {
+        id: "perm-fresh",
+        provider: "codex",
+        name: "Bash",
+        kind: "tool",
+        title: "Run npm test?",
+        actions: [{ id: "allow", label: "Allow", behavior: "allow" }],
+      },
+    });
+    await flushBoard();
+    await harness.service.sweepStalledSessions();
+    await flushBoard();
+
+    expect(wakesContaining(coordinatorSession, "Stalled session")).toHaveLength(0);
+  });
+
+  test("project scope skips your own stalled session but wakes for delegated ones", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput({ scope: "project" }));
+    await harness.service.start();
+    const coordinatorSession = harness.client.sessions[0];
+    await coordinatorIdle(state.agentId!);
+
+    const mine = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir, title: "My own session" },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    harness.client.sessions.at(-1)!.push({
+      type: "permission_requested",
+      provider: "codex",
+      request: stalledPermissionRequest("perm-mine"),
+    });
+    await flushBoard();
+    await harness.service.sweepStalledSessions();
+    await flushBoard();
+    expect(wakesContaining(coordinatorSession, "Stalled session")).toHaveLength(0);
+
+    await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir, title: "Delegated job" },
+      undefined,
+      {
+        workspaceId: harness.workspace.workspaceId,
+        labels: { [PARENT_AGENT_ID_LABEL]: mine.id },
+      },
+    );
+    harness.client.sessions.at(-1)!.push({
+      type: "permission_requested",
+      provider: "codex",
+      request: stalledPermissionRequest("perm-delegated"),
+    });
+    await flushBoard();
+    await harness.service.sweepStalledSessions();
+    await vi.waitFor(() => {
+      expect(wakesContaining(coordinatorSession, "Stalled session")).toHaveLength(1);
+    });
+  });
+
+  test("a disabled coordinator is never woken", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    await harness.service.start();
+    await harness.service.disableProjectCoordinator(PROJECT_ID);
+    const coordinatorSession = harness.client.sessions[0];
+
+    await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir, title: "My session" },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    harness.client.sessions.at(-1)!.push({
+      type: "permission_requested",
+      provider: "codex",
+      request: stalledPermissionRequest("perm-stall-x"),
+    });
+    await flushBoard();
+    await harness.service.sweepStalledSessions();
+    await flushBoard();
+
+    expect(state.agentId).not.toBeNull();
+    expect(wakesContaining(coordinatorSession, "Stalled session")).toHaveLength(0);
+  });
+});
+
+describe("lifecycle-bus observation", () => {
+  test("a covered session ending a turn in error wakes the coordinator once", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    await harness.service.start();
+    const coordinatorSession = harness.client.sessions[0];
+    await coordinatorIdle(state.agentId!);
+
+    await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir, title: "Delegated job" },
+      undefined,
+      {
+        workspaceId: harness.workspace.workspaceId,
+        labels: { [PARENT_AGENT_ID_LABEL]: state.agentId! },
+      },
+    );
+    const session = harness.client.sessions.at(-1)!;
+    session.push({ type: "turn_started", provider: "codex", turnId: "t-1" });
+    session.push({ type: "turn_failed", provider: "codex", turnId: "t-1", error: "boom" });
+    await vi.waitFor(() => {
+      expect(wakesContaining(coordinatorSession, "Session errored")).toHaveLength(1);
+    });
+
+    // Another failure while the error stands does not re-wake.
+    session.push({ type: "turn_failed", provider: "codex", turnId: "t-2", error: "boom again" });
+    await flushBoard();
+    expect(wakesContaining(coordinatorSession, "Session errored")).toHaveLength(1);
+
+    // A fresh turn re-arms the stall so the next failure wakes again.
+    session.push({ type: "turn_started", provider: "codex", turnId: "t-3" });
+    session.push({ type: "turn_failed", provider: "codex", turnId: "t-3", error: "boom third" });
+    await vi.waitFor(() => {
+      expect(wakesContaining(coordinatorSession, "Session errored")).toHaveLength(2);
+    });
+  });
+
+  test("project scope filters lifecycle wakes to delegated sessions", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput({ scope: "project" }));
+    await harness.service.start();
+    const coordinatorSession = harness.client.sessions[0];
+    await coordinatorIdle(state.agentId!);
+
+    await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir, title: "My own session" },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    const session = harness.client.sessions.at(-1)!;
+    session.push({ type: "turn_started", provider: "codex", turnId: "t-own" });
+    session.push({ type: "turn_failed", provider: "codex", turnId: "t-own", error: "boom" });
+    await flushBoard();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(wakesContaining(coordinatorSession, "Session errored")).toHaveLength(0);
+  });
+
+  test("the coordinator's own failed turn never wakes it", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    await harness.service.start();
+    const coordinatorSession = harness.client.sessions[0];
+    await coordinatorIdle(state.agentId!);
+
+    coordinatorSession.push({ type: "turn_started", provider: "codex", turnId: "t-c" });
+    coordinatorSession.push({
+      type: "turn_failed",
+      provider: "codex",
+      turnId: "t-c",
+      error: "coordinator boom",
+    });
+    await flushBoard();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(wakesContaining(coordinatorSession, "Session errored")).toHaveLength(0);
+  });
+
+  test("wakes queue while the coordinator is mid-turn and flush combined on turn end", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    await harness.service.start();
+    const coordinatorSession = harness.client.sessions[0];
+    await coordinatorIdle(state.agentId!);
+
+    // Hold a turn open on the coordinator session.
+    coordinatorSession.holdTurn = true;
+    const iterator = harness.agentManager.streamAgent(state.agentId!, "keep working");
+    void (async () => {
+      for await (const _event of iterator) {
+        // drain
+      }
+    })().catch(() => undefined);
+    await vi.waitFor(() => {
+      expect(harness.agentManager.hasInFlightRun(state.agentId!)).toBe(true);
+      expect(coordinatorSession.lastTurnId).not.toBeNull();
+    });
+
+    await harness.service.wakeProjectCoordinator(PROJECT_ID, {
+      key: "k1",
+      reason: "first thing",
+    });
+    await harness.service.wakeProjectCoordinator(PROJECT_ID, {
+      key: "k2",
+      reason: "second thing",
+    });
+    // Nothing is delivered while the turn runs — and no second turn starts.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(wakePrompts(coordinatorSession)).toHaveLength(0);
+
+    coordinatorSession.push({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: coordinatorSession.lastTurnId!,
+    });
+    await vi.waitFor(() => {
+      expect(wakePrompts(coordinatorSession)).toHaveLength(1);
+    });
+    const delivered = wakePrompts(coordinatorSession)[0];
+    expect(delivered).toContain("first thing");
+    expect(delivered).toContain("second thing");
+  });
+});
+
+// Minimal forge stub for the poll-through-service tests.
+class HarnessForgeService {
+  pullRequests: PullRequestSummary[] = [];
+  statuses = new Map<string, CurrentPullRequestStatus | null>();
+  listCalls = 0;
+  statusCalls: string[] = [];
+
+  async listPullRequests(): Promise<PullRequestSummary[]> {
+    this.listCalls += 1;
+    return this.pullRequests;
+  }
+
+  async getCurrentPullRequestStatus(options: {
+    headRef: string;
+  }): Promise<CurrentPullRequestStatus | null> {
+    this.statusCalls.push(options.headRef);
+    return this.statuses.get(options.headRef) ?? null;
+  }
+}
+
+function harnessPullRequest(number: number): PullRequestSummary {
+  return {
+    number,
+    title: `Change request ${number}`,
+    url: `https://github.com/o/r/pull/${number}`,
+    state: "open",
+    body: null,
+    baseRefName: "main",
+    headRefName: `branch-${number}`,
+    labels: [],
+    updatedAt: "2026-09-11T10:00:00Z",
+  };
+}
+
+function harnessWorkspaceGitService(
+  forge: HarnessForgeService | null,
+): CoordinatorServiceDeps["workspaceGitService"] {
+  const resolution: ForgeResolution | null = forge
+    ? { forge: "github", host: "github.com", service: forge as unknown as ForgeService }
+    : null;
+  return {
+    resolveForge: async () => resolution,
+    resolveRepoRoot: async (cwd: string) => cwd,
+  };
+}
+
+describe("change-request polling", () => {
+  test("the first poll baselines silently; a changed check state wakes once with the diff", async () => {
+    const forge = new HarnessForgeService();
+    forge.pullRequests = [harnessPullRequest(41)];
+    forge.statuses.set("branch-41", {
+      url: "https://github.com/o/r/pull/41",
+      title: "Change request 41",
+      state: "open",
+      baseRefName: "main",
+      headRefName: "branch-41",
+      isMerged: false,
+      mergeable: "MERGEABLE",
+      checks: [{ name: "test-e2e", status: "pending", url: null }],
+      checksStatus: "pending",
+      reviewDecision: "pending",
+    });
+    await reinitHarness({
+      workspaceGitService: harnessWorkspaceGitService(forge),
+    });
+
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    await harness.service.start();
+    const coordinatorSession = harness.client.sessions[0];
+    await coordinatorIdle(state.agentId!);
+
+    // The tracked project's immediate tick baselines silently — wait for the
+    // persisted file so the manual polls below are deterministic.
+    const pollFile = path.join(harness.paseoHome, "coordinator", "poll", `${PROJECT_ID}.json`);
+    await vi.waitFor(() => {
+      expect(existsSync(pollFile)).toBe(true);
+    });
+    expect((await harness.service.runChangeRequestPollOnce(PROJECT_ID))?.kind).toBe("unchanged");
+    expect(wakesContaining(coordinatorSession, "#41")).toHaveLength(0);
+
+    forge.statuses.set("branch-41", {
+      url: "https://github.com/o/r/pull/41",
+      title: "Change request 41",
+      state: "open",
+      baseRefName: "main",
+      headRefName: "branch-41",
+      isMerged: false,
+      mergeable: "MERGEABLE",
+      checks: [{ name: "test-e2e", status: "failure", url: null }],
+      checksStatus: "failure",
+      reviewDecision: "pending",
+    });
+    const second = await harness.service.runChangeRequestPollOnce(PROJECT_ID);
+    expect(second?.kind).toBe("changed");
+
+    await vi.waitFor(() => {
+      const wakes = wakesContaining(coordinatorSession, "#41");
+      expect(wakes).toHaveLength(1);
+      expect(wakes[0]).toContain("test-e2e pending→failure");
+      expect(wakes[0]).toContain("<untrusted-forge-data>");
+      expect(wakes[0]).toContain("Trust: observe");
+    });
+
+    // The same state polled again stays silent.
+    expect((await harness.service.runChangeRequestPollOnce(PROJECT_ID))?.kind).toBe("unchanged");
+    expect(wakesContaining(coordinatorSession, "#41")).toHaveLength(1);
+  });
+
+  test("no forge produces no poll and no wake", async () => {
+    await reinitHarness({ workspaceGitService: harnessWorkspaceGitService(null) });
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    await harness.service.start();
+    const coordinatorSession = harness.client.sessions[0];
+    await coordinatorIdle(state.agentId!);
+
+    const outcome = await harness.service.runChangeRequestPollOnce(PROJECT_ID);
+    expect(outcome?.kind).toBe("no_forge");
+    expect(wakePrompts(coordinatorSession)).toHaveLength(0);
+  });
+
+  test("poll state persists across a service restart and diffs the full outage gap", async () => {
+    const forge = new HarnessForgeService();
+    forge.pullRequests = [harnessPullRequest(41)];
+    const git = harnessWorkspaceGitService(forge);
+    await reinitHarness({ workspaceGitService: git });
+
+    const first = await harness.service.enableProjectCoordinator(enableInput());
+    await harness.service.start();
+    await harness.service.runChangeRequestPollOnce(PROJECT_ID);
+    await harness.service.stop();
+    for (const agent of harness.agentManager.listAgents()) {
+      await harness.agentManager.closeAgent(agent.id).catch(() => undefined);
+    }
+
+    // The "weekend outage": state on disk, service and manager rebuilt.
+    forge.pullRequests = [harnessPullRequest(41), harnessPullRequest(52)];
+    const client2 = new StubAgentClient("codex");
+    const bus2 = new LifecycleBus(logger);
+    const agentManager2 = new AgentManager({
+      clients: { codex: client2 },
+      registry: harness.agentStorage,
+      logger,
+      mcpBaseUrl: "http://127.0.0.1:6767/mcp/agents",
+      lifecycleBus: bus2,
+    });
+    const service2 = new CoordinatorService({
+      agentManager: agentManager2,
+      agentStorage: harness.agentStorage,
+      projectRegistry: harness.projectRegistry,
+      workspaceRegistry: harness.workspaceRegistry,
+      createWorkspaceForDirectory: async () => harness.workspace,
+      paseoHome: harness.paseoHome,
+      logger,
+      lifecycleBus: bus2,
+      workspaceGitService: git,
+    });
+
+    try {
+      await service2.start();
+      await vi.waitFor(() => {
+        expect(agentManager2.getAgent(first.agentId!)).toBeDefined();
+      });
+      await vi.waitFor(() => {
+        expect(agentManager2.hasInFlightRun(first.agentId!)).toBe(false);
+      });
+
+      const outcome = await service2.runChangeRequestPollOnce(PROJECT_ID);
+      expect(outcome?.kind === "changed" || outcome?.kind === "unchanged").toBe(true);
+      await vi.waitFor(() => {
+        const wakes = wakesContaining(client2.sessions[0], "#52");
+        expect(wakes).toHaveLength(1);
+        expect(wakes[0]).toContain("#52 opened");
+      });
+    } finally {
+      await service2.stop();
+      for (const agent of agentManager2.listAgents()) {
+        await agentManager2.closeAgent(agent.id).catch(() => undefined);
+      }
+    }
+  });
+});
+
+describe("resolveCiConfigured", () => {
+  test("reports false for a repo without CI config and true once a workflow exists", async () => {
+    expect(await harness.service.resolveCiConfigured(PROJECT_ID)).toBe(false);
+
+    mkdirSync(path.join(harness.projectDir, ".github", "workflows"), { recursive: true });
+    writeFileSync(path.join(harness.projectDir, ".github", "workflows", "ci.yml"), "name: ci");
+    expect(await harness.service.resolveCiConfigured(PROJECT_ID)).toBe(true);
+  });
+
+  test("returns undefined for an unknown project", async () => {
+    expect(await harness.service.resolveCiConfigured("prj_missing")).toBeUndefined();
   });
 });
