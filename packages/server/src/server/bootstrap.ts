@@ -129,6 +129,7 @@ import { createWorkspaceLabelService } from "./workspace-labels/index.js";
 import { createGitHubService } from "../services/github-service.js";
 import { createPaseoWorktree as createRegisteredPaseoWorktree } from "./paseo-worktree-service.js";
 import { createWorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
+import { CoordinatorService } from "./coordinator/coordinator-service.js";
 import { createPaseoWorktreeWorkflow } from "./worktree-session.js";
 import { DownloadTokenStore } from "./file-download/token-store.js";
 import type { OpenAiSpeechProviderConfig } from "./speech/providers/openai/config.js";
@@ -1017,6 +1018,19 @@ export async function createPaseoDaemon(
     getWorkspace: (id) => workspaceRegistry.get(id),
   });
   agentManager.continuations = continuations;
+
+  // Project coordinators are ordinary persisted agents with role labels; the
+  // service reconciles records, keeps them resident, and derives the board.
+  const coordinatorService = new CoordinatorService({
+    agentManager,
+    agentStorage,
+    projectRegistry,
+    workspaceRegistry,
+    createWorkspaceForDirectory: (cwd, title, projectId) =>
+      workspaceProvisioning.createWorkspaceForDirectory(cwd, title, projectId),
+    paseoHome: config.paseoHome,
+    logger,
+  });
   await continuations.initialize();
   const teardownArchivedWorkspaceRuntime = (workspaceId: string): void => {
     void continuations.cancelWorkspace(workspaceId).catch(() => {
@@ -1477,6 +1491,7 @@ export async function createPaseoDaemon(
     paseoToolPolicy:
       runtime.paseoToolPolicy ??
       (runtime.callerAgentId ? agentManager.getPaseoToolPolicy(runtime.callerAgentId) : undefined),
+    coordinator: coordinatorService,
     paseoHome: config.paseoHome,
     worktreesRoot: config.worktreesRoot,
     callerAgentId: runtime.callerAgentId,
@@ -1783,9 +1798,13 @@ export async function createPaseoDaemon(
               orchestrationSkills,
               workspaceLabelService,
               continuations,
+              coordinatorService,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
             await pluginRuntime.start();
+            // Coordinators load through ensureAgentLoaded before the first
+            // client connects, so they are resident ahead of the first wake.
+            await coordinatorService.start();
             wsServer.beginAcceptingConnections();
             relayRuntime = createRelayRuntime({
               config: {
@@ -1852,6 +1871,7 @@ export async function createPaseoDaemon(
     // Freeze both ingress and registration before taking the agent closure snapshot.
     wsServer?.prepareForShutdown();
     agentManager.prepareForShutdown();
+    await coordinatorService.stop().catch(() => undefined);
     await continuations.close();
     await providerAccounts.close();
     await closeAllAgents(logger, agentManager);

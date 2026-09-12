@@ -101,6 +101,11 @@ import type {
 } from "./types.js";
 import type { ProviderPaseoToolsPolicy } from "@getpaseo/protocol/provider-config";
 import { isPaseoToolEnabled } from "../paseo-tool-policy.js";
+import { assertCoordinatorToolAllowed } from "../../coordinator/tool-policy.js";
+import type {
+  CoordinatorRememberInput,
+  CoordinatorRememberResult,
+} from "../../coordinator/coordinator-service.js";
 
 export interface PaseoToolHostDependencies {
   agentManager: AgentManager;
@@ -140,6 +145,13 @@ export interface PaseoToolHostDependencies {
   paseoToolPolicy?: ProviderPaseoToolsPolicy;
   paseoHome?: string;
   worktreesRoot?: string;
+  /**
+   * Coordinator service bridge for the `remember` tool and memory board rows.
+   * Absent in tests that exercise the catalog without the coordinator slice.
+   */
+  coordinator?: {
+    remember(input: CoordinatorRememberInput): Promise<CoordinatorRememberResult>;
+  };
   /**
    * ID of the agent that is using this tool catalog.
    * Used for cwd/mode inheritance when agents spawn child agents.
@@ -613,6 +625,11 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       const tool = tools.get(name);
       if (!tool) {
         throw new Error(`Paseo tool not found: ${name}`);
+      }
+      // Coordinators run delegate-only at observe trust; the daemon, not the
+      // prompt, enforces that observe callers cannot spawn, mutate, or answer.
+      if (callerAgentId) {
+        assertCoordinatorToolAllowed(agentManager.getAgent(callerAgentId), name);
       }
       return tool.handler(await parseToolInput(tool, input), context);
     },
@@ -3309,6 +3326,53 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       return {
         content: [],
         structuredContent: ensureValidJson({ success: true }),
+      };
+    },
+  );
+
+  registerTool(
+    "remember",
+    {
+      title: "Remember",
+      description:
+        "Write a markdown memory entry. scope 'team' appends to .paseo/memory/project.md " +
+        "for a coordinator and .paseo/memory/learned.md for a delegated agent, in your own " +
+        "checkout. Personal memory layers arrive in a later milestone; only 'team' works today.",
+      inputSchema: {
+        scope: z
+          .enum(["team", "personal", "personal-project"])
+          .default("team")
+          .describe("Memory layer; only 'team' is supported in this milestone."),
+        content: z
+          .string()
+          .trim()
+          .min(1)
+          .describe("Markdown body to record — facts and decisions, not transcripts."),
+        mode: z
+          .enum(["append", "replace"])
+          .optional()
+          .describe("append adds a dated section; replace rewrites the file."),
+      },
+      outputSchema: {
+        filePath: z.string(),
+      },
+    },
+    async ({ scope, content, mode }) => {
+      if (!callerAgentId) {
+        throw new Error("remember requires an agent caller");
+      }
+      if (!options.coordinator) {
+        throw new Error("Coordinator service is not configured");
+      }
+      const result = await options.coordinator.remember({
+        callerAgentId,
+        scope,
+        content,
+        mode,
+      });
+      return {
+        content: [],
+        structuredContent: ensureValidJson(result),
       };
     },
   );
