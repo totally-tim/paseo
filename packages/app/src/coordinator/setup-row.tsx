@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, type ComponentProps } from "react";
+import { useCallback, useEffect, useMemo, useState, type ComponentProps } from "react";
 import { Pressable, Text, View, type PressableStateCallbackType } from "react-native";
 import { useTranslation } from "react-i18next";
 import { Check, ChevronRight } from "lucide-react-native";
@@ -15,8 +15,15 @@ import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import { buildSelectableProviderSelectorProviders } from "@/provider-selection/provider-selection";
 import { useHostRuntimeClient } from "@/runtime/host-runtime";
 import { useHostFeature } from "@/runtime/host-features";
+import { useDraftStore } from "@/stores/draft-store";
+import { buildDraftStoreKey } from "@/stores/draft-keys";
 import type { Theme } from "@/styles/theme";
 import { useCoordinatorBoardSnapshot } from "@/coordinator/board-store";
+import {
+  refreshProjectCoordinator,
+  useCoordinatorProjectStore,
+  useProjectCoordinatorRecord,
+} from "@/coordinator/project-store";
 
 const ThemedChevronRight = withUnistyles(ChevronRight);
 const ThemedCheck = withUnistyles(Check);
@@ -206,6 +213,17 @@ export function CoordinatorEnableSheet({
   >({ investigator: null, implementer: null });
   const [isEnabling, setIsEnabling] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const record = useProjectCoordinatorRecord(serverId, projectId);
+  // The goal engine is a later milestone; until then the affordance queues a
+  // composer draft for the coordinator session that enable creates.
+  const [ciSeedQueued, setCiSeedQueued] = useState(false);
+
+  useEffect(() => {
+    if (visible) {
+      setCiSeedQueued(false);
+      void refreshProjectCoordinator(serverId, projectId);
+    }
+  }, [visible, serverId, projectId]);
 
   const providerRows = useMemo<CoordinatorProviderRow[]>(
     () =>
@@ -253,18 +271,28 @@ export function CoordinatorEnableSheet({
     setError(null);
     setIsEnabling(true);
     try {
-      await client.enableProjectCoordinator({
+      const result = await client.enableProjectCoordinator({
         projectId,
         profile: { provider: effectiveSelection },
         ...(Object.keys(profiles).length > 0 ? { profiles } : {}),
       });
+      useCoordinatorProjectStore.getState().applyProjectResult(serverId, projectId, result);
+      // The board composer only exists once the session does — the draft key it
+      // reads is the session's own, so the queued ask lands there directly.
+      const coordinatorAgentId = result.coordinator?.agentId;
+      if (ciSeedQueued && coordinatorAgentId) {
+        useDraftStore.getState().saveDraftInput({
+          draftKey: buildDraftStoreKey({ serverId, agentId: coordinatorAgentId }),
+          draft: { text: t("coordinator.setup.ciComposerSeed"), attachments: [] },
+        });
+      }
       onClose();
     } catch (enableError) {
       setError(enableError instanceof Error ? enableError.message : String(enableError));
     } finally {
       setIsEnabling(false);
     }
-  }, [client, effectiveSelection, onClose, projectId, roleSelections]);
+  }, [ciSeedQueued, client, effectiveSelection, onClose, projectId, roleSelections, serverId, t]);
 
   const selectInvestigator = useCallback((selection: CoordinatorRoleSelection) => {
     setRoleSelections((current) => ({ ...current, investigator: selection }));
@@ -284,6 +312,8 @@ export function CoordinatorEnableSheet({
   const handleEnablePress = useCallback(() => {
     void handleEnable();
   }, [handleEnable]);
+
+  const queueCiSeed = useCallback(() => setCiSeedQueued(true), []);
 
   const header = useMemo(() => ({ title: t("coordinator.setup.title") }), [t]);
 
@@ -335,6 +365,29 @@ export function CoordinatorEnableSheet({
           onSelect={selectImplementer}
           onRetryProvider={retryProvider}
         />
+        {record?.ciConfigured === false ? (
+          <View style={styles.ciNote} testID="coordinator-setup-no-ci">
+            <Text style={styles.sheetHint}>{t("coordinator.setup.noCi")}</Text>
+            {ciSeedQueued ? (
+              <View style={styles.ciQueuedRow} testID="coordinator-setup-ci-queued">
+                <ThemedCheck size={14} uniProps={mutedColorMapping} />
+                <Text style={styles.sheetHint}>{t("coordinator.setup.ciQueued")}</Text>
+              </View>
+            ) : (
+              <View>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={isEnabling}
+                  onPress={queueCiSeed}
+                  testID="coordinator-setup-add-ci"
+                >
+                  {t("coordinator.setup.addCi")}
+                </Button>
+              </View>
+            )}
+          </View>
+        ) : null}
         {error ? (
           <Text style={styles.errorText} testID="coordinator-enable-error">
             {error}
@@ -461,5 +514,13 @@ const styles = StyleSheet.create((theme) => ({
   sheetActions: {
     flexDirection: "row",
     justifyContent: "flex-end",
+  },
+  ciNote: {
+    gap: theme.spacing[2],
+  },
+  ciQueuedRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
   },
 }));

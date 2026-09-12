@@ -28,6 +28,7 @@ import { useCoordinatorBoardSnapshot } from "@/coordinator/board-store";
 import { buildComposerQuoteText } from "@/coordinator/decisions";
 import { lastAssistantLine } from "@/coordinator/timeline-text";
 import { CoordinatorBoard, type CoordinatorBoardHandlers } from "./board";
+import { CoordinatorBoardTracks } from "./board-tracks";
 
 const ThemedKanban = withUnistyles(Kanban);
 const EMPTY_STREAM_ITEMS: never[] = [];
@@ -190,8 +191,9 @@ function CoordinatorBoardPanel() {
           handlers={handlers}
           reply={reply}
         >
-          {coordinatorAgentId ? (
-            <View style={inputAreaStyle} onLayout={onInputAreaLayout}>
+          <View style={inputAreaStyle} onLayout={onInputAreaLayout}>
+            <CoordinatorBoardTracks serverId={serverId} projectId={projectId} />
+            {coordinatorAgentId ? (
               <Composer
                 agentId={coordinatorAgentId}
                 serverId={serverId}
@@ -214,12 +216,10 @@ function CoordinatorBoardPanel() {
                 isCompactLayout={isCompactComposerLayout}
                 submitButtonTestID="coordinator-board-send"
               />
-            </View>
-          ) : (
-            <View style={inputAreaStyle}>
+            ) : (
               <Text style={styles.fallbackText}>{t("coordinator.board.sessionStarting")}</Text>
-            </View>
-          )}
+            )}
+          </View>
         </CoordinatorBoard>
       </FileDropZone>
     </KeyboardDock>

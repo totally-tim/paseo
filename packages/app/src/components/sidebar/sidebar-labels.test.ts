@@ -13,6 +13,7 @@ function workspace(
     serverId: "host",
     workspaceId,
     projectViewKey: "project",
+    projectId: "project",
     projectName: "Project",
     projectRootPath: "/repo",
     workspaceDirectory: `/repo/${workspaceId}`,

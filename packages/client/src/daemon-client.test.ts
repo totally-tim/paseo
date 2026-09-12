@@ -6349,10 +6349,15 @@ test("enables a project coordinator and resolves its state", async () => {
   mock.triggerMessage(
     wrapSessionMessage({
       type: "coordinator.project.enable.response",
-      payload: { requestId: request.requestId, coordinator: state, error: null },
+      payload: {
+        requestId: request.requestId,
+        coordinator: state,
+        ciConfigured: false,
+        error: null,
+      },
     }),
   );
-  await expect(promise).resolves.toEqual(state);
+  await expect(promise).resolves.toEqual({ coordinator: state, ciConfigured: false });
 });
 
 test("reads and updates a project coordinator", async () => {
@@ -6381,10 +6386,15 @@ test("reads and updates a project coordinator", async () => {
   mock.triggerMessage(
     wrapSessionMessage({
       type: "coordinator.project.get.response",
-      payload: { requestId: getRequest.requestId, coordinator: null, error: null },
+      payload: {
+        requestId: getRequest.requestId,
+        coordinator: null,
+        ciConfigured: true,
+        error: null,
+      },
     }),
   );
-  await expect(getPromise).resolves.toBeNull();
+  await expect(getPromise).resolves.toEqual({ coordinator: null, ciConfigured: true });
 
   const updated = {
     projectId: "project-1",
@@ -6398,6 +6408,7 @@ test("reads and updates a project coordinator", async () => {
     trustLevel: "propose",
     scope: "project",
     usageExpectation: null,
+    guard: { maxConcurrentSubagents: 4 },
   });
   await vi.waitFor(() => expect(mock.sent).toHaveLength(2));
   const updateRequest = parseSentFrame(mock.sent[1]);
@@ -6408,14 +6419,20 @@ test("reads and updates a project coordinator", async () => {
     trustLevel: "propose",
     scope: "project",
     usageExpectation: null,
+    guard: { maxConcurrentSubagents: 4 },
   });
   mock.triggerMessage(
     wrapSessionMessage({
       type: "coordinator.project.update.response",
-      payload: { requestId: updateRequest.requestId, coordinator: updated, error: null },
+      payload: {
+        requestId: updateRequest.requestId,
+        coordinator: updated,
+        ciConfigured: false,
+        error: null,
+      },
     }),
   );
-  await expect(updatePromise).resolves.toEqual(updated);
+  await expect(updatePromise).resolves.toEqual({ coordinator: updated, ciConfigured: false });
 });
 
 test("observes a project board and routes changed pushes by subscriptionId", async () => {

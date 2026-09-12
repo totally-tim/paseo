@@ -22,17 +22,17 @@ function agentTabTestId(agentId: string): string {
 async function enableMockCoordinator(
   workspace: SeededWorkspace,
 ): Promise<{ coordinatorAgentId: string }> {
-  const state = await workspace.client.enableProjectCoordinator({
+  const { coordinator } = await workspace.client.enableProjectCoordinator({
     projectId: workspace.projectId,
     profile: {
       provider: "mock",
       featureValues: { mockAssistantResponse: COORDINATOR_REPLY },
     },
   });
-  if (!state.agentId) {
+  if (!coordinator?.agentId) {
     throw new Error("enableProjectCoordinator returned no coordinator session");
   }
-  return { coordinatorAgentId: state.agentId };
+  return { coordinatorAgentId: coordinator.agentId };
 }
 
 async function closeAgentTab(page: Page, agentId: string): Promise<void> {

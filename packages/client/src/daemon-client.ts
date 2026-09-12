@@ -116,6 +116,7 @@ import type {
   PaseoConfigRevision,
   WorkspaceCreateRequest,
   WorkspaceRecoveryState,
+  CoordinatorGuard,
   CoordinatorProfileSelection,
   CoordinatorProfiles,
   CoordinatorScope,
@@ -592,7 +593,22 @@ export interface UpdateProjectCoordinatorOptions {
   scope?: CoordinatorScope;
   /** Null clears the expectation. */
   usageExpectation?: CoordinatorUsageExpectation | null;
+  /** Partial guard override; absent keys keep daemon defaults. */
+  guard?: CoordinatorGuard;
   requestId?: string;
+}
+
+/**
+ * The `coordinator.project.*` response envelope. `coordinator` is null only on
+ * `get` for a project that was never configured; the mutations throw instead of
+ * resolving a missing record. `ciConfigured` rides alongside so the setup sheet
+ * can say the CI watch has nothing to poll — it is a fact about the repository,
+ * not the coordinator, so it does not live on the state record.
+ */
+export interface CoordinatorProjectResult {
+  coordinator: ProjectCoordinatorState | null;
+  /** False when the project repository has no CI config; absent on older daemons. */
+  ciConfigured?: boolean;
 }
 
 export interface ObserveCoordinatorBoardOptions {
@@ -2968,7 +2984,7 @@ export class DaemonClient {
 
   async enableProjectCoordinator(
     options: EnableProjectCoordinatorOptions,
-  ): Promise<ProjectCoordinatorState> {
+  ): Promise<CoordinatorProjectResult> {
     this.requireCoordinatorSupport();
     const payload =
       await this.sendNamespacedCorrelatedSessionRequest<"coordinator.project.enable.response">({
@@ -2985,13 +3001,13 @@ export class DaemonClient {
     if (payload.error || !payload.coordinator) {
       throw new Error(payload.error ?? "enableProjectCoordinator rejected");
     }
-    return payload.coordinator;
+    return { coordinator: payload.coordinator, ciConfigured: payload.ciConfigured };
   }
 
   async disableProjectCoordinator(
     projectId: string,
     requestId?: string,
-  ): Promise<ProjectCoordinatorState> {
+  ): Promise<CoordinatorProjectResult> {
     this.requireCoordinatorSupport();
     const payload =
       await this.sendNamespacedCorrelatedSessionRequest<"coordinator.project.disable.response">({
@@ -3001,12 +3017,12 @@ export class DaemonClient {
     if (payload.error || !payload.coordinator) {
       throw new Error(payload.error ?? "disableProjectCoordinator rejected");
     }
-    return payload.coordinator;
+    return { coordinator: payload.coordinator, ciConfigured: payload.ciConfigured };
   }
 
   async updateProjectCoordinator(
     options: UpdateProjectCoordinatorOptions,
-  ): Promise<ProjectCoordinatorState> {
+  ): Promise<CoordinatorProjectResult> {
     this.requireCoordinatorSupport();
     const payload =
       await this.sendNamespacedCorrelatedSessionRequest<"coordinator.project.update.response">({
@@ -3021,19 +3037,23 @@ export class DaemonClient {
           ...(options.usageExpectation !== undefined
             ? { usageExpectation: options.usageExpectation }
             : {}),
+          ...(options.guard ? { guard: options.guard } : {}),
         },
       });
     if (payload.error || !payload.coordinator) {
       throw new Error(payload.error ?? "updateProjectCoordinator rejected");
     }
-    return payload.coordinator;
+    return { coordinator: payload.coordinator, ciConfigured: payload.ciConfigured };
   }
 
-  /** The project's coordinator state, or null when none is configured. */
+  /**
+   * The project's coordinator state plus repository facts (CI presence), or a
+   * null coordinator when none is configured.
+   */
   async getProjectCoordinator(
     projectId: string,
     requestId?: string,
-  ): Promise<ProjectCoordinatorState | null> {
+  ): Promise<CoordinatorProjectResult> {
     this.requireCoordinatorSupport();
     const payload =
       await this.sendNamespacedCorrelatedSessionRequest<"coordinator.project.get.response">({
@@ -3043,7 +3063,7 @@ export class DaemonClient {
     if (payload.error) {
       throw new Error(payload.error);
     }
-    return payload.coordinator;
+    return { coordinator: payload.coordinator, ciConfigured: payload.ciConfigured };
   }
 
   /**
