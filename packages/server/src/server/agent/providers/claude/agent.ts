@@ -4242,6 +4242,13 @@ class ClaudeAgentSession implements AgentSession {
     message: Extract<SDKMessage, { type: "rate_limit_event" }>,
     events: AgentStreamEvent[],
   ): void {
+    // The internal event keeps the account usage cache current between probes; the timeline
+    // item stays the visible notification.
+    events.push({
+      type: "account_rate_limits",
+      provider: "claude",
+      payload: message.rate_limit_info,
+    });
     const item = claudeLimitNotification(message.rate_limit_info);
     if (item) events.push({ type: "timeline", item, provider: "claude" });
   }

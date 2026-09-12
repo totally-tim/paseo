@@ -3,6 +3,7 @@ import { useCallback, useState } from "react";
 import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { Button } from "@/components/ui/button";
+import { ResetCreditControl } from "@/provider-accounts/reset-credit";
 import { useProviderAccounts } from "@/provider-accounts/use-provider-accounts";
 import { useAgentContinuation } from "./use-continuation";
 
@@ -57,6 +58,14 @@ export function AgentRecoveryStatus({ serverId, agentId }: { serverId: string; a
           Next capacity check: {new Date(status.nextCheckAt).toLocaleString()}
         </Text>
       ) : null}
+      {waiting
+        ? status.resetCreditAccountIds?.map((accountId) => (
+            <View key={accountId} style={styles.creditRow}>
+              <Text style={styles.text}>{accountLabel(accountId)}</Text>
+              <ResetCreditControl serverId={serverId} accountId={accountId} />
+            </View>
+          ))
+        : null}
       {["waiting", "continuing", "attention"].includes(status.status) ? (
         <Button
           size="sm"
@@ -81,5 +90,11 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[2],
   },
   text: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
+  creditRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: theme.spacing[2],
+  },
   error: { color: theme.colors.statusDanger, fontSize: theme.fontSize.sm },
 }));
