@@ -3386,6 +3386,18 @@ export const CoordinatorDecisionBoardRowSchema = z.object({
   /** Question-kind answer key (the question's header) for `updatedInput.answers`. */
   questionHeader: z.string().optional(),
   /**
+   * Number of questions on a question-kind request. Rows with more than one
+   * question can't be answered with a single tap — the client should route the
+   * user to the session's chat, where the full question form renders.
+   */
+  questionCount: z.number().int().positive().optional(),
+  /**
+   * Text the composer quotes when a `composerQuote` action is tapped — the
+   * proposal body being corrected, not the bare question line. Falls back to
+   * `question` when absent.
+   */
+  quoteText: z.string().optional(),
+  /**
    * Renderable answers; the id maps to the permission request's action id for
    * actioned kinds, or indexes the question's options for question-kind.
    * `behavior`/`variant` mirror the request action so a deny stays a deny when
