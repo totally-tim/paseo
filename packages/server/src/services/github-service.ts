@@ -48,6 +48,7 @@ import type {
   PullRequestTimelineErrorKind,
   PullRequestTimelineItem,
   PullRequestTimelineReviewState,
+  RetriedPullRequestCheck,
   SearchResult,
 } from "./forge-service.js";
 import {
@@ -1333,6 +1334,25 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     });
   }
 
+  /**
+   * Resolve the owner/name slug offline from the origin remote first so a
+   * transient `gh repo view` failure can't block a write on github.com.
+   * `gh repo view` is the fallback: it auto-routes to the cwd remote's host
+   * (covering GitHub Enterprise Server) and survives a renamed repo.
+   */
+  async function resolveRepoSlug(cwd: string, action: string): Promise<string> {
+    let slug = await resolveGitHubSlugFromOrigin(cwd);
+    if (!slug) {
+      const repoView = await getGitHubRepoView({ cwd, run });
+      slug =
+        repoView?.owner?.login && repoView.name ? `${repoView.owner.login}/${repoView.name}` : null;
+    }
+    if (!slug) {
+      throw new Error(`Unable to resolve GitHub repository for ${action}`);
+    }
+    return slug;
+  }
+
   function getPollTargetKey(target: {
     cwd: string;
     headRef: string;
@@ -2466,21 +2486,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     },
 
     async createPullRequest(input) {
-      // Resolve the owner/name slug offline from the origin remote first so a
-      // transient `gh repo view` failure can't block PR creation on github.com.
-      // `gh repo view` is the fallback: it auto-routes to the cwd remote's host
-      // (covering GitHub Enterprise Server) and survives a renamed repo.
-      let slug = await resolveGitHubSlugFromOrigin(input.cwd);
-      if (!slug) {
-        const repoView = await getGitHubRepoView({ cwd: input.cwd, run });
-        slug =
-          repoView?.owner?.login && repoView.name
-            ? `${repoView.owner.login}/${repoView.name}`
-            : null;
-      }
-      if (!slug) {
-        throw new Error("Unable to resolve GitHub repository for pull request creation");
-      }
+      const slug = await resolveRepoSlug(input.cwd, "pull request creation");
       const args = ["api", "-X", "POST", `repos/${slug}/pulls`, "-f", `title=${input.title}`];
       args.push("-f", `head=${input.head}`);
       args.push("-f", `base=${input.base}`);
@@ -2497,6 +2503,108 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
         "{}",
       );
       return parsed;
+    },
+
+    async createPullRequestComment(input) {
+      const slug = await resolveRepoSlug(input.cwd, "commenting on a pull request");
+      const parsed = await runGhJson(
+        [
+          "api",
+          "-X",
+          "POST",
+          `repos/${slug}/issues/${input.prNumber}/comments`,
+          "-f",
+          `body=${input.body}`,
+        ],
+        { cwd: input.cwd },
+        z.object({ html_url: z.string() }).passthrough(),
+        "{}",
+      );
+      return { url: parsed.html_url };
+    },
+
+    async retryPullRequestChecks(input) {
+      const slug = await resolveRepoSlug(input.cwd, "retrying pull request checks");
+      const pullRequest = await runGhJson(
+        ["api", `repos/${slug}/pulls/${input.prNumber}`],
+        { cwd: input.cwd },
+        z.object({ head: z.object({ sha: z.string() }).passthrough() }).passthrough(),
+        "{}",
+      );
+      const headSha = pullRequest.head.sha;
+
+      // Failed Actions runs are re-run via rerun-failed-jobs so their
+      // successful jobs are not repeated.
+      const runs = await runGhJson(
+        ["api", `repos/${slug}/actions/runs?head_sha=${encodeURIComponent(headSha)}&per_page=100`],
+        { cwd: input.cwd },
+        z
+          .object({
+            workflow_runs: z
+              .array(
+                z
+                  .object({
+                    id: z.number(),
+                    name: z.string().nullable().optional(),
+                    conclusion: z.string().nullable().optional(),
+                  })
+                  .passthrough(),
+              )
+              .default([]),
+          })
+          .passthrough(),
+        "{}",
+      );
+      const retried: RetriedPullRequestCheck[] = [];
+      for (const workflowRun of runs.workflow_runs) {
+        if (!isRetryableCheckConclusion(workflowRun.conclusion)) {
+          continue;
+        }
+        await run(
+          ["api", "-X", "POST", `repos/${slug}/actions/runs/${workflowRun.id}/rerun-failed-jobs`],
+          { cwd: input.cwd },
+        );
+        retried.push({ id: workflowRun.id, name: workflowRun.name ?? `run ${workflowRun.id}` });
+      }
+
+      // Check runs outside GitHub Actions (third-party apps) are re-requested
+      // individually; commit status contexts have no re-run endpoint.
+      const checkRuns = await runGhJson(
+        ["api", `repos/${slug}/commits/${headSha}/check-runs?filter=latest&per_page=100`],
+        { cwd: input.cwd },
+        z
+          .object({
+            check_runs: z
+              .array(
+                z
+                  .object({
+                    id: z.number(),
+                    name: z.string(),
+                    conclusion: z.string().nullable().optional(),
+                    app: z.object({ slug: z.string().optional() }).nullable().optional(),
+                  })
+                  .passthrough(),
+              )
+              .default([]),
+          })
+          .passthrough(),
+        "{}",
+      );
+      for (const checkRun of checkRuns.check_runs) {
+        // GitHub Actions check runs ride along on the workflow-run rerun above.
+        if (checkRun.app?.slug === "github-actions") {
+          continue;
+        }
+        if (!isRetryableCheckConclusion(checkRun.conclusion)) {
+          continue;
+        }
+        await run(["api", "-X", "POST", `repos/${slug}/check-runs/${checkRun.id}/rerequest`], {
+          cwd: input.cwd,
+        });
+        retried.push({ id: checkRun.id, name: checkRun.name });
+      }
+
+      return { retried };
     },
 
     async mergePullRequest(input) {
@@ -3123,6 +3231,15 @@ async function runCurrentPullRequestStatusCommand(options: {
       cwd: options.cwd,
     });
   }
+}
+
+/**
+ * Conclusions a retry request re-runs. `action_required`/`cancelled` runs were
+ * deliberately stopped, not failed, and `neutral`/`skipped`/`success` runs
+ * have nothing to retry.
+ */
+function isRetryableCheckConclusion(conclusion: string | null | undefined): boolean {
+  return conclusion === "failure" || conclusion === "timed_out" || conclusion === "startup_failure";
 }
 
 async function resolveGitHubSlugFromOrigin(cwd: string): Promise<string | null> {

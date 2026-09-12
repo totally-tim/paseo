@@ -308,6 +308,10 @@ function createGitHubServiceStub(): ForgeService {
       url: "https://github.com/acme/repo/pull/1",
       number: 1,
     })),
+    createPullRequestComment: vi.fn(async () => ({
+      url: "https://github.com/acme/repo/pull/1#issuecomment-1",
+    })),
+    retryPullRequestChecks: vi.fn(async () => ({ retried: [] })),
     mergePullRequest: vi.fn(async () => ({ success: true })),
     isAuthenticated: vi.fn(async () => true),
     invalidate: vi.fn(),

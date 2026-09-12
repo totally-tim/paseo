@@ -1473,4 +1473,79 @@ describe("createGitLabService", () => {
       GlabCommandError,
     );
   });
+
+  it("posts a merge request note and returns its deep-link URL", async () => {
+    const { service, calls } = makeService((args) => {
+      if (args[0] === "mr" && args[1] === "view") {
+        return ok(JSON.stringify(OPEN_MR));
+      }
+      if (args[0] === "api" && args.join(" ").includes("/notes")) {
+        return ok(JSON.stringify({ id: 321 }));
+      }
+      throw new Error(`unexpected glab call: ${args.join(" ")}`);
+    });
+
+    const result = await service.createPullRequestComment({
+      cwd: "/repo",
+      prNumber: 14,
+      body: "Review: the rename path needs a test",
+    });
+
+    expect(result).toEqual({
+      url: "https://gitlab.example.com/example-group/example-project/-/merge_requests/14#note_321",
+    });
+    expect(calls[0]).toEqual(["mr", "view", "14", "-F", "json"]);
+    expect(calls[1]).toEqual([
+      "api",
+      "--method",
+      "POST",
+      "projects/:fullpath/merge_requests/14/notes",
+      "-f",
+      "body=Review: the rename path needs a test",
+    ]);
+  });
+
+  it("retries the failed and canceled jobs of the MR head pipeline", async () => {
+    const { service, calls } = makeService((args) => {
+      if (args[0] === "mr" && args[1] === "view") {
+        return ok(JSON.stringify(mergeRequestWithPipeline("failed")));
+      }
+      if (args[0] === "api" && args.join(" ").includes("/jobs")) {
+        return ok(
+          JSON.stringify([
+            { id: 929, name: "test", stage: "test", status: "failed" },
+            { id: 930, name: "lint", stage: "test", status: "success" },
+            { id: 931, name: "deploy", stage: "deploy", status: "canceled" },
+          ]),
+        );
+      }
+      if (args[0] === "api" && args.join(" ").endsWith("/retry")) {
+        return ok(JSON.stringify({ id: 306, status: "running" }));
+      }
+      throw new Error(`unexpected glab call: ${args.join(" ")}`);
+    });
+
+    const result = await service.retryPullRequestChecks({ cwd: "/repo", prNumber: 14 });
+
+    expect(result).toEqual({
+      retried: [
+        { id: 929, name: "test" },
+        { id: 931, name: "deploy" },
+      ],
+    });
+    expect(calls[2]).toEqual(["api", "--method", "POST", "projects/:fullpath/pipelines/306/retry"]);
+  });
+
+  it("fails check retry when the merge request has no head pipeline", async () => {
+    const { service } = makeService((args) => {
+      if (args[0] === "mr" && args[1] === "view") {
+        return ok(JSON.stringify({ ...OPEN_MR, head_pipeline: null }));
+      }
+      throw new Error(`unexpected glab call: ${args.join(" ")}`);
+    });
+
+    await expect(service.retryPullRequestChecks({ cwd: "/repo", prNumber: 14 })).rejects.toThrow(
+      "no head pipeline",
+    );
+  });
 });

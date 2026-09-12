@@ -77,6 +77,11 @@ import {
   updateAgentCommand,
 } from "../lifecycle-command.js";
 import type { ForgeService } from "../../../services/forge-service.js";
+import {
+  getCoordinatorSubagentKind,
+  getParentAgentIdFromLabels,
+  isCoordinatorAgent,
+} from "@getpaseo/protocol/agent-labels";
 import type { WorkspaceGitService } from "../../workspace-git-service.js";
 import type {
   PersistedWorkspaceRecord,
@@ -118,7 +123,7 @@ export interface PaseoToolHostDependencies {
   github?: ForgeService;
   workspaceGitService?: Pick<
     WorkspaceGitService,
-    "getSnapshot" | "listWorktrees" | "resolveRepoRoot"
+    "getSnapshot" | "listWorktrees" | "resolveRepoRoot" | "resolveForge" | "resolveDefaultBranch"
   >;
   findWorkspaceIdForCwd?: ArchiveDependencies["findWorkspaceIdForCwd"];
   listActiveWorkspaces?: ArchiveDependencies["listActiveWorkspaces"];
@@ -146,11 +151,22 @@ export interface PaseoToolHostDependencies {
   paseoHome?: string;
   worktreesRoot?: string;
   /**
-   * Coordinator service bridge for the `remember` tool and memory board rows.
-   * Absent in tests that exercise the catalog without the coordinator slice.
+   * Coordinator service bridge for the `remember` tool, memory board rows, and
+   * the change-request reviewer gate. Absent in tests that exercise the catalog
+   * without the coordinator slice.
    */
   coordinator?: {
     remember(input: CoordinatorRememberInput): Promise<CoordinatorRememberResult>;
+    /**
+     * Reviewer gate for coordinator-opened change requests. The service
+     * resolves the reviewer through its own agent registry, verifies it is a
+     * reviewer-kind subagent of the caller that finished at least one turn, and
+     * throws an actionable error when the review requirement is unmet. Optional
+     * while the service-side method lands separately; `create_change_request`
+     * enforces the same checks locally either way, so a missing bridge never
+     * skips the gate.
+     */
+    assertReviewerGate?(callerAgentId: string, reviewerAgentId: string): Promise<void>;
   };
   /**
    * ID of the agent that is using this tool catalog.
@@ -523,6 +539,62 @@ function resolveChildAgentCwd(params: {
   return resolvePathFromBase(params.parentCwd, requestedCwd);
 }
 
+/**
+ * Local reviewer-gate enforcement for `create_change_request`. Every
+ * coordinator-opened change request names a reviewer subagent that is a child
+ * of the calling coordinator, is labeled with the reviewer kind, and already
+ * finished one turn — `idle` after a submitted prompt, so "created but never
+ * prompted" and mid-review agents both fail. Runs before any forge call so a
+ * denied request never creates a pull request.
+ */
+function assertChangeRequestReviewer(params: {
+  callerAgentId: string;
+  reviewerAgentId: string | undefined;
+  agentManager: AgentManager;
+}): string {
+  const reviewerAgentId = params.reviewerAgentId?.trim();
+  if (!reviewerAgentId) {
+    throw new Error(
+      "create_change_request requires reviewerAgentId for coordinator callers — " +
+        "spawn a reviewer subagent, let it finish its review turn, then pass its agent id",
+    );
+  }
+  const reviewer = params.agentManager.getAgent(reviewerAgentId);
+  if (!reviewer) {
+    throw new Error(`Reviewer agent ${reviewerAgentId} not found`);
+  }
+  if (getParentAgentIdFromLabels(reviewer.labels) !== params.callerAgentId) {
+    throw new Error(
+      `Reviewer agent ${reviewerAgentId} is not a subagent of this coordinator — ` +
+        "spawn the reviewer yourself with create_agent",
+    );
+  }
+  if (getCoordinatorSubagentKind(reviewer.labels) !== "reviewer") {
+    throw new Error(
+      `Agent ${reviewerAgentId} is not a reviewer-kind subagent — ` +
+        "spawn it with the reviewer kind so its review counts for this change request",
+    );
+  }
+  if (reviewer.lifecycle === "closed") {
+    throw new Error(
+      `Reviewer agent ${reviewerAgentId} is closed — spawn a fresh reviewer for this change`,
+    );
+  }
+  if (reviewer.lifecycle === "error") {
+    throw new Error(
+      `Reviewer agent ${reviewerAgentId} finished with an error — ` +
+        "rerun the review before opening the change request",
+    );
+  }
+  if (reviewer.lifecycle !== "idle" || reviewer.lastUserMessageAt === null) {
+    throw new Error(
+      `Reviewer agent ${reviewerAgentId} has not finished a review turn — ` +
+        "wait for its review to complete before opening the change request",
+    );
+  }
+  return reviewerAgentId;
+}
+
 const TerminalSummarySchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -709,6 +781,59 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     }
 
     return expandUserPath(trimmedCwd);
+  };
+
+  /**
+   * Change-request tools address a repository, not a workspace record: cwd wins
+   * over workspaceId, and a bare caller resolves to its own workspace cwd. A
+   * worktree path is fine — forge resolution reads the repo remote, not the
+   * checkout root.
+   */
+  const resolveForgeActionCwd = async (input: {
+    cwd?: string;
+    workspaceId?: string;
+  }): Promise<string> => {
+    const workspaceId = input.workspaceId?.trim();
+    if (workspaceId) {
+      if (input.cwd?.trim()) {
+        throw new Error("Pass either cwd or workspaceId, not both");
+      }
+      if (!options.workspaceRegistry) {
+        throw new Error("Workspace registry is not configured");
+      }
+      const workspace = await options.workspaceRegistry.get(workspaceId);
+      if (!workspace) {
+        throw new Error(`Workspace ${workspaceId} not found`);
+      }
+      if (workspace.archivedAt) {
+        throw new Error(`Workspace ${workspaceId} is archived`);
+      }
+      return workspace.cwd;
+    }
+    return resolveScopedCwd(input.cwd);
+  };
+
+  const requireForgeResolution = async (
+    cwd: string,
+  ): Promise<{ forge: string; service: ForgeService }> => {
+    if (!options.workspaceGitService) {
+      throw new Error("Workspace git service is not configured");
+    }
+    const resolution = await options.workspaceGitService.resolveForge(cwd);
+    if (!resolution) {
+      throw new Error(
+        `No forge remote resolved for ${cwd} — the checkout needs a git remote ` +
+          "pointing at a supported forge (GitHub, GitLab, Gitea-family)",
+      );
+    }
+    return resolution;
+  };
+
+  const requireDefaultBranch = async (cwd: string): Promise<string> => {
+    if (!options.workspaceGitService) {
+      throw new Error("Workspace git service is not configured");
+    }
+    return options.workspaceGitService.resolveDefaultBranch(cwd);
   };
 
   async function resolveTerminalWorkspaceId(resolvedCwd: string): Promise<string> {
@@ -3326,6 +3451,137 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       return {
         content: [],
         structuredContent: ensureValidJson({ success: true }),
+      };
+    },
+  );
+
+  const changeRequestTargetShape = {
+    cwd: z
+      .string()
+      .optional()
+      .describe(
+        "Repository checkout that resolves the forge. Defaults to your current workspace; " +
+          "any worktree of the repo resolves to the same forge.",
+      ),
+    workspaceId: z
+      .string()
+      .optional()
+      .describe("Workspace owning the checkout; alternative to cwd."),
+  };
+
+  registerTool(
+    "create_change_request",
+    {
+      title: "Create change request",
+      description:
+        "Open a change request on the repository's forge (a pull request on GitHub and " +
+        "Gitea-family hosts, a merge request on GitLab) for an existing head branch. " +
+        "Coordinator callers must pass reviewerAgentId naming their reviewer subagent — " +
+        "the daemon only opens the request after that reviewer has finished a review turn.",
+      inputSchema: {
+        ...changeRequestTargetShape,
+        title: z.string().trim().min(1),
+        body: z.string().optional(),
+        head: z
+          .string()
+          .trim()
+          .min(1)
+          .describe("Branch containing the change — typically the implementer's worktree branch."),
+        base: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe("Base branch. Defaults to the repository's default branch."),
+        reviewerAgentId: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe(
+            "Reviewer subagent that finished reviewing this change. Required for coordinator callers.",
+          ),
+      },
+      outputSchema: {
+        url: z.string(),
+        number: z.number(),
+      },
+    },
+    async ({ cwd, workspaceId, title, body, head, base, reviewerAgentId }) => {
+      const callerAgent = callerAgentId ? agentManager.getAgent(callerAgentId) : null;
+      if (callerAgent && isCoordinatorAgent(callerAgent)) {
+        const verifiedReviewerId = assertChangeRequestReviewer({
+          callerAgentId: callerAgent.id,
+          reviewerAgentId,
+          agentManager,
+        });
+        await options.coordinator?.assertReviewerGate?.(callerAgent.id, verifiedReviewerId);
+      }
+      const repoCwd = await resolveForgeActionCwd({ cwd, workspaceId });
+      const { service } = await requireForgeResolution(repoCwd);
+      const result = await service.createPullRequest({
+        cwd: repoCwd,
+        title,
+        body,
+        head,
+        base: base ?? (await requireDefaultBranch(repoCwd)),
+      });
+      return {
+        content: [],
+        structuredContent: ensureValidJson(result),
+      };
+    },
+  );
+
+  registerTool(
+    "comment_on_change_request",
+    {
+      title: "Comment on change request",
+      description:
+        "Post a comment on a change request (pull request / merge request) on the " +
+        "repository's forge. Returns the created comment's URL.",
+      inputSchema: {
+        ...changeRequestTargetShape,
+        prNumber: z.number().int().positive().describe("Change request number on the forge."),
+        body: z.string().trim().min(1).describe("Markdown comment body."),
+      },
+      outputSchema: {
+        url: z.string(),
+      },
+    },
+    async ({ cwd, workspaceId, prNumber, body }) => {
+      const repoCwd = await resolveForgeActionCwd({ cwd, workspaceId });
+      const { service } = await requireForgeResolution(repoCwd);
+      const result = await service.createPullRequestComment({ cwd: repoCwd, prNumber, body });
+      return {
+        content: [],
+        structuredContent: ensureValidJson(result),
+      };
+    },
+  );
+
+  registerTool(
+    "retry_change_request_checks",
+    {
+      title: "Retry change request checks",
+      description:
+        "Re-run the failed checks on a change request's head commit. Returns the checks the " +
+        "forge actually re-ran, or throws when the forge has no retry API.",
+      inputSchema: {
+        ...changeRequestTargetShape,
+        prNumber: z.number().int().positive().describe("Change request number on the forge."),
+      },
+      outputSchema: {
+        retried: z.array(z.object({ id: z.number(), name: z.string() })),
+      },
+    },
+    async ({ cwd, workspaceId, prNumber }) => {
+      const repoCwd = await resolveForgeActionCwd({ cwd, workspaceId });
+      const { service } = await requireForgeResolution(repoCwd);
+      const result = await service.retryPullRequestChecks({ cwd: repoCwd, prNumber });
+      return {
+        content: [],
+        structuredContent: ensureValidJson(result),
       };
     },
   );
