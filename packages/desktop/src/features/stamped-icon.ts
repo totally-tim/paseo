@@ -1,10 +1,11 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, promises as fs } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const STAMP_CACHE_VERSION = "v2";
+const STAMP_CACHE_VERSION = "v3";
 
 export const MONOSPACE_FONT_CANDIDATES = [
   "Menlo-Bold",
@@ -189,19 +190,20 @@ export async function getStampedIconPath(options: {
     return null;
   }
 
-  const safeLabel = sanitizeLabelForFilename(label) || "dev";
-  const baseName = path.basename(baseIconPath, path.extname(baseIconPath));
-  const outputPath = path.join(
-    cacheDir,
-    `icon-stamp-${STAMP_CACHE_VERSION}-${baseName}-${safeLabel}.png`,
-  );
-
-  if (existsSync(outputPath)) {
-    return outputPath;
-  }
-
   const magickBin = process.platform === "win32" ? "magick.exe" : "magick";
   try {
+    const safeLabel = sanitizeLabelForFilename(label) || "dev";
+    const baseName = path.basename(baseIconPath, path.extname(baseIconPath));
+    const artwork = await fs.readFile(baseIconPath);
+    const artworkHash = createHash("sha256").update(artwork).digest("hex").slice(0, 12);
+    const outputPath = path.join(
+      cacheDir,
+      `icon-stamp-${STAMP_CACHE_VERSION}-${baseName}-${artworkHash}-${safeLabel}.png`,
+    );
+    if (existsSync(outputPath)) {
+      return outputPath;
+    }
+
     const dimensions = (await getImageDimensions(magickBin, baseIconPath)) ?? {
       width: 512,
       height: 512,

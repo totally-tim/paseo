@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildImageMagickArgs,
   computeStampGeometry,
@@ -77,6 +80,26 @@ describe("stamped-icon", () => {
   });
 
   describe("resolveAppIconPath", () => {
+    it("uses the new base artwork when an old stamp is cached and ImageMagick is unavailable", async () => {
+      const directory = mkdtempSync(path.join(tmpdir(), "forkeo-icon-cache-"));
+      const baseIconPath = path.join(directory, "icon-dev.png");
+      writeFileSync(baseIconPath, "new artwork");
+      writeFileSync(path.join(directory, "icon-stamp-v3-icon-dev-dev.png"), "old artwork");
+      vi.stubEnv("PATH", directory);
+      try {
+        const result = await resolveAppIconPath({
+          isPackaged: false,
+          baseIconPath,
+          devLabel: "dev",
+          cacheDir: directory,
+        });
+        expect(result).toBe(baseIconPath);
+      } finally {
+        vi.unstubAllEnvs();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+
     it("returns base icon path immediately when packaged", async () => {
       const result = await resolveAppIconPath({
         isPackaged: true,

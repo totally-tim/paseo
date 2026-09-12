@@ -2,77 +2,72 @@
 // Generates every Forkeo icon asset from one master glyph.
 //
 // The mark keeps the Paseo brand tile (black rounded square, white hand-drawn
-// stroke) but the stroke forks: a looped trunk splits into two prongs. Run:
+// stroke), with an open f-shaped stem and one sweeping branch. Run:
 //
 //   node scripts/fork/generate-icons.mjs
 //
 // Requires sharp (repo dependency) and, for icon.icns, macOS iconutil.
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-// The glyph on the 700x700 viewBox shared by the logo component and SVG assets.
-const GLYPH = `
-  <g stroke="white" stroke-width="58" stroke-linecap="round" stroke-linejoin="round" fill="none"
-     transform="translate(350 355) rotate(-13) scale(1.28) translate(-350 -350)">
-    <path d="M 330 600 C 268 582, 236 528, 250 474 C 262 432, 302 414, 334 430 C 360 443, 370 474, 360 504"/>
-    <path d="M 355 505 C 350 470, 346 440, 342 405 C 300 380, 250 330, 238 268 C 228 215, 244 168, 285 142"/>
-    <path d="M 342 405 C 395 378, 462 328, 492 262 C 515 212, 540 175, 522 142"/>
-  </g>`;
+// Shared directly with PaseoLogo; changes here cannot leave the in-app mark behind.
+const master = JSON.parse(
+  readFileSync(join(root, "packages/app/assets/images/forkeo-glyph.json"), "utf8"),
+);
+const GLYPH = `<g stroke="white" stroke-width="${master.strokeWidth}" stroke-linecap="round" stroke-linejoin="round" fill="none">${master.paths.map((d) => `<path d="${d}"/>`).join("")}</g>`;
+const CORNER = 0.223;
 
-const CORNER = 0.223; // matches the existing tile: rx 156 on 700, ~228 on 1024
-
-function glyphSvg(size, { color = "white", scale = 1 } = {}) {
+function glyphGroup(size, { color = "white", scale = 1 } = {}) {
   const inner = size * scale;
   const offset = (size - inner) / 2;
-  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg"><g transform="translate(${offset} ${offset}) scale(${inner / 700})">${GLYPH.replaceAll('stroke="white"', `stroke="${color}"`)}</g></svg>`;
+  return `<g transform="translate(${offset} ${offset}) scale(${inner / master.size})">${GLYPH.replaceAll('stroke="white"', `stroke="${color}"`)}</g>`;
 }
 
-async function rasterize(svg, size, out) {
-  await sharp(Buffer.from(svg), { density: 384 }).resize(size, size).png().toFile(out);
+function svg(size, content) {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">${content}</svg>`;
+}
+
+async function rasterize(source, size, out) {
+  await sharp(Buffer.from(source), { density: 384 }).resize(size, size).png().toFile(out);
   console.log("wrote", out);
 }
 
-function tileFullSvg(size, scale = 0.86) {
-  const r = Math.round(size * CORNER);
-  const offset = (size * (1 - scale)) / 2;
-  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg"><rect width="${size}" height="${size}" rx="${r}" fill="black"/><g transform="translate(${offset} ${offset}) scale(${(size * scale) / 700})">${GLYPH}</g></svg>`;
+function tileSvg(size, { padding = 0, rounded = true, glyphScale = 1.1 } = {}) {
+  const inset = size * padding;
+  const side = size - inset * 2;
+  const radius = rounded ? side * CORNER : 0;
+  return svg(
+    size,
+    `<rect x="${inset}" y="${inset}" width="${side}" height="${side}" rx="${radius}" fill="black"/>${glyphGroup(size, { scale: (side / size) * glyphScale })}`,
+  );
 }
 
-async function tileIcon(size, out) {
-  await rasterize(tileFullSvg(size), size, out);
+async function tileIcon(size, out, options) {
+  await rasterize(tileSvg(size, options), size, out);
 }
 
-// Favicon variants: black tile, white glyph, optional status badge bottom-right.
 function faviconSvg(badge) {
-  return `<svg width="48" height="48" viewBox="0 0 700 700" fill="none" xmlns="http://www.w3.org/2000/svg">
-<rect width="700" height="700" rx="156" fill="black"/>
-<g transform="translate(350,350) scale(1.05) translate(-350,-350)">${GLYPH}</g>
-${badge ? `<circle cx="570" cy="570" r="130" fill="${badge}"/>` : ""}
-</svg>`;
+  const badgeCircle = badge ? `<circle cx="570" cy="570" r="130" fill="${badge}"/>` : "";
+  return tileSvg(700, { glyphScale: 1.16 }).replace("</svg>", `${badgeCircle}</svg>`);
 }
 
-// Dev icon: blueprint tile — blue gradient, construction grid, inscribed circle.
 function devTileSvg(size) {
-  const r = Math.round(size * CORNER);
-  const step = size / 8;
+  const tile = `<rect x="42" y="42" width="616" height="616" rx="${616 * CORNER}"/>`;
   let grid = "";
   for (let i = 1; i < 8; i++) {
-    const p = Math.round(i * step);
-    grid += `<line x1="${p}" y1="0" x2="${p}" y2="${size}" stroke="white" stroke-opacity="0.14" stroke-width="2"/>`;
-    grid += `<line x1="0" y1="${p}" x2="${size}" y2="${p}" stroke="white" stroke-opacity="0.14" stroke-width="2"/>`;
+    const p = (700 / 8) * i;
+    grid += `<path d="M ${p} 0 V 700 M 0 ${p} H 700" stroke="white" stroke-opacity="0.14" stroke-width="1"/>`;
   }
-  return `<svg width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg">
-<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#35A5FF"/><stop offset="1" stop-color="#1C6BF0"/></linearGradient></defs>
-<rect width="${size}" height="${size}" rx="${r}" fill="url(#g)"/>
-<g>${grid}<circle cx="${size / 2}" cy="${size / 2}" r="${size * 0.38}" fill="none" stroke="white" stroke-opacity="0.3" stroke-width="3"/></g>
-<g transform="translate(${size * 0.07} ${size * 0.07}) scale(${(size * 0.86) / 700})">${GLYPH}</g>
-</svg>`;
+  return svg(
+    700,
+    `<defs><linearGradient id="blueprint" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#35A5FF"/><stop offset="1" stop-color="#1C6BF0"/></linearGradient><clipPath id="tile">${tile}</clipPath></defs><g clip-path="url(#tile)"><rect width="700" height="700" fill="url(#blueprint)"/>${grid}<circle cx="350" cy="350" r="266" fill="none" stroke="white" stroke-opacity="0.3" stroke-width="2"/></g>${glyphGroup(700, { scale: 0.968 })}`,
+  ).replace('width="700" height="700" viewBox', `width="${size}" height="${size}" viewBox`);
 }
 
 async function writeIco(pngBySize, out) {
@@ -108,15 +103,20 @@ const appPublic = join(root, "packages/app/public");
 const desktopAssets = join(root, "packages/desktop/assets");
 
 // --- App package ---
-await tileIcon(1024, join(appImages, "icon.png"));
+// iOS supplies the corner mask; transparent corners would be flattened to white.
+await tileIcon(1024, join(appImages, "icon.png"), { rounded: false });
 await tileIcon(200, join(appImages, "splash-icon.png"));
 // Android adaptive foreground: glyph must live inside the center 66% safe zone.
 await rasterize(
-  glyphSvg(1024, { scale: 0.58 }),
+  svg(1024, glyphGroup(1024, { scale: 0.86 })),
   1024,
   join(appImages, "android-icon-foreground.png"),
 );
-await rasterize(glyphSvg(96, { scale: 0.82 }), 96, join(appImages, "notification-icon.png"));
+await rasterize(
+  svg(96, glyphGroup(96, { scale: 1.1 })),
+  96,
+  join(appImages, "notification-icon.png"),
+);
 await tileIcon(48, join(appImages, "favicon.png"));
 
 for (const [name, badge] of [
@@ -127,9 +127,9 @@ for (const [name, badge] of [
   ["favicon-light-running", "#3b82f6"],
   ["favicon-light-attention", "#22c55e"],
 ]) {
-  const svg = faviconSvg(badge);
-  writeFileSync(join(appImages, `${name}.svg`), svg + "\n");
-  await rasterize(svg, 48, join(appImages, `${name}.png`));
+  const source = faviconSvg(badge);
+  writeFileSync(join(appImages, `${name}.svg`), source + "\n");
+  await rasterize(source, 48, join(appImages, `${name}.png`));
   console.log("wrote", join(appImages, `${name}.{svg,png}`));
 }
 
@@ -145,16 +145,16 @@ writeFileSync(
 console.log("wrote butterfly-{white,green}.svg");
 
 // --- Web/PWA icons ---
-await tileIcon(180, join(appPublic, "apple-touch-icon.png"));
-await tileIcon(192, join(appPublic, "pwa-icon-192.png"));
-await tileIcon(512, join(appPublic, "pwa-icon-512.png"));
+await tileIcon(180, join(appPublic, "apple-touch-icon.png"), { rounded: false });
+await tileIcon(192, join(appPublic, "pwa-icon-192.png"), { rounded: false });
+await tileIcon(512, join(appPublic, "pwa-icon-512.png"), { rounded: false });
 
 // --- Desktop package ---
-await tileIcon(512, join(desktopAssets, "icon.png"));
-await tileIcon(128, join(desktopAssets, "128x128.png"));
-await tileIcon(256, join(desktopAssets, "128x128@2x.png"));
-await tileIcon(64, join(desktopAssets, "64x64.png"));
-await tileIcon(32, join(desktopAssets, "32x32.png"));
+await tileIcon(512, join(desktopAssets, "icon.png"), { padding: 0.06 });
+await tileIcon(128, join(desktopAssets, "128x128.png"), { padding: 0.06 });
+await tileIcon(256, join(desktopAssets, "128x128@2x.png"), { padding: 0.06 });
+await tileIcon(64, join(desktopAssets, "64x64.png"), { padding: 0.06 });
+await tileIcon(32, join(desktopAssets, "32x32.png"), { padding: 0.06 });
 await rasterize(devTileSvg(1254), 1254, join(desktopAssets, "icon-dev.png"));
 
 const iconset = join(desktopAssets, "icon.iconset");
@@ -171,7 +171,7 @@ for (const [file, px] of [
   ["icon_512x512.png", 512],
   ["icon_512x512@2x.png", 1024],
 ]) {
-  await rasterize(tileFullSvg(px), px, join(iconset, file));
+  await rasterize(tileSvg(px, { padding: 0.06 }), px, join(iconset, file));
 }
 execFileSync("iconutil", ["-c", "icns", iconset, "-o", join(desktopAssets, "icon.icns")]);
 rmSync(iconset, { recursive: true, force: true });
@@ -179,7 +179,8 @@ console.log("wrote", join(desktopAssets, "icon.icns"));
 
 const icoPngs = {};
 for (const size of [16, 32, 48, 256]) {
-  icoPngs[size] = await sharp(Buffer.from(tileFullSvg(size), { density: 384 }))
+  icoPngs[size] = await sharp(Buffer.from(tileSvg(size)), { density: 384 })
+    .resize(size, size)
     .png()
     .toBuffer();
 }

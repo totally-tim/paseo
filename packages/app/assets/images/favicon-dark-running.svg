@@ -1,11 +1,1 @@
-<svg width="48" height="48" viewBox="0 0 700 700" fill="none" xmlns="http://www.w3.org/2000/svg">
-<rect width="700" height="700" rx="156" fill="black"/>
-<g transform="translate(350,350) scale(1.05) translate(-350,-350)">
-  <g stroke="white" stroke-width="58" stroke-linecap="round" stroke-linejoin="round" fill="none"
-     transform="translate(350 355) rotate(-13) scale(1.28) translate(-350 -350)">
-    <path d="M 330 600 C 268 582, 236 528, 250 474 C 262 432, 302 414, 334 430 C 360 443, 370 474, 360 504"/>
-    <path d="M 355 505 C 350 470, 346 440, 342 405 C 300 380, 250 330, 238 268 C 228 215, 244 168, 285 142"/>
-    <path d="M 342 405 C 395 378, 462 328, 492 262 C 515 212, 540 175, 522 142"/>
-  </g></g>
-<circle cx="570" cy="570" r="130" fill="#3b82f6"/>
-</svg>
+<svg width="700" height="700" viewBox="0 0 700 700" xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="700" height="700" rx="156.1" fill="black"/><g transform="translate(-56 -56) scale(1.16)"><g stroke="white" stroke-width="62" stroke-linecap="round" stroke-linejoin="round" fill="none"><path d="M 247 544 C 229 441, 223 328, 239 230 C 248 179, 285 150, 336 156"/><path d="M 232 370 C 339 365, 440 304, 471 232"/></g></g><circle cx="570" cy="570" r="130" fill="#3b82f6"/></svg>
