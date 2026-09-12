@@ -113,6 +113,7 @@ import type {
 } from "./agent/agent-manager.js";
 import { createAgentCommand } from "./agent/create-agent/create.js";
 import { resolveCreateAgentIntent, type CreateAgentIntent } from "./agent/create-agent/intent.js";
+import { stripAgentToolLabels } from "./agent/daemon-managed-labels.js";
 import {
   archiveAgentCommand,
   cancelAgentRunCommand,
@@ -4333,6 +4334,15 @@ export class Session {
         initialPrompt: trimmedPrompt,
       });
 
+      // Coordinator precheck before any worktree/workspace is minted below —
+      // a denied spawn must leave nothing behind. The authoritative check runs
+      // again inside createAgentCommand under the coordinator's spawn lock.
+      if (msg.callerAgentId && this.coordinatorService) {
+        await this.coordinatorService.assertSpawnAllowed({
+          parentAgentId: msg.callerAgentId,
+        });
+      }
+
       const firstAgentContext: FirstAgentContext = {
         ...(trimmedPrompt ? { prompt: trimmedPrompt } : {}),
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
@@ -4363,10 +4373,12 @@ export class Session {
           paseoHome: this.paseoHome,
           worktreesRoot: this.worktreesRoot,
           providerSnapshotManager: this.providerSnapshotManager,
+          ...(this.coordinatorService ? { coordinator: this.coordinatorService } : {}),
         },
         {
           kind: "session",
           agentId,
+          ...(msg.callerAgentId ? { callerAgentId: msg.callerAgentId } : {}),
           config: resolvedIntent.config,
           workspaceId: resolvedIntent.intent.workspaceId,
           worktreeName,
@@ -4435,7 +4447,7 @@ export class Session {
       caller: callerAgent
         ? { id: callerAgent.id, cwd: callerAgent.cwd, workspaceId: callerAgent.workspaceId }
         : null,
-      labels: request.labels,
+      labels: stripAgentToolLabels(request.labels),
       resolveWorkspace: async (workspaceId) => {
         if (createdWorktree?.workspace.workspaceId === workspaceId) {
           return { workspaceId, cwd: createdWorktree.workspace.cwd };

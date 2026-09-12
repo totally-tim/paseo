@@ -5,6 +5,7 @@ import type { Logger } from "pino";
 
 import {
   CoordinatorDoneBoardRowSchema,
+  CoordinatorGuardSchema,
   CoordinatorProfilesSchema,
   CoordinatorProfileSelectionSchema,
   CoordinatorScopeSchema,
@@ -14,6 +15,29 @@ import {
 } from "@getpaseo/protocol/messages";
 
 import { writeJsonFileAtomic } from "../atomic-file.js";
+
+/**
+ * Internal monthly actuals. Spawn counts are derived from stamped agent
+ * records at read time instead of persisted, so the counter self-heals across
+ * restarts; tokens accumulate from provider usage events and need durable
+ * storage. `lastSeenTokensByAgent` holds the last cumulative reading per
+ * descendant so session-cumulative providers diff correctly across a daemon
+ * restart.
+ */
+const PersistedCoordinatorUsageSchema = z.object({
+  /** UTC calendar month key, `YYYY-MM`; a mismatch resets the bucket. */
+  month: z.string(),
+  tokens: z.number().int().nonnegative(),
+  lastSeenTokensByAgent: z.record(z.string(), z.number().int().nonnegative()).default({}),
+  /**
+   * Expectation kinds whose wake row already fired this month. Persisted so a
+   * restart cannot re-fire (or, for a crossing that happened while the daemon
+   * was down, skip) the row.
+   */
+  reportedExpectations: z.array(z.enum(["spawns", "tokens"])).default([]),
+});
+
+export type PersistedCoordinatorUsage = z.infer<typeof PersistedCoordinatorUsageSchema>;
 
 const PersistedProjectCoordinatorSchema = z.object({
   version: z.literal(1),
@@ -26,6 +50,8 @@ const PersistedProjectCoordinatorSchema = z.object({
   profile: CoordinatorProfileSelectionSchema.optional(),
   profiles: CoordinatorProfilesSchema.optional(),
   usageExpectation: CoordinatorUsageExpectationSchema.optional(),
+  guard: CoordinatorGuardSchema.optional(),
+  usage: PersistedCoordinatorUsageSchema.optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

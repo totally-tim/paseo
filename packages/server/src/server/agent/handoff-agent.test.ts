@@ -3,7 +3,9 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  COORDINATOR_PROJECT_ID_LABEL,
   COORDINATOR_PROJECT_ROLE,
+  COORDINATOR_SUBAGENT_KIND_LABEL,
   HANDOFF_FROM_AGENT_ID_LABEL,
   HANDOFF_TO_AGENT_ID_LABEL,
   PARENT_AGENT_ID_LABEL,
@@ -98,6 +100,49 @@ test("concurrent requests create one independent successor and preserve source h
   expect(targetCreate).toHaveBeenCalledTimes(1);
   await archiveAgentCommand(deps, source.id);
   expect((await agentStorage.get(target.id))?.archivedAt).toBeFalsy();
+});
+
+test("an ordinary subagent's successor stays independent of the source's parent", async () => {
+  const { deps, source, agentStorage } = await setup();
+  // An ordinary delegated child — parent label, no coordinator stamps. Its
+  // continuation is a new root, not a second child of the source's parent:
+  // archiving the parent must not cascade onto the successor.
+  const parent = await deps.agentManager.createAgent(
+    { provider: "claude", cwd: source.cwd },
+    undefined,
+    { workspaceId: source.workspaceId },
+  );
+  await deps.agentManager.setLabels(source.id, { [PARENT_AGENT_ID_LABEL]: parent.id });
+
+  const target = await handoffAgent(deps, { sourceAgentId: source.id, provider: "codex" });
+  expect(target.labels[PARENT_AGENT_ID_LABEL]).toBeUndefined();
+  expect(target.labels[HANDOFF_FROM_AGENT_ID_LABEL]).toBe(source.id);
+
+  await archiveAgentCommand(deps, parent.id);
+  expect((await agentStorage.get(target.id))?.archivedAt).toBeFalsy();
+});
+
+test("a coordinator-stamped source keeps its lineage on the successor", async () => {
+  const { deps, source, agentStorage } = await setup();
+  const parent = await deps.agentManager.createAgent(
+    { provider: "claude", cwd: source.cwd },
+    undefined,
+    { workspaceId: source.workspaceId },
+  );
+  await deps.agentManager.setLabels(source.id, {
+    [PARENT_AGENT_ID_LABEL]: parent.id,
+    [COORDINATOR_SUBAGENT_KIND_LABEL]: "implementer",
+    [COORDINATOR_PROJECT_ID_LABEL]: "prj_test",
+  });
+
+  const target = await handoffAgent(deps, { sourceAgentId: source.id, provider: "codex" });
+  expect(target.labels[PARENT_AGENT_ID_LABEL]).toBe(parent.id);
+  expect(target.labels[COORDINATOR_SUBAGENT_KIND_LABEL]).toBe("implementer");
+  expect(target.labels[COORDINATOR_PROJECT_ID_LABEL]).toBe("prj_test");
+  expect(target.labels[HANDOFF_FROM_AGENT_ID_LABEL]).toBe(source.id);
+  // The successor stays in the tree — archiving the parent cascades.
+  await archiveAgentCommand(deps, parent.id);
+  expect((await agentStorage.get(target.id))?.archivedAt).toBeTruthy();
 });
 
 test("a role-labeled source is rejected instead of producing an unlabelled successor", async () => {

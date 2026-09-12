@@ -8,7 +8,7 @@ import { ensureValidJson } from "../../json-utils.js";
 import type { Logger } from "pino";
 
 import type { AgentMode, AgentProvider, AgentSessionConfig } from "../agent-sdk-types.js";
-import type { AgentManager } from "../agent-manager.js";
+import type { AgentManager, ManagedAgent } from "../agent-manager.js";
 import { AgentProfileSchema } from "@getpaseo/protocol/messages";
 import type { DaemonConfigStore } from "../../daemon-config-store.js";
 import {
@@ -105,7 +105,15 @@ import { assertCoordinatorToolAllowed } from "../../coordinator/tool-policy.js";
 import type {
   CoordinatorRememberInput,
   CoordinatorRememberResult,
+  CoordinatorSpawnDecision,
+  CoordinatorSpawnGateInput,
 } from "../../coordinator/coordinator-service.js";
+import type { CoordinatorProfileSelection } from "@getpaseo/protocol/messages";
+import {
+  COORDINATOR_SUBAGENT_KINDS,
+  type CoordinatorSubagentKind,
+} from "@getpaseo/protocol/agent-labels";
+import { stripAgentToolLabels } from "../daemon-managed-labels.js";
 
 export interface PaseoToolHostDependencies {
   agentManager: AgentManager;
@@ -146,11 +154,51 @@ export interface PaseoToolHostDependencies {
   paseoHome?: string;
   worktreesRoot?: string;
   /**
-   * Coordinator service bridge for the `remember` tool and memory board rows.
-   * Absent in tests that exercise the catalog without the coordinator slice.
+   * Coordinator service bridge: `remember` plus the spawn gate, role-profile
+   * resolution, and the ownership check for agent-targeting tools. Absent in
+   * tests that exercise the catalog without the coordinator slice.
    */
   coordinator?: {
     remember(input: CoordinatorRememberInput): Promise<CoordinatorRememberResult>;
+    /** Read-only spawn precheck; run before any workspace or worktree is minted. */
+    assertSpawnAllowed(input: CoordinatorSpawnGateInput): Promise<CoordinatorSpawnDecision | null>;
+    /** Serialized check + create per coordinator; the decision merges into create options. */
+    runCoordinatorSpawn<T>(
+      input: CoordinatorSpawnGateInput,
+      create: (decision: CoordinatorSpawnDecision | null) => Promise<T>,
+    ): Promise<T>;
+    /** Resolves a subagent kind to the coordinator's configured launch bundle. */
+    resolveSubagentProfile(input: {
+      callerAgentId: string;
+      kind: CoordinatorSubagentKind;
+    }): Promise<CoordinatorProfileSelection>;
+    /**
+     * Fails when a coordinator-tree caller targets an agent outside its
+     * boundary. `action: "mutate"` additionally bars delegated callers from
+     * touching their own ancestors.
+     */
+    assertAgentTargetAllowed(
+      callerAgentId: string,
+      targetAgentId: string,
+      options?: { action?: "steer" | "mutate" },
+    ): Promise<void>;
+    /**
+     * Fails when a governed caller would escalate itself — rewriting its own
+     * runtime settings or answering its own permission requests.
+     */
+    assertSelfActionAllowed(callerAgentId: string, action: string): Promise<void>;
+    /** Fails when a coordinator-tree caller mutates a workspace outside its boundary. */
+    assertWorkspaceTargetAllowed(callerAgentId: string, workspaceId: string): Promise<void>;
+    /** Fails when a governed caller binds a resource to a cwd outside its own checkout. */
+    assertScopedCwdAllowed(callerAgentId: string, cwd: string): Promise<void>;
+    /** Fails when a read-only delegated kind tries to provision a workspace. */
+    assertWorkspaceCreateAllowed(callerAgentId: string): Promise<void>;
+    /** Fails when a read-only governed caller reaches for a terminal. */
+    assertTerminalAccessAllowed(callerAgentId: string): Promise<void>;
+    /** Fails when a governed caller creates or mutates daemon schedules. */
+    assertScheduleAccessAllowed(callerAgentId: string): Promise<void>;
+    /** Fails when a governed caller attaches a workspace to a foreign project. */
+    assertProjectScopeAllowed(callerAgentId: string, projectId: string): Promise<void>;
   };
   /**
    * ID of the agent that is using this tool catalog.
@@ -668,6 +716,118 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     return parentAgent;
   };
 
+  const requireCoordinatorBridge = () => {
+    if (!options.coordinator) {
+      throw new Error("Coordinator service is not configured");
+    }
+    return options.coordinator;
+  };
+
+  /**
+   * Read-only spawn precheck before `create_agent` resolves workspaces (which
+   * can mint records). The authoritative check runs inside createAgentCommand
+   * under the coordinator's spawn lock. Callers outside a coordinator tree get
+   * null back — the gate does not constrain ordinary spawns.
+   */
+  const coordinatorSpawnPrecheck = async (args: unknown): Promise<void> => {
+    if (!callerAgentId || !options.coordinator) return;
+    const raw = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+    const rawKind = typeof raw.subagentKind === "string" ? raw.subagentKind : undefined;
+    const subagentKind =
+      rawKind && (COORDINATOR_SUBAGENT_KINDS as readonly string[]).includes(rawKind)
+        ? (rawKind as CoordinatorSubagentKind)
+        : undefined;
+    const relationship =
+      raw.relationship && typeof raw.relationship === "object"
+        ? (raw.relationship as Record<string, unknown>)
+        : undefined;
+    await options.coordinator.assertSpawnAllowed({
+      parentAgentId: callerAgentId,
+      ...(subagentKind ? { subagentKind } : {}),
+      ...(relationship?.kind === "detached" ? { detached: true } : {}),
+    });
+  };
+
+  /**
+   * Coordinators and their delegated agents may only steer sessions inside the
+   * coordinator's boundary (descendants everywhere; in-scope project sessions
+   * at Ship). Callers outside a coordinator tree are unaffected.
+   */
+  const assertAgentTargetAllowed = async (
+    targetAgentId: string,
+    targetOptions?: { action?: "steer" | "mutate" },
+  ): Promise<void> => {
+    if (!callerAgentId || !options.coordinator) return;
+    await options.coordinator.assertAgentTargetAllowed(callerAgentId, targetAgentId, targetOptions);
+  };
+
+  /**
+   * Mutating a workspace reaches every agent inside it, so it needs the same
+   * coordinator boundary as agent-targeting tools. Ungoverned callers are
+   * unaffected.
+   */
+  const assertWorkspaceTargetAllowed = async (workspaceId: string): Promise<void> => {
+    if (!callerAgentId || !options.coordinator) return;
+    await options.coordinator.assertWorkspaceTargetAllowed(callerAgentId, workspaceId);
+  };
+
+  /**
+   * A governed caller may not rewrite its own runtime settings or answer its
+   * own permission requests — that authority sits above it in the tree.
+   */
+  const assertSelfActionAllowed = async (targetAgentId: string, action: string): Promise<void> => {
+    if (!callerAgentId || callerAgentId !== targetAgentId || !options.coordinator) return;
+    await options.coordinator.assertSelfActionAllowed(callerAgentId, action);
+  };
+
+  /**
+   * A governed caller's cwd-bound resources (terminals) must live under its
+   * own checkout; ungoverned callers keep legacy behavior.
+   */
+  const assertScopedCwdAllowed = async (cwd: string): Promise<void> => {
+    if (!callerAgentId || !options.coordinator) return;
+    await options.coordinator.assertScopedCwdAllowed(callerAgentId, cwd);
+  };
+
+  /**
+   * Minting a workspace is a write the read-only subagent kinds may not do —
+   * the coordinator tool allowlist only constrains the coordinator itself, so
+   * a delegated investigator/reviewer needs this check even inside its own
+   * checkout.
+   */
+  const assertWorkspaceCreateAllowed = async (): Promise<void> => {
+    if (!callerAgentId || !options.coordinator) return;
+    await options.coordinator.assertWorkspaceCreateAllowed(callerAgentId);
+  };
+
+  /**
+   * A terminal is a shell: read-only governed agents (the coordinator, its
+   * investigator/reviewer delegates) may not touch one — it would bypass the
+   * provider-native write restrictions their role enforces.
+   */
+  const assertTerminalAccessAllowed = async (): Promise<void> => {
+    if (!callerAgentId || !options.coordinator) return;
+    await options.coordinator.assertTerminalAccessAllowed(callerAgentId);
+  };
+
+  /**
+   * Schedules mint agents outside the delegation tree — governed callers are
+   * denied outright, ungoverned callers keep legacy behavior.
+   */
+  const assertScheduleAccessAllowed = async (): Promise<void> => {
+    if (!callerAgentId || !options.coordinator) return;
+    await options.coordinator.assertScheduleAccessAllowed(callerAgentId);
+  };
+
+  /**
+   * A governed caller's workspaces belong to the project that governs it —
+   * never a foreign projectId.
+   */
+  const assertProjectScopeAllowed = async (projectId: string | undefined): Promise<void> => {
+    if (!callerAgentId || !projectId || !options.coordinator) return;
+    await options.coordinator.assertProjectScopeAllowed(callerAgentId, projectId);
+  };
+
   const resolveInheritedProviderConfig = (
     selectedProvider: string,
   ): Pick<AgentSessionConfig, "providerOptions" | "paseoTools"> | undefined => {
@@ -899,6 +1059,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         .describe("Provider-specific feature values, for example { fast_mode: true } for Codex."),
     })
     .strict();
+  type CreateAgentSettingsInput = z.infer<typeof CreateAgentSettingsInputSchema>;
   const UpdateAgentSettingsInputSchema = z
     .object({
       modeId: z.string().optional().describe("Session mode ID."),
@@ -1031,6 +1192,12 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       "Required provider/model pair, for example codex/gpt-5.4.",
     ),
     labels: z.record(z.string(), z.string()).optional().describe("Labels to set on the agent"),
+    subagentKind: z
+      .enum(COORDINATOR_SUBAGENT_KINDS)
+      .optional()
+      .describe(
+        "Coordinator role for this spawn: investigator researches read-only, reviewer checks work and change requests, implementer writes code. Only valid for callers inside a coordinator's delegation tree; the coordinator's profiles configure the launch bundle.",
+      ),
     settings: CreateAgentSettingsInputSchema.optional().describe(
       "Initial runtime settings for the new agent.",
     ),
@@ -1316,9 +1483,17 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       prNumber,
       forge,
     }) => {
+      // Read-only delegated kinds may not provision at all; the trust-level
+      // allowlist only covers the coordinator itself.
+      await assertWorkspaceCreateAllowed();
+      // A governed caller mints workspaces only under its own checkout and
+      // only inside its own project — a foreign cwd or projectId would plant
+      // agents the boundary checks would never let it touch directly.
+      await assertProjectScopeAllowed(projectId);
       let workspace: PersistedWorkspaceRecord;
       if (isolation === "local") {
         const cwd = resolveScopedCwd(path, { required: true });
+        await assertScopedCwdAllowed(cwd);
         assertOptionsAbsent(
           [
             ["mode", mode],
@@ -1338,6 +1513,9 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       } else {
         let cwd =
           path !== undefined || !projectId ? resolveScopedCwd(path, { required: true }) : null;
+        if (cwd) {
+          await assertScopedCwdAllowed(cwd);
+        }
         if (!cwd) {
           if (!options.projectRegistry) {
             throw new Error("Project registry is not configured");
@@ -1418,6 +1596,10 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       if (!options.listActiveWorkspaces) {
         throw new Error("Active workspace lister is required to archive workspaces");
       }
+      // Archiving a workspace takes down every agent inside it — a delegated
+      // caller could otherwise bypass the agent boundary by archiving a
+      // foreign agent's workspace.
+      await assertWorkspaceTargetAllowed(workspaceId);
       const workspace = await requireActiveWorkspaceForArchive(
         { listActiveWorkspaces: options.listActiveWorkspaces },
         workspaceId,
@@ -1466,6 +1648,11 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async (args: unknown) => {
+      // The spawn gate's read-only precheck runs before arg resolution —
+      // workspace resolution can mint workspace records, and a denied spawn
+      // must leave nothing behind. createAgentCommand re-checks under the
+      // coordinator's spawn lock.
+      await coordinatorSpawnPrecheck(args);
       const resolvedArgs = await resolveCreateAgentToolArgs(args);
       const { parsedArgs, worktree } = resolvedArgs;
       let requestedBackground: boolean;
@@ -1477,7 +1664,20 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         requestedBackground = resolvedArgs.parsedArgs.background;
         notifyOnFinish = resolvedArgs.parsedArgs.notifyOnFinish ?? false;
       }
-      const selectedProvider = resolveRequiredProviderModel(parsedArgs.provider).provider;
+
+      // A subagent kind carries the coordinator's configured launch bundle:
+      // the role profile wins over ad-hoc settings the caller passed.
+      const { provider: providerArg, settings } = await applySubagentProfile({
+        subagentKind: parsedArgs.subagentKind,
+        provider: parsedArgs.provider,
+        settings: parsedArgs.settings,
+      });
+
+      // A coordinator profile may carry a bare provider with no model — the
+      // provider's default model resolves downstream in resolveCreateConfig.
+      const selectedProvider = providerArg.includes("/")
+        ? resolveRequiredProviderModel(providerArg).provider
+        : providerArg.trim();
       const inheritedConfig = resolveInheritedProviderConfig(selectedProvider);
       const {
         snapshot,
@@ -1496,19 +1696,24 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           ...(options.ensureWorkspaceForCreate
             ? { ensureWorkspaceForCreate: options.ensureWorkspaceForCreate }
             : {}),
+          ...(options.coordinator ? { coordinator: options.coordinator } : {}),
         },
         {
           kind: "mcp",
-          provider: parsedArgs.provider,
+          provider: providerArg,
           title: parsedArgs.title,
           initialPrompt: parsedArgs.initialPrompt,
-          config: { ...inheritedConfig, accountSelection: parsedArgs.settings?.accountSelection },
+          config: { ...inheritedConfig, accountSelection: settings?.accountSelection },
           cwd: resolvedArgs.cwd,
           workspaceId: resolvedArgs.workspaceId,
-          thinking: parsedArgs.settings?.thinkingOptionId,
-          features: parsedArgs.settings?.features,
+          ...(resolvedArgs.mintWorkspaceForCwd
+            ? { mintWorkspaceForCwd: resolvedArgs.mintWorkspaceForCwd }
+            : {}),
+          thinking: settings?.thinkingOptionId,
+          features: settings?.features,
           labels: parsedArgs.labels,
-          mode: parsedArgs.settings?.modeId,
+          mode: settings?.modeId,
+          ...(parsedArgs.subagentKind ? { subagentKind: parsedArgs.subagentKind } : {}),
           background: requestedBackground,
           notifyOnFinish,
           detached: resolvedArgs.detached,
@@ -1518,59 +1723,12 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         },
       );
 
-      try {
-        if (!createdInBackground && initialPromptStarted) {
-          const result = await waitForAgentWithTimeout(agentManager, snapshot.id, {
-            waitForActive: true,
-          });
-
-          const liveSnapshot = agentManager.getAgent(snapshot.id) ?? snapshot;
-          const responseData = {
-            agentId: snapshot.id,
-            type: snapshot.provider,
-            status: result.status,
-            cwd: liveSnapshot.cwd,
-            ...(liveSnapshot.workspaceId ? { workspaceId: liveSnapshot.workspaceId } : {}),
-            currentModeId: liveSnapshot.currentModeId,
-            availableModes: liveSnapshot.availableModes,
-            lastMessage: result.lastMessage,
-            permission: sanitizePermissionRequest(result.permission),
-          };
-          const validJson = ensureValidJson(responseData);
-
-          const response = {
-            content: [],
-            structuredContent: validJson,
-          };
-          return response;
-        }
-      } catch (error) {
-        childLogger.error({ err: error, agentId: snapshot.id }, "Failed to run initial prompt");
-        throw error;
-      }
-
-      // Return immediately for async creation.
-      const currentSnapshot = agentManager.getAgent(snapshot.id) ?? snapshot;
-      const guidance =
-        callerAgentId && notifyOnFinish && initialPromptStarted
-          ? "You will get notified when the created agent finishes, errors, or needs permission. Do not poll for status; continue with other work until the notification arrives."
-          : undefined;
-      const response = {
-        content: [],
-        structuredContent: ensureValidJson({
-          agentId: currentSnapshot.id,
-          type: snapshot.provider,
-          status: currentSnapshot.lifecycle,
-          cwd: currentSnapshot.cwd,
-          ...(currentSnapshot.workspaceId ? { workspaceId: currentSnapshot.workspaceId } : {}),
-          currentModeId: currentSnapshot.currentModeId,
-          availableModes: currentSnapshot.availableModes,
-          lastMessage: null,
-          permission: null,
-          ...(guidance ? { guidance } : {}),
-        }),
-      };
-      return response;
+      return respondToCreatedAgent({
+        snapshot,
+        createdInBackground,
+        initialPromptStarted,
+        notifyOnFinish,
+      });
     },
   );
 
@@ -1582,6 +1740,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         cwd: string | undefined;
         workspaceId: string | undefined;
         worktree: CreateAgentFromMcpInput["worktree"];
+        mintWorkspaceForCwd?: boolean;
       }
     | {
         kind: "top-level";
@@ -1590,6 +1749,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         cwd: string | undefined;
         workspaceId: string | undefined;
         worktree: CreateAgentFromMcpInput["worktree"];
+        mintWorkspaceForCwd?: boolean;
       };
 
   async function resolveCreateAgentToolArgs(args: unknown): Promise<ResolvedCreateAgentToolArgs> {
@@ -1598,9 +1758,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         // COMPAT(nestedCreateAgentPlacement): accept the old relationship/workspace shape without
         // advertising it to models. Added in v0.2.0; remove after 2027-01-17.
         const parsed = legacyAgentToAgentCreateAgentArgsSchema.parse(args);
-        const { cwd, workspaceId, worktree } = await resolveCreateAgentWorkspace(parsed.workspace, {
-          prompt: parsed.initialPrompt,
-        });
+        const { cwd, workspaceId, worktree, mintWorkspaceForCwd } =
+          await resolveCreateAgentWorkspace(parsed.workspace);
         return {
           kind: "agent-scoped",
           parsedArgs: parsed,
@@ -1608,6 +1767,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           cwd,
           workspaceId,
           worktree,
+          ...(mintWorkspaceForCwd ? { mintWorkspaceForCwd } : {}),
         };
       }
       const parsed = agentToAgentCreateAgentArgsSchema.parse(args);
@@ -1634,9 +1794,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       if (!parsedArgs.workspace) {
         throw new Error("Legacy create_agent placement could not be resolved");
       }
-      const { cwd, workspaceId, worktree } = await resolveCreateAgentWorkspace(
+      const { cwd, workspaceId, worktree, mintWorkspaceForCwd } = await resolveCreateAgentWorkspace(
         parsedArgs.workspace,
-        { prompt: parsedArgs.initialPrompt },
       );
       return {
         kind: "top-level",
@@ -1645,6 +1804,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         cwd,
         workspaceId,
         worktree,
+        ...(mintWorkspaceForCwd ? { mintWorkspaceForCwd } : {}),
       };
     }
     const parsedArgs = canonicalTopLevelCreateAgentArgsSchema.parse(args);
@@ -1687,10 +1847,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     workspaceId: string;
   }> {
     if (workspaceId) {
-      const resolved = await resolveCreateAgentWorkspace(
-        { kind: "existing", workspaceId },
-        undefined,
-      );
+      const resolved = await resolveCreateAgentWorkspace({ kind: "existing", workspaceId });
       return { cwd: resolved.cwd, workspaceId };
     }
     if (!callerAgentId) {
@@ -1708,6 +1865,109 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       throw new Error(`Caller agent ${callerAgentId} has no current workspace`);
     }
     return { cwd: undefined, workspaceId: caller.workspaceId };
+  }
+
+  /**
+   * A subagent kind carries the coordinator's configured launch bundle: the
+   * resolved role profile's provider/model/mode/features/account selection
+   * wins over whatever ad-hoc settings the caller passed.
+   */
+  async function applySubagentProfile(params: {
+    subagentKind: CoordinatorSubagentKind | undefined;
+    provider: string;
+    settings: CreateAgentSettingsInput | undefined;
+  }): Promise<{ provider: string; settings: CreateAgentSettingsInput | undefined }> {
+    if (!params.subagentKind) {
+      return { provider: params.provider, settings: params.settings };
+    }
+    const profile = await requireCoordinatorBridge().resolveSubagentProfile({
+      callerAgentId: callerAgentId!,
+      kind: params.subagentKind,
+    });
+    // Read-only kinds launch delegate-only; a caller-supplied session mode
+    // (say bypassPermissions) must not ride along. Only the profile's own
+    // mode applies.
+    const readOnlyKind =
+      params.subagentKind === "investigator" || params.subagentKind === "reviewer";
+    const callerSettings = { ...params.settings };
+    if (readOnlyKind) {
+      delete callerSettings.modeId;
+    }
+    return {
+      provider: profile.model ? `${profile.provider}/${profile.model}` : profile.provider,
+      settings: {
+        ...callerSettings,
+        ...(profile.modeId !== undefined ? { modeId: profile.modeId } : {}),
+        ...(profile.thinkingOptionId !== undefined
+          ? { thinkingOptionId: profile.thinkingOptionId }
+          : {}),
+        ...(profile.featureValues
+          ? { features: { ...params.settings?.features, ...profile.featureValues } }
+          : {}),
+        ...(profile.accountSelection ? { accountSelection: profile.accountSelection } : {}),
+      },
+    };
+  }
+
+  /**
+   * create_agent's result: wait for a synchronous (foreground) create to
+   * finish and report its outcome, or return the live snapshot immediately
+   * for background creation.
+   */
+  async function respondToCreatedAgent(params: {
+    snapshot: ManagedAgent;
+    createdInBackground: boolean;
+    initialPromptStarted: boolean;
+    notifyOnFinish: boolean;
+  }): Promise<PaseoToolResult> {
+    const { snapshot } = params;
+    if (!params.createdInBackground && params.initialPromptStarted) {
+      try {
+        const result = await waitForAgentWithTimeout(agentManager, snapshot.id, {
+          waitForActive: true,
+        });
+        const liveSnapshot = agentManager.getAgent(snapshot.id) ?? snapshot;
+        return {
+          content: [],
+          structuredContent: ensureValidJson({
+            agentId: snapshot.id,
+            type: snapshot.provider,
+            status: result.status,
+            cwd: liveSnapshot.cwd,
+            ...(liveSnapshot.workspaceId ? { workspaceId: liveSnapshot.workspaceId } : {}),
+            currentModeId: liveSnapshot.currentModeId,
+            availableModes: liveSnapshot.availableModes,
+            lastMessage: result.lastMessage,
+            permission: sanitizePermissionRequest(result.permission),
+          }),
+        };
+      } catch (error) {
+        childLogger.error({ err: error, agentId: snapshot.id }, "Failed to run initial prompt");
+        throw error;
+      }
+    }
+
+    // Return immediately for async creation.
+    const currentSnapshot = agentManager.getAgent(snapshot.id) ?? snapshot;
+    const guidance =
+      callerAgentId && params.notifyOnFinish && params.initialPromptStarted
+        ? "You will get notified when the created agent finishes, errors, or needs permission. Do not poll for status; continue with other work until the notification arrives."
+        : undefined;
+    return {
+      content: [],
+      structuredContent: ensureValidJson({
+        agentId: currentSnapshot.id,
+        type: snapshot.provider,
+        status: currentSnapshot.lifecycle,
+        cwd: currentSnapshot.cwd,
+        ...(currentSnapshot.workspaceId ? { workspaceId: currentSnapshot.workspaceId } : {}),
+        currentModeId: currentSnapshot.currentModeId,
+        availableModes: currentSnapshot.availableModes,
+        lastMessage: null,
+        permission: null,
+        ...(guidance ? { guidance } : {}),
+      }),
+    };
   }
 
   function normalizeTopLevelCreateAgentArgs(
@@ -1816,11 +2076,11 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     workspace:
       | LegacyAgentToAgentCreateAgentArgs["workspace"]
       | NonNullable<LegacyTopLevelCreateAgentArgs["workspace"]>,
-    firstAgentContext: FirstAgentContext | undefined,
   ): Promise<{
     cwd: string | undefined;
     workspaceId: string | undefined;
     worktree: CreateAgentFromMcpInput["worktree"];
+    mintWorkspaceForCwd?: boolean;
   }> {
     if (workspace.kind === "current") {
       if (!callerAgentId) {
@@ -1830,8 +2090,12 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       if (!callerAgent?.workspaceId) {
         throw new Error(`Caller agent ${callerAgentId} has no current workspace`);
       }
+      const cwd = workspace.cwd ? resolveScopedCwd(workspace.cwd, { required: true }) : undefined;
+      if (cwd) {
+        await assertScopedCwdAllowed(cwd);
+      }
       return {
-        cwd: workspace.cwd,
+        cwd,
         workspaceId: callerAgent.workspaceId,
         worktree: undefined,
       };
@@ -1841,6 +2105,9 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       if (!options.listActiveWorkspaces) {
         throw new Error("Workspace lookup is not configured");
       }
+      // Spawning into a workspace is acting on it — governed callers may only
+      // mint children inside their boundary.
+      await assertWorkspaceTargetAllowed(workspace.workspaceId);
       const existingWorkspace = (await options.listActiveWorkspaces()).find(
         (candidate) => candidate.workspaceId === workspace.workspaceId,
       );
@@ -1850,6 +2117,11 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       const cwd = workspace.cwd
         ? resolveScopedCwd(workspace.cwd, { required: true })
         : existingWorkspace.cwd;
+      if (!isSameOrDescendantPath(existingWorkspace.cwd, cwd)) {
+        throw new Error(
+          `cwd ${cwd} is outside workspace ${workspace.workspaceId} (${existingWorkspace.cwd})`,
+        );
+      }
       const lockedCwd = callerContext?.lockedCwd?.trim();
       if (lockedCwd && !isSameOrDescendantPath(expandUserPath(lockedCwd), cwd)) {
         throw new Error(`Workspace ${workspace.workspaceId} is outside the allowed cwd`);
@@ -1863,17 +2135,25 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
 
     if (workspace.source.kind === "directory") {
       const cwd = resolveScopedCwd(workspace.source.path, { required: true });
+      // A governed caller may only mint workspaces under its own checkout.
+      await assertScopedCwdAllowed(cwd);
       if (!options.ensureWorkspaceForCreate) {
         throw new Error("Workspace creation is not configured");
       }
+      // The workspace record mints inside createAgentCommand's spawn gate —
+      // a coordinator-governed spawn denied under the lock leaves no record.
       return {
         cwd,
-        workspaceId: await options.ensureWorkspaceForCreate(cwd, firstAgentContext),
+        workspaceId: undefined,
         worktree: undefined,
+        mintWorkspaceForCwd: true,
       };
     }
 
     const cwd = resolveScopedCwd(workspace.source.cwd, { required: true });
+    // The worktree branches off this repo — a foreign base would plant the
+    // spawn outside the governed checkout.
+    await assertScopedCwdAllowed(cwd);
     return {
       cwd,
       workspaceId: undefined,
@@ -1931,6 +2211,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     }) => {
       const shouldNotifyOnFinish = Boolean(callerAgentId && notifyOnFinish && background);
 
+      await assertAgentTargetAllowed(agentId);
       await sendPromptToAgent({
         agentManager,
         agentStorage,
@@ -2119,6 +2400,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async ({ agentId }) => {
+      await assertAgentTargetAllowed(agentId);
       const { cancelled } = await cancelAgentRunCommand(
         { agentManager, logger: childLogger },
         agentId,
@@ -2144,6 +2426,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async ({ agentId }) => {
+      await assertAgentTargetAllowed(agentId, { action: "mutate" });
       await archiveAgentCommand(
         {
           agentManager,
@@ -2172,6 +2455,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async ({ agentId }) => {
+      await assertAgentTargetAllowed(agentId, { action: "mutate" });
       await closeAgentCommand({ agentManager }, agentId);
       return {
         content: [],
@@ -2198,6 +2482,12 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async ({ agentId, name, labels, settings }) => {
+      await assertAgentTargetAllowed(agentId, { action: "mutate" });
+      // A governed agent could otherwise promote its own read-only profile
+      // into a writing mode and escape the role the coordinator spawned it as.
+      if (settings !== undefined) {
+        await assertSelfActionAllowed(agentId, "change runtime settings");
+      }
       if (settings?.modeId !== undefined) {
         await agentManager.setAgentMode(agentId, settings.modeId);
       }
@@ -2213,7 +2503,12 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         }
       }
 
-      await updateAgentCommand({ agentManager }, { agentId, name, labels });
+      // Lineage and coordinator stamps are daemon-owned (updateAgentCommand
+      // strips them again); agent tools also may not write client tab markers.
+      await updateAgentCommand(
+        { agentManager },
+        { agentId, name, labels: stripAgentToolLabels(labels) },
+      );
 
       return {
         content: [],
@@ -2256,6 +2551,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       }
 
       const workspaceId = resolveWorkspaceIdForRename(requestedWorkspaceId);
+      await assertWorkspaceTargetAllowed(workspaceId);
       const existing = await options.workspaceRegistry.get(workspaceId);
       if (!existing) {
         throw new Error(`Workspace ${workspaceId} not found`);
@@ -2324,6 +2620,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       if (!workspaceScripts) {
         throw new Error("Workspace script management is not configured");
       }
+      await assertWorkspaceTargetAllowed(workspaceId);
       return {
         content: [],
         structuredContent: ensureValidJson({
@@ -2350,6 +2647,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       if (!workspaceScripts) {
         throw new Error("Workspace script management is not configured");
       }
+      await assertWorkspaceTargetAllowed(workspaceId);
       return {
         content: [],
         structuredContent: ensureValidJson({
@@ -2422,11 +2720,15 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       outputSchema: TerminalSummarySchema.shape,
     },
     async ({ cwd, name }) => {
+      await assertTerminalAccessAllowed();
       if (!terminalManager) {
         throw new Error("Terminal manager is not configured");
       }
 
       const resolvedCwd = resolveScopedCwd(cwd, { required: true });
+      // A governed caller's terminals stay under its own checkout — otherwise
+      // a delegated agent could run commands inside a foreign workspace.
+      await assertScopedCwdAllowed(resolvedCwd);
       const workspaceId = await resolveTerminalWorkspaceId(resolvedCwd);
 
       const terminal = await terminalManager.createTerminal({
@@ -2459,6 +2761,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async ({ terminalId }) => {
+      await assertTerminalAccessAllowed();
       if (!terminalManager) {
         throw new Error("Terminal manager is not configured");
       }
@@ -2467,6 +2770,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       if (!terminal) {
         throw new Error(`Terminal ${terminalId} not found`);
       }
+      await assertWorkspaceTargetAllowed(terminal.workspaceId);
 
       terminal.kill();
 
@@ -2496,13 +2800,18 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async ({ terminalId, start, end, scrollback, stripAnsi = true }) => {
+      await assertTerminalAccessAllowed();
       if (!terminalManager) {
         throw new Error("Terminal manager is not configured");
       }
 
-      if (!terminalManager.getTerminal(terminalId)) {
+      const terminal = terminalManager.getTerminal(terminalId);
+      if (!terminal) {
         throw new Error(`Terminal ${terminalId} not found`);
       }
+      // Output capture reads foreign command output — same workspace boundary
+      // as the mutating terminal ops.
+      await assertWorkspaceTargetAllowed(terminal.workspaceId);
 
       const capture = await terminalManager.captureTerminal(terminalId, {
         start: scrollback ? 0 : start,
@@ -2536,6 +2845,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async ({ terminalId, keys, literal = false }) => {
+      await assertTerminalAccessAllowed();
       if (!terminalManager) {
         throw new Error("Terminal manager is not configured");
       }
@@ -2544,6 +2854,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       if (!terminal) {
         throw new Error(`Terminal ${terminalId} not found`);
       }
+      await assertWorkspaceTargetAllowed(terminal.workspaceId);
 
       terminal.send({
         type: "input",
@@ -2595,6 +2906,10 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       maxRuns,
       expiresIn,
     }) => {
+      // A schedule spawns agents with no parent — a governed caller would
+      // mint descendants the spawn guard never sees. The deny lands before the
+      // service check so governed callers never learn whether it exists.
+      await assertScheduleAccessAllowed();
       if (!scheduleService) {
         throw new Error("Schedule service is not configured");
       }
@@ -2750,6 +3065,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async ({ id }) => {
+      await assertScheduleAccessAllowed();
       if (!scheduleService) {
         throw new Error("Schedule service is not configured");
       }
@@ -2776,6 +3092,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async ({ id }) => {
+      await assertScheduleAccessAllowed();
       if (!scheduleService) {
         throw new Error("Schedule service is not configured");
       }
@@ -2802,6 +3119,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async ({ id }) => {
+      await assertScheduleAccessAllowed();
       if (!scheduleService) {
         throw new Error("Schedule service is not configured");
       }
@@ -2874,6 +3192,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       outputSchema: StoredScheduleSchema.shape,
     },
     async (input) => {
+      await assertScheduleAccessAllowed();
       if (!scheduleService) {
         throw new Error("Schedule service is not configured");
       }
@@ -2923,6 +3242,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       outputSchema: StoredScheduleSchema.shape,
     },
     async ({ id }) => {
+      await assertScheduleAccessAllowed();
       if (!scheduleService) {
         throw new Error("Schedule service is not configured");
       }
@@ -3182,6 +3502,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async ({ agentId, ...target }) => {
+      await assertAgentTargetAllowed(agentId, { action: "mutate" });
       const record = await handoffAgent(
         {
           agentManager,
@@ -3258,6 +3579,10 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async ({ agentId, modeId }) => {
+      await assertAgentTargetAllowed(agentId, { action: "mutate" });
+      // Mode changes on self would let a governed agent escape a read-only
+      // profile the coordinator configured for its kind.
+      await assertSelfActionAllowed(agentId, "change runtime settings");
       const result = await setAgentModeCommand({ agentManager }, { agentId, modeId });
       return {
         content: [],
@@ -3316,6 +3641,10 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async ({ agentId, requestId, response }) => {
+      await assertAgentTargetAllowed(agentId, { action: "mutate" });
+      // Permission authority sits with the coordinator or the user — a
+      // governed session may not approve its own prompts.
+      await assertSelfActionAllowed(agentId, "answer permission requests");
       await respondToAgentPermission({
         agentManager,
         agentId,
@@ -3361,10 +3690,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       if (!callerAgentId) {
         throw new Error("remember requires an agent caller");
       }
-      if (!options.coordinator) {
-        throw new Error("Coordinator service is not configured");
-      }
-      const result = await options.coordinator.remember({
+      const result = await requireCoordinatorBridge().remember({
         callerAgentId,
         scope,
         content,

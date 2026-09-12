@@ -1246,6 +1246,7 @@ export async function createPaseoDaemon(
     providerSnapshotManager,
     createPaseoWorktree: createPaseoWorktreeForTools,
     ensureWorkspaceForCreate: ensureWorkspaceForCreateAndBroadcastExternal,
+    coordinator: coordinatorService,
   };
   const createAgent = (input: Parameters<typeof createAgentCommand>[1]) =>
     createAgentCommand(createAgentCommandDependencies, input);

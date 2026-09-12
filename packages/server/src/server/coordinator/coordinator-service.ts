@@ -6,30 +6,45 @@ import type { Logger } from "pino";
 import {
   COORDINATOR_PROJECT_ID_LABEL,
   COORDINATOR_PROJECT_ROLE,
+  COORDINATOR_SUBAGENT_KIND_LABEL,
+  COORDINATOR_TRUST_LABEL,
   getCoordinatorProjectIdFromLabels,
   getCoordinatorRole,
+  getCoordinatorSubagentKind,
+  getParentAgentIdFromLabels,
   isCoordinatorAgent,
   isDelegatedAgent,
+  PARENT_AGENT_ID_LABEL,
   PASEO_ROLE_LABEL,
+  type CoordinatorSubagentKind,
 } from "@getpaseo/protocol/agent-labels";
 import type {
   CoordinatorBoardSnapshot,
   CoordinatorDecisionBoardRow,
+  CoordinatorGuard,
   CoordinatorProfileSelection,
   CoordinatorProfiles,
   CoordinatorScope,
   CoordinatorTrustLevel,
+  CoordinatorUsage,
   CoordinatorUsageExpectation,
   CoordinatorWorkingBoardRow,
   ProjectCoordinatorState,
 } from "@getpaseo/protocol/messages";
 import { ensureUnarchivedAgentLoaded } from "../agent/agent-loading.js";
+import {
+  collectAgentLineage,
+  isAgentDescendantOf,
+  nearestCoordinatorAncestor,
+  type AgentLineageDeps,
+} from "../agent/agent-lineage.js";
 import { sendPromptToAgent } from "../agent/agent-prompt.js";
 import type { AgentManager, AgentManagerEvent, ManagedAgent } from "../agent/agent-manager.js";
 import type {
   AgentPermissionRequest,
   AgentSessionConfig,
   AgentStreamEvent,
+  AgentUsage,
 } from "../agent/agent-sdk-types.js";
 import type { AgentStorage, StoredAgentRecord } from "../agent/agent-storage.js";
 import type {
@@ -41,21 +56,52 @@ import type {
   WorkspaceRegistry,
 } from "../workspace-registry.js";
 import { areEquivalentPaths } from "../../utils/path.js";
+import { isSameOrDescendantPath } from "../path-utils.js";
 import { writeFileAtomic } from "../atomic-file.js";
 
 import {
   CoordinatorStore,
   type PersistedCoordinatorBoard,
+  type PersistedCoordinatorUsage,
   type PersistedProjectCoordinator,
 } from "./persistence.js";
 import {
   buildProjectCoordinatorFirstContactPrompt,
   buildProjectCoordinatorSystemPrompt,
 } from "./prompts.js";
+import { coordinatorSpawnEnv } from "./spawn-isolation.js";
+import { coordinatorTrustAtLeast, coordinatorTrustLevelFromLabels } from "./tool-policy.js";
+
+export { SPAWN_ISOLATION_ENV } from "./spawn-isolation.js";
 
 const DONE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const DONE_SNAPSHOT_LIMIT = 20;
 const COORDINATOR_TITLE = "Coordinator";
+
+/** Daemon defaults for the runaway guard; `guard` overrides per project. */
+export const DEFAULT_MAX_CONCURRENT_SUBAGENTS = 8;
+export const DEFAULT_MAX_SPAWN_DEPTH = 2;
+
+export interface CoordinatorSpawnDecision {
+  /** Daemon-controlled labels the spawn must carry. */
+  labels: Record<string, string>;
+  /** Launch env the spawn must inherit. */
+  env?: Record<string, string>;
+  /**
+   * "worktree" means the spawned agent must run in its own Paseo worktree —
+   * Ship-and-above implementers write, and two of them in the coordinator's
+   * checkout would collide. Create paths default a branch-off worktree when
+   * the caller did not request one explicitly.
+   */
+  isolation?: "worktree";
+  /**
+   * Read-only subagent kinds (investigator, reviewer) must launch with the
+   * provider-native delegate-only restrictions — no file edits, no shell —
+   * so a Propose spawn cannot write no matter what mode the caller asked
+   * for. Providers without a native mechanism reject the create.
+   */
+  delegateOnly?: boolean;
+}
 
 export class CoordinatorRequestError extends Error {
   constructor(message: string) {
@@ -80,6 +126,56 @@ export interface UpdateProjectCoordinatorInput {
   scope?: CoordinatorScope;
   /** Null clears the expectation. */
   usageExpectation?: CoordinatorUsageExpectation | null;
+  /** Partial guard override; absent keys keep daemon defaults. */
+  guard?: CoordinatorGuard;
+}
+
+export interface CoordinatorSpawnGateInput {
+  parentAgentId: string;
+  subagentKind?: CoordinatorSubagentKind;
+  /** Legacy detached creation drops the parent label — it cannot evade the guard. */
+  detached?: boolean;
+}
+
+interface CoordinatorUsageBucket {
+  month: string;
+  tokens: number;
+  lastSeen: Map<string, number>;
+  reported: Set<string>;
+}
+
+/**
+ * How a provider's usage_updated readings relate to spend:
+ * - "cumulative": the reading is a running total (codex thread totals, pi/omp
+ *   session stats). Each event charges its diff against the last reading; a
+ *   drop means the counter restarted (resume, new thread), so the new reading
+ *   itself is the fresh spend.
+ * - "perStep": the reading is that step's spend (opencode rewrites its
+ *   per-step totals on every event). Each event counts whole, and the
+ *   bucket's lastSeen tracks the running counted sum so a terminal turn total
+ *   can only charge the uncounted remainder.
+ * Providers absent from the table — claude, acp derivatives, custom ACP
+ * providers — report spend only on terminal events; their mid-turn
+ * usage_updated carries a context gauge with no token totals, which
+ * usageTokenTotal filters out before the tracker sees it.
+ */
+type UsageReadingStyle = "cumulative" | "perStep";
+
+const USAGE_READING_STYLE: Record<string, UsageReadingStyle> = {
+  opencode: "perStep",
+};
+
+/**
+ * Token meter bookkeeping per agent. The project bucket's `lastSeen` is the
+ * baseline the next reading diffs against — persisted so a daemon restart
+ * keeps the right baseline. `sawMidTurnUsage` is sticky on purpose: once an
+ * agent reports token-bearing usage mid-turn, its terminal events carry
+ * cumulative or stale totals that must be diffed, never counted whole —
+ * codex re-attaches its last mid-turn reading to turn_completed, and a turn
+ * that produced no fresh readings must not recharge the same spend.
+ */
+interface AgentUsageTracker {
+  sawMidTurnUsage: boolean;
 }
 
 export interface CoordinatorRememberInput {
@@ -254,16 +350,127 @@ function capitalizeTrust(level: CoordinatorTrustLevel): string {
   return level.charAt(0).toUpperCase() + level.slice(1);
 }
 
+function resolveCoordinatorGuard(guard: CoordinatorGuard | undefined): {
+  maxConcurrentSubagents: number;
+  maxSpawnDepth: number;
+} {
+  return {
+    maxConcurrentSubagents: guard?.maxConcurrentSubagents ?? DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+    maxSpawnDepth: guard?.maxSpawnDepth ?? DEFAULT_MAX_SPAWN_DEPTH,
+  };
+}
+
+/**
+ * Hard trust/kind rules for a spawn, checked before the runaway guard so a
+ * forbidden spawn fails the same way regardless of fleet pressure.
+ */
+function assertSpawnTrustAndKind(
+  trust: CoordinatorTrustLevel,
+  input: CoordinatorSpawnGateInput,
+): void {
+  if (input.detached) {
+    throw new CoordinatorRequestError(
+      "Detached creation drops the lineage the coordinator's guard and ownership depend on — " +
+        "spawn subagents, not detached agents, inside a coordinator project",
+    );
+  }
+  if (trust === "observe") {
+    throw new CoordinatorRequestError(
+      "This coordinator runs at Observe trust — it cannot spawn agents. " +
+        "Raise the trust level to Propose or above in the coordinator settings",
+    );
+  }
+  if (trust === "propose") {
+    if (!input.subagentKind) {
+      throw new CoordinatorRequestError(
+        "At Propose trust a coordinator may only spawn read-only subagents — " +
+          'pass subagentKind "investigator" or "reviewer" to create_agent',
+      );
+    }
+    if (input.subagentKind === "implementer") {
+      throw new CoordinatorRequestError(
+        'subagentKind "implementer" is a writing role — it unlocks at Ship trust',
+      );
+    }
+  }
+}
+
+/**
+ * The daemon-owned stamps a gated spawn carries: lineage labels the caller can
+ * never set, the tree's launch env, worktree isolation for writing roles at
+ * Ship and above, and delegate-only enforcement for read-only kinds.
+ */
+function spawnStamps(
+  input: CoordinatorSpawnGateInput,
+  projectId: string | null,
+  trust: CoordinatorTrustLevel,
+): CoordinatorSpawnDecision {
+  const labels: Record<string, string> = {
+    // Daemon-stamped lineage — caller labels can never set this, so the
+    // ownership walk and the descendant cap always see the real parent.
+    [PARENT_AGENT_ID_LABEL]: input.parentAgentId,
+  };
+  if (input.subagentKind) labels[COORDINATOR_SUBAGENT_KIND_LABEL] = input.subagentKind;
+  if (projectId) labels[COORDINATOR_PROJECT_ID_LABEL] = projectId;
+  const env = coordinatorSpawnEnv(trust);
+  // Investigator and reviewer are the read-only roles at every trust level —
+  // provider-native delegate-only enforcement, not the prompt, keeps a
+  // Propose spawn from writing.
+  const readOnly = input.subagentKind === "investigator" || input.subagentKind === "reviewer";
+  // Writing descendants launch isolated: at Ship and above every spawn that
+  // is not a read-only kind — including a kindless spawn — gets its own
+  // worktree instead of editing the coordinator's checkout, where concurrent
+  // workers would collide.
+  const isolation =
+    coordinatorTrustAtLeast(trust, "ship") && !readOnly ? ("worktree" as const) : undefined;
+  return {
+    labels,
+    ...(env ? { env } : {}),
+    ...(isolation ? { isolation } : {}),
+    ...(readOnly ? { delegateOnly: true } : {}),
+  };
+}
+
+/** UTC calendar month key — `YYYY-MM` — for the soft usage meter. */
+function currentMonthKey(now = new Date()): string {
+  return now.toISOString().slice(0, 7);
+}
+
+/**
+ * Billable total for the meter: input plus output. Cached tokens are left out —
+ * providers disagree on whether they are disjoint (claude) or a subset of
+ * input (codex), so counting them would double-charge some providers. Returns
+ * undefined for gauge-only readings (context-window updates carry no totals).
+ */
+function usageTokenTotal(usage: AgentUsage): number | undefined {
+  if (usage.inputTokens === undefined && usage.outputTokens === undefined) {
+    return undefined;
+  }
+  return (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
+}
+
+/**
+ * New spend implied by a cumulative reading. A counter that dropped means the
+ * provider restarted its session counter — count the fresh reading whole so
+ * the uncounted spend lands, and a stale completion can never recharge the
+ * same spend.
+ */
+function cumulativeUsageDelta(total: number, last: number): number {
+  if (total > last) return total - last;
+  if (total < last) return total;
+  return 0;
+}
+
 /**
  * Owns project-coordinator records, residency, singleton enforcement, and the
  * derived board. Coordinators are ordinary persisted agents marked with role
  * labels; this service never duplicates AgentManager lifecycle logic — it
  * creates, resumes, archives, and observes through the manager's public seams.
  *
- * Milestone 1 is observe-only: sessions launch delegate-only with required
- * Paseo tools, the tool catalog denies mutating calls (see tool-policy.ts),
- * and the board derives Needs you/Working rows from live agent state while the
- * service itself writes Done rows.
+ * Trust gates what a coordinator may do (tool-policy.ts), the spawn gate
+ * enforces role kinds and the runaway guard before any workspace is minted,
+ * and the board derives Needs you/Working rows from live agent state while
+ * the service itself writes Wake and Done rows.
  */
 export class CoordinatorService {
   private readonly store: CoordinatorStore;
@@ -280,9 +487,18 @@ export class CoordinatorService {
   private readonly emittedSnapshotKeys = new Map<string, string>();
   private readonly projectOps = new Map<string, Promise<void>>();
   private readonly boardOps = new Map<string, Promise<void>>();
+  /** Serializes guard-check-plus-create per coordinator so concurrent spawns can't race the cap. */
+  private readonly spawnOps = new Map<string, Promise<void>>();
   private readonly agentCoverage = new Map<string, CoordinatorCoverageEntry>();
   private readonly knownDecisionQuestions = new Map<string, string>();
   private readonly dirtyBoards = new Set<string>();
+  private readonly usageRuntime = new Map<string, CoordinatorUsageBucket>();
+  /** In-flight bucket loads — concurrent first events share one read. */
+  private readonly usageBucketLoads = new Map<string, Promise<CoordinatorUsageBucket>>();
+  private readonly pendingUsagePersist = new Set<string>();
+  /** Per-agent token meter state; keyed by agent id, lives for the daemon run. */
+  private readonly usageTrackers = new Map<string, AgentUsageTracker>();
+  private readonly usageProjectByAgent = new Map<string, string | null>();
   private agentMcpAvailable: boolean | undefined;
   private boardFlushScheduled = false;
   private unsubscribers: Array<() => void> = [];
@@ -339,6 +555,13 @@ export class CoordinatorService {
         this.logger.warn({ err: error }, "Failed to unsubscribe coordinator listener");
       }
     }
+    for (const projectId of this.pendingUsagePersist) {
+      // flushUsage deletes the entry it persists — deleting the current item
+      // during Set iteration is safe and keeps the snapshot semantics.
+      await this.flushUsage(projectId).catch((error) =>
+        this.logger.warn({ err: error, projectId }, "Failed to persist coordinator usage"),
+      );
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -354,7 +577,6 @@ export class CoordinatorService {
   async enableProjectCoordinator(
     input: EnableProjectCoordinatorInput,
   ): Promise<ProjectCoordinatorState> {
-    this.assertObserveTrust(input.trustLevel);
     return this.withProjectLock(input.projectId, async () => {
       const project = await this.projectRegistry.get(input.projectId);
       if (!project) throw new CoordinatorRequestError(`Unknown project: ${input.projectId}`);
@@ -362,6 +584,7 @@ export class CoordinatorService {
         throw new CoordinatorRequestError(`Project is archived: ${input.projectId}`);
       }
       const scope = input.scope ?? "everything";
+      const trustLevel = input.trustLevel ?? "observe";
       const now = new Date().toISOString();
       const records = await this.agentStorage.list();
       let state = (await this.getState(input.projectId)) ?? this.newState(input.projectId, now);
@@ -378,7 +601,7 @@ export class CoordinatorService {
         ...state,
         agentId,
         enabled: true,
-        trustLevel: "observe",
+        trustLevel,
         scope,
         profile: input.profile,
         profiles: input.profiles ?? state.profiles,
@@ -387,7 +610,11 @@ export class CoordinatorService {
 
       if (!agentId || replacingProvider) {
         const workspace = await this.resolveRootWorkspace(project);
-        const config = this.coordinatorSessionConfig(project, input, workspace);
+        const config = this.coordinatorSessionConfig(
+          project,
+          { profile: input.profile, trustLevel },
+          workspace,
+        );
         this.assertAgentMcpEndpoint(config.paseoTools);
         // The replacement exists before the old coordinator retires: a failed
         // creation leaves the previous session untouched.
@@ -395,9 +622,11 @@ export class CoordinatorService {
           workspaceId: workspace.workspaceId,
           unattended: true,
           initialTitle: COORDINATOR_TITLE,
+          env: coordinatorSpawnEnv(trustLevel),
           labels: {
             [PASEO_ROLE_LABEL]: COORDINATOR_PROJECT_ROLE,
             [COORDINATOR_PROJECT_ID_LABEL]: input.projectId,
+            [COORDINATOR_TRUST_LABEL]: trustLevel,
           },
         });
         if (replacingProvider && keeper) {
@@ -406,7 +635,7 @@ export class CoordinatorService {
         state.agentId = agent.id;
         await this.appendWakeRow(
           input.projectId,
-          `Woke: coordinator enabled · ${capitalizeTrust("observe")}`,
+          `Woke: coordinator enabled · ${capitalizeTrust(trustLevel)}`,
         );
         // CreateAgentOptions.initialPrompt only feeds title derivation — the
         // first-contact prompt must be dispatched as a real turn.
@@ -420,7 +649,7 @@ export class CoordinatorService {
               projectName: project.customName ?? project.displayName,
               rootPath: project.rootPath,
               scope,
-              trustLevel: "observe",
+              trustLevel,
             }),
             logger: this.logger,
           });
@@ -433,6 +662,9 @@ export class CoordinatorService {
       } else {
         // Re-enable resumes the persisted session — it keeps its required-tools
         // launch flag, so the same MCP endpoint gate applies as on creation.
+        // The trust label is mirrored before the load so the tool gate and the
+        // launch env both see the new level.
+        await this.syncTrustLabel(agentId, trustLevel);
         const record = await this.agentStorage.get(agentId);
         this.assertAgentMcpEndpoint(record?.config?.paseoTools);
         await ensureUnarchivedAgentLoaded(agentId, {
@@ -476,7 +708,6 @@ export class CoordinatorService {
   async updateProjectCoordinator(
     input: UpdateProjectCoordinatorInput,
   ): Promise<ProjectCoordinatorState | null> {
-    this.assertObserveTrust(input.trustLevel);
     return this.withProjectLock(input.projectId, async () => {
       const state = await this.getState(input.projectId);
       if (!state) return null;
@@ -498,13 +729,28 @@ export class CoordinatorService {
         next.profile = input.profile;
       }
       if (input.profiles !== undefined) next.profiles = input.profiles;
-      if (input.trustLevel !== undefined) next.trustLevel = "observe";
+      if (input.trustLevel !== undefined) next.trustLevel = input.trustLevel;
       if (input.scope !== undefined) next.scope = input.scope;
+      if (input.guard !== undefined) next.guard = input.guard;
       if (Object.prototype.hasOwnProperty.call(input, "usageExpectation")) {
         next.usageExpectation = input.usageExpectation ?? undefined;
       }
 
       await this.setState(input.projectId, next);
+      // Stepping down applies instantly: the tool gate reads the label on every
+      // call, and the spawn guard reads the persisted state, so mirroring the
+      // label here is what makes a lowered level take effect mid-session.
+      if (input.trustLevel !== undefined && input.trustLevel !== state.trustLevel) {
+        await this.syncTrustLabel(next.agentId, input.trustLevel);
+        // The system prompt carries the level's rules ("you may NOT spawn") —
+        // leave it stale and a raised coordinator keeps refusing the workflow
+        // the label now permits.
+        await this.syncTrustPrompt(next, input.trustLevel);
+        await this.appendWakeRow(
+          input.projectId,
+          `Trust: now at ${capitalizeTrust(input.trustLevel)}`,
+        );
+      }
       this.queueBoardRefresh(input.projectId);
       return this.toProjectCoordinatorState(next);
     });
@@ -569,6 +815,448 @@ export class CoordinatorService {
       );
     }
     return { filePath };
+  }
+
+  // -------------------------------------------------------------------------
+  // Spawn gate (create_agent bridge)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Read-only precheck for the MCP `create_agent` path, run before any
+   * workspace or worktree is minted so a denied spawn leaves nothing behind.
+   * `createAgentCommand` re-checks under the spawn lock via
+   * `runCoordinatorSpawn`; callers without a coordinator ancestor get null and
+   * spawn ungated.
+   */
+  async assertSpawnAllowed(
+    input: CoordinatorSpawnGateInput,
+  ): Promise<CoordinatorSpawnDecision | null> {
+    const governing = await this.governingCoordinator(input.parentAgentId);
+    if (!governing) return null;
+    return this.spawnDecision(governing, input);
+  }
+
+  /**
+   * The authoritative spawn gate: serializes check + create per coordinator so
+   * two concurrent spawns cannot both see "7 of 8" and pass. The callback runs
+   * inside the lock — resolve worktree/workspace resources there too, so a
+   * denied spawn leaves nothing behind. The decision's labels and env are
+   * daemon-controlled; merge them over caller-supplied values.
+   */
+  async runCoordinatorSpawn<T>(
+    input: CoordinatorSpawnGateInput,
+    create: (decision: CoordinatorSpawnDecision | null) => Promise<T>,
+  ): Promise<T> {
+    const governing = await this.governingCoordinator(input.parentAgentId);
+    if (!governing) return create(null);
+    const created = await this.serialize(this.spawnOps, governing.node.agentId, async () => {
+      const decision = await this.spawnDecision(governing, input);
+      return create(decision);
+    });
+    await this.reportSpawnExpectation(governing.node);
+    return created;
+  }
+
+  /**
+   * Resolves a subagent kind to the coordinator's configured launch bundle.
+   * `profiles.fallback` covers kinds the project did not configure explicitly.
+   */
+  async resolveSubagentProfile(input: {
+    callerAgentId: string;
+    kind: CoordinatorSubagentKind;
+  }): Promise<CoordinatorProfileSelection> {
+    const governing = await this.governingCoordinator(input.callerAgentId);
+    if (!governing) {
+      throw new CoordinatorRequestError(
+        "subagentKind applies only to spawns under a coordinator — omit it for ordinary agents",
+      );
+    }
+    const projectId = getCoordinatorProjectIdFromLabels(governing.node.labels);
+    const state = projectId ? await this.getState(projectId) : null;
+    const profiles = state?.profiles ?? {};
+    const profile = profiles[input.kind] ?? profiles["fallback"];
+    if (!profile) {
+      throw new CoordinatorRequestError(
+        `The coordinator has no "${input.kind}" profile configured — ` +
+          `set profiles.${input.kind} (or profiles.fallback) in the coordinator settings`,
+      );
+    }
+    return profile;
+  }
+
+  /**
+   * Ownership check for agent-targeting tools (`send_agent_prompt`,
+   * `cancel_agent`, `respond_to_permission`, `update_agent`, `archive_agent`,
+   * `kill_agent`). Callers outside any coordinator tree keep legacy behavior.
+   * A coordinator caller steers its own descendants at any level; at Ship and
+   * above it may also act on sessions inside its project's scope — the spec's
+   * "act on your sessions within policy". A delegated caller under a
+   * coordinator may act anywhere inside that coordinator's tree — its own
+   * descendants, siblings, and the coordinator it reports to — but mutating
+   * ops (`action: "mutate"`) may never target an ancestor: archiving or
+   * reconfiguring a parent would let a child sever the lineage that governs
+   * it.
+   */
+  async assertAgentTargetAllowed(
+    callerAgentId: string,
+    targetAgentId: string,
+    options?: { action?: "steer" | "mutate" },
+  ): Promise<void> {
+    if (callerAgentId === targetAgentId) return;
+    const deps = this.lineageDeps();
+    const callerLineage = await collectAgentLineage(deps, callerAgentId);
+    const caller = callerLineage[0];
+    // An unknown caller fails later on its own terms (send/cancel lookups).
+    if (!caller) return;
+    const governingIndex = callerLineage.findIndex(
+      (node) => getCoordinatorRole(node.labels) !== null,
+    );
+    if (governingIndex === -1) return;
+    const governing = callerLineage[governingIndex];
+
+    if (governingIndex !== 0) {
+      // Mutating an ancestor severs the caller's own lineage: the archive
+      // cascade would detach the child and drop it outside the boundary
+      // entirely. Steering upward (prompts, cancels) stays allowed — a
+      // delegated agent may report to the coordinator it rolls up to.
+      if (
+        options?.action === "mutate" &&
+        callerLineage.slice(1).some((node) => node.agentId === targetAgentId)
+      ) {
+        throw new CoordinatorRequestError(
+          "Delegated agents may not mutate their own ancestors — " +
+            "delegation only flows downward",
+        );
+      }
+      const targetLineage = await collectAgentLineage(deps, targetAgentId);
+      if (!targetLineage.some((node) => node.agentId === governing.agentId)) {
+        throw new CoordinatorRequestError(
+          "Delegated agents may only act on sessions inside their coordinator's tree — " +
+            "the target is outside that boundary",
+        );
+      }
+      return;
+    }
+
+    if (await isAgentDescendantOf(deps, callerAgentId, targetAgentId)) return;
+
+    const projectId = getCoordinatorProjectIdFromLabels(caller.labels);
+    const state = projectId ? await this.getState(projectId) : null;
+    const trust = state?.trustLevel ?? coordinatorTrustLevelFromLabels(caller.labels);
+    if (
+      projectId &&
+      coordinatorTrustAtLeast(trust, "ship") &&
+      (await this.isProjectScopeTarget({ projectId, state, targetAgentId }))
+    ) {
+      return;
+    }
+    throw new CoordinatorRequestError(
+      coordinatorTrustAtLeast(trust, "ship")
+        ? "Coordinators may only act on their own subagents or sessions inside this project's scope — the target is outside that boundary"
+        : "Coordinators may only act on their own subagents; sessions outside the delegation tree need Ship trust and in-scope coverage",
+    );
+  }
+
+  /**
+   * Self-escalation check: a governed caller — the coordinator or anything in
+   * its delegation tree — may not rewrite its own runtime settings or answer
+   * its own permission requests. Settings changes could flip a read-only
+   * profile's mode into a writing one, and permission authority sits with the
+   * coordinator or the user, never with the session asking. Callers outside a
+   * coordinator tree keep legacy self-mutation.
+   */
+  async assertSelfActionAllowed(callerAgentId: string, action: string): Promise<void> {
+    const governing = await this.governingCoordinator(callerAgentId);
+    if (!governing) return;
+    throw new CoordinatorRequestError(
+      `Agents inside a coordinator's delegation tree may not ${action} on themselves — ` +
+        "that authority belongs to the coordinator above them or the user",
+    );
+  }
+
+  /**
+   * Ownership check for workspace-mutating tools (`archive_workspace`,
+   * `rename_workspace`, script start/stop, terminal sends). A delegated
+   * caller may only mutate its own workspace — archiving a foreign workspace
+   * would take down agents the boundary check would never let it touch
+   * directly. A coordinator caller may only mutate workspaces inside its own
+   * project. Callers outside a coordinator tree are unaffected.
+   */
+  async assertWorkspaceTargetAllowed(callerAgentId: string, workspaceId: string): Promise<void> {
+    const callerLineage = await collectAgentLineage(this.lineageDeps(), callerAgentId);
+    const caller = callerLineage[0];
+    if (!caller) return;
+    const governingIndex = callerLineage.findIndex(
+      (node) => getCoordinatorRole(node.labels) !== null,
+    );
+    if (governingIndex === -1) return;
+    const governing = callerLineage[governingIndex];
+
+    if (governingIndex === 0) {
+      const projectId = getCoordinatorProjectIdFromLabels(governing.labels);
+      const workspace = await this.workspaceRegistry.get(workspaceId);
+      if (projectId && workspace && !workspace.archivedAt && workspace.projectId === projectId) {
+        return;
+      }
+      throw new CoordinatorRequestError(
+        "Coordinators may only act on workspaces inside their own project — " +
+          "the target workspace is outside that boundary",
+      );
+    }
+
+    const callerWorkspaceId =
+      this.agentManager.getAgent(callerAgentId)?.workspaceId ??
+      (await this.agentStorage.get(callerAgentId))?.workspaceId;
+    if (callerWorkspaceId === undefined || callerWorkspaceId !== workspaceId) {
+      throw new CoordinatorRequestError(
+        "Delegated agents may only act on their own workspace — " +
+          "the target workspace is outside the coordinator's boundary",
+      );
+    }
+    // "Own workspace" is not enough when an ancestor shares it: read-only
+    // kinds run in the coordinator's checkout, so archiving that workspace
+    // would take the coordinator down with it.
+    const ancestorIds = new Set(callerLineage.slice(1).map((node) => node.agentId));
+    for (const ancestorId of ancestorIds) {
+      const ancestorWorkspaceId =
+        this.agentManager.getAgent(ancestorId)?.workspaceId ??
+        (await this.agentStorage.get(ancestorId))?.workspaceId;
+      if (ancestorWorkspaceId === workspaceId) {
+        throw new CoordinatorRequestError(
+          "Delegated agents may not mutate a workspace an ancestor occupies — " +
+            "archiving it would take the coordinator down",
+        );
+      }
+    }
+  }
+
+  /**
+   * Cwd scoping for governed callers: a terminal or other cwd-bound resource
+   * must live under the caller's own working directory, or the agent could
+   * run commands inside a foreign checkout the agent boundary would never
+   * let it touch directly. Callers outside a coordinator tree are unaffected.
+   */
+  async assertScopedCwdAllowed(callerAgentId: string, cwd: string): Promise<void> {
+    const governing = await this.governingCoordinator(callerAgentId);
+    if (!governing) return;
+    const callerCwd =
+      this.agentManager.getAgent(callerAgentId)?.cwd ??
+      (await this.agentStorage.get(callerAgentId))?.cwd;
+    if (callerCwd && isSameOrDescendantPath(callerCwd, cwd)) return;
+    throw new CoordinatorRequestError(
+      "Agents inside a coordinator's delegation tree may only bind cwd-scoped " +
+        "resources under their own working directory",
+    );
+  }
+
+  /**
+   * Terminals are a shell. Read-only governed agents — the coordinator itself
+   * and the investigator/reviewer kinds it spawns delegate-only — may not
+   * create, feed, capture, or kill one: a terminal would hand a read-only
+   * role full write access the provider-native restrictions exist to deny.
+   * Writing roles and ungoverned callers are unaffected.
+   */
+  async assertTerminalAccessAllowed(callerAgentId: string): Promise<void> {
+    const governing = await this.governingCoordinator(callerAgentId);
+    if (!governing) return;
+    const agent =
+      this.agentManager.getAgent(callerAgentId) ?? (await this.agentStorage.get(callerAgentId));
+    const kind = getCoordinatorSubagentKind(agent?.labels ?? null);
+    const readOnly =
+      agent?.config?.delegateOnly === true || kind === "investigator" || kind === "reviewer";
+    if (readOnly) {
+      throw new CoordinatorRequestError(
+        "Read-only sessions inside a coordinator's delegation tree may not use " +
+          "terminals — a shell would bypass the role's write restrictions",
+      );
+    }
+  }
+
+  /**
+   * Provisioning a workspace is a write. Read-only delegated kinds —
+   * investigator and reviewer subagents — may not mint workspaces even inside
+   * their own checkout, and the worktree variant reaches daemon-side setup
+   * scripts outside the provider sandbox. The coordinator itself is exempt:
+   * its trust-level allowlist already governs create_workspace, and Ship
+   * coordinators legitimately mint workspaces for their tree. Ungoverned
+   * callers are unaffected.
+   */
+  async assertWorkspaceCreateAllowed(callerAgentId: string): Promise<void> {
+    const governing = await this.governingCoordinator(callerAgentId);
+    if (!governing || governing.depth === 0) return;
+    const agent =
+      this.agentManager.getAgent(callerAgentId) ?? (await this.agentStorage.get(callerAgentId));
+    const kind = getCoordinatorSubagentKind(agent?.labels ?? null);
+    if (kind === "investigator" || kind === "reviewer") {
+      throw new CoordinatorRequestError(
+        "Read-only subagents may not create workspaces — " +
+          "provisioning is a write the investigator/reviewer role denies",
+      );
+    }
+  }
+
+  /**
+   * Schedule authority never delegates: coordinators hold no schedule tools at
+   * any trust level, and a governed child creating one would mint agents
+   * outside the delegation tree — past the spawn guard entirely. Governed
+   * callers are denied; callers outside a coordinator tree are unaffected.
+   */
+  async assertScheduleAccessAllowed(callerAgentId: string): Promise<void> {
+    const governing = await this.governingCoordinator(callerAgentId);
+    if (!governing) return;
+    throw new CoordinatorRequestError(
+      "Agents inside a coordinator's delegation tree may not create or modify " +
+        "schedules — schedule authority stays with the user",
+    );
+  }
+
+  /**
+   * A governed caller minting a workspace may attach it only to the project
+   * that governs it — a foreign projectId would plant the coordinator's
+   * coverage (and board rows) inside another project's boundary.
+   */
+  async assertProjectScopeAllowed(callerAgentId: string, projectId: string): Promise<void> {
+    const governing = await this.governingCoordinator(callerAgentId);
+    if (!governing) return;
+    const governingProjectId = getCoordinatorProjectIdFromLabels(governing.node.labels);
+    if (governingProjectId && projectId === governingProjectId) return;
+    throw new CoordinatorRequestError(
+      "Agents inside a coordinator's delegation tree may only create workspaces " +
+        "inside their own project",
+    );
+  }
+
+  /**
+   * Ship-and-above scope: a live target whose workspace sits in the
+   * coordinator's project. "everything" scope covers every session in the
+   * project; "project" scope covers only delegated (spawned) sessions.
+   */
+  private async isProjectScopeTarget(params: {
+    projectId: string;
+    state: PersistedProjectCoordinator | null;
+    targetAgentId: string;
+  }): Promise<boolean> {
+    const target =
+      this.agentManager.getAgent(params.targetAgentId) ??
+      (await this.agentStorage.get(params.targetAgentId));
+    const workspace = target?.workspaceId
+      ? await this.workspaceRegistry.get(target.workspaceId)
+      : null;
+    if (!target || !workspace || workspace.projectId !== params.projectId || workspace.archivedAt) {
+      return false;
+    }
+    const scope = params.state?.scope ?? "everything";
+    if (scope === "everything") return true;
+    return getParentAgentIdFromLabels(target.labels) !== null;
+  }
+
+  private lineageDeps(): AgentLineageDeps {
+    return { agentManager: this.agentManager, agentStorage: this.agentStorage };
+  }
+
+  private async governingCoordinator(agentId: string) {
+    return nearestCoordinatorAncestor(this.lineageDeps(), agentId);
+  }
+
+  /**
+   * The trust/kind/guard decision for one spawn. `governing.depth` is the
+   * spawner's hop distance from the nearest coordinator, so the would-be child
+   * sits at `depth + 1` and the fan-out cap counts every live descendant.
+   */
+  private async spawnDecision(
+    governing: { node: { agentId: string; labels: Record<string, string> }; depth: number },
+    input: CoordinatorSpawnGateInput,
+  ): Promise<CoordinatorSpawnDecision> {
+    const projectId = getCoordinatorProjectIdFromLabels(governing.node.labels);
+    const state = projectId ? await this.getState(projectId) : null;
+    const trust = state?.trustLevel ?? coordinatorTrustLevelFromLabels(governing.node.labels);
+    assertSpawnTrustAndKind(trust, input);
+    await this.assertSpawnWithinGuard(
+      governing.node.agentId,
+      governing.depth,
+      resolveCoordinatorGuard(state?.guard),
+      projectId,
+    );
+    return spawnStamps(input, projectId, trust);
+  }
+
+  /**
+   * Enforces the runaway guard: the would-be child's depth from the nearest
+   * coordinator, then the count of in-flight descendants under it. Each trip
+   * leaves a Wake row so the board shows why spawning stopped.
+   */
+  private async assertSpawnWithinGuard(
+    coordinatorAgentId: string,
+    parentDepth: number,
+    guard: { maxConcurrentSubagents: number; maxSpawnDepth: number },
+    projectId: string | null,
+  ): Promise<void> {
+    const childDepth = parentDepth + 1;
+    if (childDepth > guard.maxSpawnDepth) {
+      if (projectId) {
+        await this.appendWakeRow(
+          projectId,
+          `Guard tripped: spawn refused at depth ${childDepth} (limit ${guard.maxSpawnDepth})`,
+          `wake:guard:depth:${coordinatorAgentId}`,
+        );
+      }
+      throw new CoordinatorRequestError(
+        `Runaway guard: this spawn would sit at depth ${childDepth}, past the limit of ` +
+          `${guard.maxSpawnDepth} — agents at the depth limit cannot spawn`,
+      );
+    }
+
+    const live = await this.countInFlightDescendants(coordinatorAgentId);
+    if (live >= guard.maxConcurrentSubagents) {
+      if (projectId) {
+        await this.appendWakeRow(
+          projectId,
+          `Guard tripped: spawn refused — ${live} subagents at the cap of ${guard.maxConcurrentSubagents}`,
+          `wake:guard:concurrency:${coordinatorAgentId}`,
+        );
+      }
+      throw new CoordinatorRequestError(
+        `Runaway guard: ${live} subagents already run under this coordinator, at the cap of ` +
+          `${guard.maxConcurrentSubagents} — in-flight subagents finish; wait for one before spawning more`,
+      );
+    }
+  }
+
+  /**
+   * Only descendants with an active turn count toward the concurrency cap —
+   * the cap bounds simultaneous work, not fleet size. An idle descendant
+   * holds no running turn and can be re-prompted later; counting it anyway
+   * would deadlock the coordinator once finished subagents fill the cap,
+   * since coordinators have no tool to close them.
+   */
+  private async countInFlightDescendants(coordinatorAgentId: string): Promise<number> {
+    const records = new Map((await this.agentStorage.list()).map((record) => [record.id, record]));
+    const labelsOf = (agentId: string) =>
+      this.agentManager.getAgent(agentId)?.labels ?? records.get(agentId)?.labels ?? null;
+    let count = 0;
+    for (const agent of this.agentManager.listAgents()) {
+      if (agent.id === coordinatorAgentId) continue;
+      // An in-flight run counts even while lifecycle still reads "idle" — the
+      // gated create dispatches the initial turn under the lock, so the run is
+      // registered before the lifecycle event lands.
+      const inFlight =
+        agent.lifecycle === "initializing" ||
+        agent.lifecycle === "running" ||
+        this.agentManager.hasInFlightRun(agent.id);
+      if (!inFlight) continue;
+      let current = getParentAgentIdFromLabels(agent.labels);
+      let hops = 0;
+      while (current && hops < 64) {
+        if (current === coordinatorAgentId) {
+          count += 1;
+          break;
+        }
+        const parentLabels = labelsOf(current);
+        current = parentLabels ? getParentAgentIdFromLabels(parentLabels) : null;
+        hops += 1;
+      }
+    }
+    return count;
   }
 
   // -------------------------------------------------------------------------
@@ -688,6 +1376,7 @@ export class CoordinatorService {
     const needsYou = this.buildNeedsYouRows(projectId, needsYouAgents);
     const working = await this.buildWorkingRows(projectId, covered);
     const done = this.pruneDoneRows(board.done).slice(0, DONE_SNAPSHOT_LIMIT);
+    const usage = state ? await this.currentUsage(state) : undefined;
     return {
       projectId,
       ...(project ? { projectName: project.customName ?? project.displayName } : {}),
@@ -699,6 +1388,7 @@ export class CoordinatorService {
       trustLevel,
       scope,
       enabled,
+      ...(usage ? { usage } : {}),
     };
   }
 
@@ -791,6 +1481,9 @@ export class CoordinatorService {
   }
 
   private async refreshBoard(projectId: string): Promise<void> {
+    // Token events arrive far more often than board changes; usage persists
+    // piggybacked on the refresh tick instead of on every usage_updated.
+    await this.flushUsage(projectId);
     const snapshot = await this.buildBoardSnapshot(projectId);
     const key = this.snapshotDiffKey(snapshot);
     if (this.emittedSnapshotKeys.get(projectId) === key) return;
@@ -878,6 +1571,15 @@ export class CoordinatorService {
   }
 
   private async onAgentStream(agentId: string, event: AgentStreamEvent): Promise<void> {
+    if (
+      event.type === "turn_started" ||
+      event.type === "usage_updated" ||
+      event.type === "turn_completed" ||
+      event.type === "turn_canceled" ||
+      event.type === "turn_failed"
+    ) {
+      await this.onUsageEvent(agentId, event);
+    }
     if (event.type === "permission_requested") {
       const agent = this.agentManager.getAgent(agentId);
       if (!agent) return;
@@ -916,6 +1618,230 @@ export class CoordinatorService {
       await this.appendDoneRow(coverage.projectId, `Stopped ${goal}`, { agentId });
       this.queueBoardRefresh(coverage.projectId);
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Usage meter
+  // -------------------------------------------------------------------------
+
+  /**
+   * Feeds the monthly token meter from provider usage events. Readings carry
+   * different semantics per provider (see USAGE_READING_STYLE): cumulative
+   * counters diff against the persisted baseline, per-step readings count
+   * whole, and terminal events count whole only for providers that report
+   * spend exclusively at completion.
+   */
+  private async onUsageEvent(agentId: string, event: AgentStreamEvent): Promise<void> {
+    const terminal =
+      event.type === "turn_completed" ||
+      event.type === "turn_canceled" ||
+      event.type === "turn_failed";
+    const usage = "usage" in event ? event.usage : undefined;
+    const total = usage ? usageTokenTotal(usage) : undefined;
+    if (total === undefined) return;
+    const projectId = await this.usageProjectFor(agentId);
+    if (!projectId) return;
+    const bucket = await this.usageBucket(projectId);
+    const style = USAGE_READING_STYLE[event.provider] ?? "cumulative";
+    const tracker = this.usageTrackers.get(agentId) ?? { sawMidTurnUsage: false };
+    this.usageTrackers.set(agentId, tracker);
+    const last = bucket.lastSeen.get(agentId) ?? 0;
+    let delta = 0;
+
+    if (event.type === "usage_updated") {
+      tracker.sawMidTurnUsage = true;
+      if (style === "perStep") {
+        delta = total;
+        bucket.lastSeen.set(agentId, last + total);
+      } else {
+        delta = cumulativeUsageDelta(total, last);
+        bucket.lastSeen.set(agentId, total);
+      }
+    } else if (terminal) {
+      if (style === "perStep") {
+        // A terminal total on a per-step provider charges only the spend no
+        // step reading covered — lastSeen is the counted sum, not a reading.
+        delta = Math.max(0, total - last);
+      } else if (tracker.sawMidTurnUsage) {
+        // The terminal total is cumulative for providers that report
+        // mid-turn — possibly the exact reading already counted.
+        delta = cumulativeUsageDelta(total, last);
+        bucket.lastSeen.set(agentId, total);
+      } else {
+        // The provider reports spend only at completion (claude, acp) — the
+        // reading is the whole turn's spend.
+        delta = total;
+        bucket.lastSeen.set(agentId, total);
+      }
+    }
+    if (delta <= 0) return;
+    const previousTokens = bucket.tokens;
+    bucket.tokens += delta;
+    this.pendingUsagePersist.add(projectId);
+    await this.reportTokenExpectation(projectId, previousTokens, bucket.tokens);
+    this.queueBoardRefresh(projectId);
+  }
+
+  /**
+   * Which project's meter an agent's spend lands in: the coordinator's own
+   * project for coordinator agents, else the governing coordinator's project
+   * for anything inside its delegation tree. Agents outside any tree are not
+   * metered. Resolved once — labels never move an agent between trees.
+   */
+  private async usageProjectFor(agentId: string): Promise<string | null> {
+    const cached = this.usageProjectByAgent.get(agentId);
+    if (cached !== undefined) return cached;
+    let projectId: string | null = null;
+    const labels =
+      this.agentManager.getAgent(agentId)?.labels ??
+      (await this.agentStorage.get(agentId))?.labels ??
+      null;
+    if (labels) {
+      if (getCoordinatorRole(labels) !== null) {
+        projectId = getCoordinatorProjectIdFromLabels(labels);
+      } else {
+        const governing = await this.governingCoordinator(agentId);
+        projectId = governing ? getCoordinatorProjectIdFromLabels(governing.node.labels) : null;
+      }
+    }
+    this.usageProjectByAgent.set(agentId, projectId);
+    return projectId;
+  }
+
+  /**
+   * The project's usage bucket for the current UTC month. Loads the persisted
+   * counters once; on a month roll the token total resets but `lastSeen`
+   * baselines carry over — a session counter does not reset with the calendar.
+   */
+  private async usageBucket(projectId: string): Promise<CoordinatorUsageBucket> {
+    const month = currentMonthKey();
+    const cached = this.usageRuntime.get(projectId);
+    if (cached) {
+      if (cached.month !== month) {
+        cached.month = month;
+        cached.tokens = 0;
+        cached.reported.clear();
+        this.pendingUsagePersist.add(projectId);
+      }
+      return cached;
+    }
+    // Two events can race the initial getState read; without a shared load
+    // promise each would install its own bucket and one writer's readings and
+    // baselines would silently drop.
+    const inflight = this.usageBucketLoads.get(projectId);
+    if (inflight) return inflight;
+    const load = (async (): Promise<CoordinatorUsageBucket> => {
+      const persisted = (await this.getState(projectId))?.usage;
+      const bucket: CoordinatorUsageBucket = {
+        month,
+        tokens: persisted && persisted.month === month ? persisted.tokens : 0,
+        lastSeen: new Map(
+          Object.entries(persisted?.lastSeenTokensByAgent ?? {}).map(([id, value]) => [id, value]),
+        ),
+        reported: new Set(
+          persisted && persisted.month === month ? persisted.reportedExpectations : [],
+        ),
+      };
+      this.usageRuntime.set(projectId, bucket);
+      return bucket;
+    })();
+    this.usageBucketLoads.set(projectId, load);
+    try {
+      return await load;
+    } finally {
+      if (this.usageBucketLoads.get(projectId) === load) {
+        this.usageBucketLoads.delete(projectId);
+      }
+    }
+  }
+
+  /** Board-facing actuals: derived spawn count plus the metered token total. */
+  private async currentUsage(state: PersistedProjectCoordinator): Promise<CoordinatorUsage> {
+    const bucket = await this.usageBucket(state.projectId);
+    return {
+      monthlySpawns: state.agentId ? await this.countMonthlySpawns(state.agentId) : 0,
+      monthlyTokens: Math.floor(bucket.tokens),
+    };
+  }
+
+  /**
+   * Descendants of the coordinator created inside the current UTC month.
+   * Derived from stamped agent records, so the count self-heals across
+   * restarts and never double-counts a resumed session.
+   */
+  private async countMonthlySpawns(coordinatorAgentId: string): Promise<number> {
+    // The month key is UTC; without the Z suffix Date.parse would read this
+    // as local time and shift the boundary by the host timezone offset.
+    const monthStart = `${currentMonthKey()}-01T00:00:00Z`;
+    const records = await this.agentStorage.list();
+    const deps = this.lineageDeps();
+    let count = 0;
+    for (const record of records) {
+      if (record.id === coordinatorAgentId) continue;
+      const createdMs = Date.parse(record.createdAt);
+      if (!Number.isFinite(createdMs) || createdMs < Date.parse(monthStart)) continue;
+      if (await isAgentDescendantOf(deps, coordinatorAgentId, record.id)) count += 1;
+    }
+    return count;
+  }
+
+  private async reportTokenExpectation(
+    projectId: string,
+    previousTokens: number,
+    newTokens: number,
+  ): Promise<void> {
+    const expected = (await this.getState(projectId))?.usageExpectation?.monthlyTokens;
+    if (!expected || newTokens < expected || previousTokens >= expected) return;
+    const bucket = await this.usageBucket(projectId);
+    if (bucket.reported.has("tokens")) return;
+    bucket.reported.add("tokens");
+    this.pendingUsagePersist.add(projectId);
+    await this.appendWakeRow(
+      projectId,
+      `Usage: ${Math.floor(newTokens).toLocaleString("en-US")} tokens this month crossed the ${expected.toLocaleString("en-US")} expectation`,
+      `wake:usage:tokens:${currentMonthKey()}`,
+    );
+  }
+
+  /** Runs after a gated spawn lands so the spawn meter's crossing writes its row. */
+  private async reportSpawnExpectation(governingNode: {
+    agentId: string;
+    labels: Record<string, string>;
+  }): Promise<void> {
+    const projectId = getCoordinatorProjectIdFromLabels(governingNode.labels);
+    if (!projectId) return;
+    const expected = (await this.getState(projectId))?.usageExpectation?.monthlySpawns;
+    if (!expected) return;
+    const spawns = await this.countMonthlySpawns(governingNode.agentId);
+    if (spawns < expected) return;
+    const bucket = await this.usageBucket(projectId);
+    if (bucket.reported.has("spawns")) return;
+    bucket.reported.add("spawns");
+    this.pendingUsagePersist.add(projectId);
+    await this.appendWakeRow(
+      projectId,
+      `Usage: ${spawns} subagents this month crossed the ${expected} spawn expectation`,
+      `wake:usage:spawns:${currentMonthKey()}`,
+    );
+  }
+
+  private async flushUsage(projectId: string): Promise<void> {
+    if (!this.pendingUsagePersist.delete(projectId)) return;
+    // The read-modify-write must hold the project lock: a settings update
+    // landing between getState and setState would otherwise lose its writes
+    // to the stale snapshot this flush carries.
+    await this.withProjectLock(projectId, async () => {
+      const bucket = this.usageRuntime.get(projectId);
+      const state = await this.getState(projectId);
+      if (!bucket || !state) return;
+      const usage: PersistedCoordinatorUsage = {
+        month: bucket.month,
+        tokens: Math.floor(bucket.tokens),
+        lastSeenTokensByAgent: Object.fromEntries(bucket.lastSeen),
+        reportedExpectations: [...bucket.reported] as Array<"spawns" | "tokens">,
+      };
+      await this.setState(projectId, { ...state, usage });
+    });
   }
 
   private decisionKey(agentId: string, requestId: string): string {
@@ -1027,6 +1953,11 @@ export class CoordinatorService {
       state = { ...state, agentId: keeper?.id ?? null, updatedAt: new Date().toISOString() };
     }
     await this.setState(projectId, state);
+    if (state.agentId) {
+      // Records written before the trust label existed (or drifted) get healed
+      // so the tool gate and resume-time env derivation see the real level.
+      await this.syncTrustLabel(state.agentId, state.trustLevel);
+    }
     if (state.enabled && state.agentId && projectActive) {
       await this.loadResidentCoordinator(projectId, state.agentId);
     }
@@ -1119,13 +2050,16 @@ export class CoordinatorService {
 
   private coordinatorSessionConfig(
     project: PersistedProjectRecord,
-    input: EnableProjectCoordinatorInput,
+    input: { profile: CoordinatorProfileSelection; trustLevel: CoordinatorTrustLevel },
     workspace: PersistedWorkspaceRecord,
   ): AgentSessionConfig {
     return {
       provider: input.profile.provider,
       cwd: workspace.cwd,
-      systemPrompt: buildProjectCoordinatorSystemPrompt(project.customName ?? project.displayName),
+      systemPrompt: buildProjectCoordinatorSystemPrompt(
+        project.customName ?? project.displayName,
+        input.trustLevel,
+      ),
       delegateOnly: true,
       paseoTools: "required",
       title: COORDINATOR_TITLE,
@@ -1265,17 +2199,29 @@ export class CoordinatorService {
     this.queueBoardRefresh(projectId);
   }
 
-  private async appendWakeRow(projectId: string, text: string): Promise<void> {
+  /**
+   * `deterministicId` dedupes repeated wakes for the same condition: a guard
+   * that keeps tripping must not churn the row's timestamp. Ordinary wakes
+   * always refresh the row.
+   */
+  private async appendWakeRow(
+    projectId: string,
+    text: string,
+    deterministicId?: string,
+  ): Promise<void> {
     await this.withBoardLock(projectId, async () => {
       const board = await this.getBoard(projectId);
+      const id = deterministicId ?? `wake:${randomUUID()}`;
+      if (deterministicId && board.wake?.id === id) return;
+      const level = (await this.getState(projectId))?.trustLevel ?? "observe";
       await this.saveBoard(projectId, {
         ...board,
         wake: {
           kind: "wake",
-          id: `wake:${randomUUID()}`,
+          id,
           projectId,
           text,
-          level: "observe",
+          level,
           at: new Date().toISOString(),
         },
       });
@@ -1309,6 +2255,7 @@ export class CoordinatorService {
       ...(state.profile ? { profile: state.profile } : {}),
       ...(state.profiles ? { profiles: state.profiles } : {}),
       ...(state.usageExpectation ? { usageExpectation: state.usageExpectation } : {}),
+      ...(state.guard ? { guard: state.guard } : {}),
     };
   }
 
@@ -1329,10 +2276,57 @@ export class CoordinatorService {
     );
   }
 
-  private assertObserveTrust(trustLevel: CoordinatorTrustLevel | undefined): void {
-    if (trustLevel !== undefined && trustLevel !== "observe") {
-      throw new CoordinatorRequestError(
-        `Trust level "${trustLevel}" is not supported yet; coordinators run at observe in this milestone`,
+  /**
+   * Mirrors the persisted trust level onto the coordinator's agent record.
+   * `AgentManager.setLabels` only reaches live agents, so a stored record is
+   * patched through storage directly — the label must be right before the next
+   * resume derives launch env from it.
+   */
+  private async syncTrustLabel(
+    agentId: string | null,
+    trustLevel: CoordinatorTrustLevel,
+  ): Promise<void> {
+    if (!agentId) return;
+    const live = this.agentManager.getAgent(agentId);
+    if (live) {
+      if (live.labels[COORDINATOR_TRUST_LABEL] !== trustLevel) {
+        await this.agentManager.setLabels(agentId, { [COORDINATOR_TRUST_LABEL]: trustLevel });
+      }
+      return;
+    }
+    const record = await this.agentStorage.get(agentId);
+    if (record && record.labels[COORDINATOR_TRUST_LABEL] !== trustLevel) {
+      await this.agentStorage.upsert({
+        ...record,
+        labels: { ...record.labels, [COORDINATOR_TRUST_LABEL]: trustLevel },
+      });
+    }
+  }
+
+  /**
+   * Rebuilds the coordinator's system prompt for the new trust level — the
+   * prompt encodes the level's rules, so a label-only update would leave a
+   * raised coordinator refusing to spawn. Writes the live config and the
+   * stored record (which a resume launches from); a coordinator with no
+   * record is left alone.
+   */
+  private async syncTrustPrompt(
+    state: PersistedProjectCoordinator,
+    trustLevel: CoordinatorTrustLevel,
+  ): Promise<void> {
+    if (!state.agentId) return;
+    const project = await this.projectRegistry.get(state.projectId);
+    if (!project) return;
+    const systemPrompt = buildProjectCoordinatorSystemPrompt(
+      project.customName ?? project.displayName,
+      trustLevel,
+    );
+    try {
+      await this.agentManager.setAgentSystemPrompt(state.agentId, systemPrompt);
+    } catch (error) {
+      this.logger.warn(
+        { err: error, agentId: state.agentId },
+        "Failed to refresh coordinator prompt after trust change",
       );
     }
   }
