@@ -3367,6 +3367,20 @@ export const CoordinatorUsageExpectationSchema = z.object({
 });
 export type CoordinatorUsageExpectation = z.infer<typeof CoordinatorUsageExpectationSchema>;
 
+/** This month's actuals against the expectation, on the board snapshot. */
+export const CoordinatorUsageSchema = z.object({
+  monthlySpawns: z.number().int().nonnegative(),
+  monthlyTokens: z.number().int().nonnegative(),
+});
+export type CoordinatorUsage = z.infer<typeof CoordinatorUsageSchema>;
+
+/** Hard spawn limits for every agent under a coordinator. */
+export const CoordinatorGuardSchema = z.object({
+  maxConcurrentSubagents: z.number().int().positive().optional(),
+  maxSpawnDepth: z.number().int().positive().optional(),
+});
+export type CoordinatorGuard = z.infer<typeof CoordinatorGuardSchema>;
+
 export const CoordinatorDecisionBoardRowSchema = z.object({
   kind: z.literal("decision"),
   id: z.string(),
@@ -3489,6 +3503,8 @@ export const CoordinatorBoardSnapshotSchema = z.object({
   trustLevel: CoordinatorTrustLevelSchema,
   scope: CoordinatorScopeSchema,
   enabled: z.boolean(),
+  /** This month's spawn and token actuals; feeds the trust-pill meter. */
+  usage: CoordinatorUsageSchema.optional(),
 });
 export type CoordinatorBoardSnapshot = z.infer<typeof CoordinatorBoardSnapshotSchema>;
 
@@ -3504,6 +3520,8 @@ export const ProjectCoordinatorStateSchema = z.object({
   profile: CoordinatorProfileSelectionSchema.optional(),
   profiles: CoordinatorProfilesSchema.optional(),
   usageExpectation: CoordinatorUsageExpectationSchema.optional(),
+  /** Hard spawn limits; daemon defaults 8 concurrent, depth 2. */
+  guard: CoordinatorGuardSchema.optional(),
 });
 export type ProjectCoordinatorState = z.infer<typeof ProjectCoordinatorStateSchema>;
 
@@ -3539,6 +3557,8 @@ export const CoordinatorProjectUpdateRequestSchema = z.object({
   scope: CoordinatorScopeSchema.optional(),
   /** Null clears the expectation. */
   usageExpectation: CoordinatorUsageExpectationSchema.nullable().optional(),
+  /** Partial guard override; absent keys keep daemon defaults. */
+  guard: CoordinatorGuardSchema.optional(),
 });
 export type CoordinatorProjectUpdateRequest = z.infer<typeof CoordinatorProjectUpdateRequestSchema>;
 
@@ -3552,6 +3572,8 @@ export type CoordinatorProjectGetRequest = z.infer<typeof CoordinatorProjectGetR
 const CoordinatorProjectStateResultSchema = z.object({
   requestId: z.string(),
   coordinator: ProjectCoordinatorStateSchema.nullable(),
+  /** False when the project repository has no CI config; drives the setup-sheet note. */
+  ciConfigured: z.boolean().optional(),
   error: z.string().nullable(),
 });
 
