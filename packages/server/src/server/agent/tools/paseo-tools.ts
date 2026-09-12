@@ -3798,12 +3798,16 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       .optional()
       .describe(
         "Repository checkout that resolves the forge. Defaults to your current workspace; " +
-          "any worktree of the repo resolves to the same forge.",
+          "any worktree of the repo resolves to the same forge. Coordinators should omit " +
+          "this — their own checkout resolves the forge, and `head` carries the subagent's branch.",
       ),
     workspaceId: z
       .string()
       .optional()
-      .describe("Workspace owning the checkout; alternative to cwd."),
+      .describe(
+        "Workspace owning the checkout; alternative to cwd. Governed callers may only " +
+          "address workspaces under their own checkout.",
+      ),
   };
 
   registerTool(
