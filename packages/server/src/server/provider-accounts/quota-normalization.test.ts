@@ -95,12 +95,33 @@ describe("provider-owned quota controls", () => {
     const result = normalizeClaudeAccountUsage("A", {
       subscription_type: "max",
       rate_limits_available: true,
-      rate_limits: { five_hour: { utilization: 10, resets_at: null }, seven_day: null },
+      rate_limits: {
+        five_hour: { utilization: 10, resets_at: null },
+        seven_day: { utilization: null, resets_at: null },
+      },
     });
     expect(result.windows).toEqual([
       expect.objectContaining({ id: "five_hour", usedPct: 10 }),
       expect.objectContaining({ id: "seven_day", usedPct: null, remainingPct: null }),
     ]);
+  });
+
+  it("treats a null Claude bucket as a window the plan does not have", () => {
+    // The usage endpoint returns every inapplicable bucket as null — a subscription without
+    // an Opus bucket gets seven_day_opus: null. Skipping it matters: an unscoped unknown
+    // reading would block automatic admission for every model.
+    const result = normalizeClaudeAccountUsage("A", {
+      subscription_type: "max",
+      rate_limits_available: true,
+      rate_limits: {
+        five_hour: { utilization: 10, resets_at: null },
+        seven_day: { utilization: 96, resets_at: "2026-09-15T07:00:00Z" },
+        seven_day_oauth_apps: null,
+        seven_day_opus: null,
+        seven_day_sonnet: null,
+      },
+    });
+    expect(result.windows.map((window) => window.id)).toEqual(["five_hour", "seven_day"]);
   });
 
   it("reads every Codex bucket once when the provider reports them by limit", () => {
@@ -140,5 +161,40 @@ describe("provider-owned quota controls", () => {
       "codex:primary",
       "other:account_limit",
     ]);
+  });
+
+  it("surfaces banked reset credits with the soonest available expiry", () => {
+    const result = normalizeCodexAccountUsage("A", {
+      rateLimits: { primary: { usedPercent: 5, windowDurationMins: 300, resetsAt: null } },
+      rateLimitResetCredits: {
+        availableCount: 2,
+        credits: [
+          { status: "redeemed", expiresAt: 1_800_000_000 },
+          { status: "available", expiresAt: 1_800_604_800 },
+          { status: "available", expiresAt: 1_800_086_400 },
+        ],
+      },
+    });
+    expect(result.resetCredits).toEqual({
+      availableCount: 2,
+      nextExpiresAt: "2027-01-16T08:00:00.000Z",
+    });
+  });
+
+  it("omits reset credits when none are banked or none carry an expiry", () => {
+    const empty = normalizeCodexAccountUsage("A", {
+      rateLimits: { primary: { usedPercent: 5, windowDurationMins: 300, resetsAt: null } },
+      rateLimitResetCredits: { availableCount: 0, credits: [] },
+    });
+    expect(empty.resetCredits).toBeUndefined();
+    const undated = normalizeCodexAccountUsage("A", {
+      rateLimits: { primary: { usedPercent: 5, windowDurationMins: 300, resetsAt: null } },
+      rateLimitResetCredits: { availableCount: 1, credits: [{ status: "available" }] },
+    });
+    expect(undated.resetCredits).toEqual({ availableCount: 1 });
+    const absent = normalizeCodexAccountUsage("A", {
+      rateLimits: { primary: { usedPercent: 5, windowDurationMins: 300, resetsAt: null } },
+    });
+    expect(absent.resetCredits).toBeUndefined();
   });
 });

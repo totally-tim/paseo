@@ -8,6 +8,7 @@ import { Linking, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { AccountOperation, ProviderAccount } from "@getpaseo/protocol/provider-accounts";
+import { effectiveCapacityLimit } from "@getpaseo/protocol/provider-accounts";
 import { AdaptiveModalSheet } from "@/components/adaptive-modal-sheet";
 import { Button } from "@/components/ui/button";
 import { Field, FormTextInput } from "@/components/ui/form-field";
@@ -20,6 +21,8 @@ import { ProviderUsageCard } from "@/provider-usage/card";
 import { settingsStyles } from "@/styles/settings";
 import { useProviderAccounts } from "./use-provider-accounts";
 import { openAccountForm } from "./account-form-model";
+import { PooledAccountUsage } from "./pooled-usage-card";
+import { ResetCreditControl } from "./reset-credit";
 
 const ThemedPencil = withUnistyles(Pencil);
 const ThemedArrowUp = withUnistyles(ArrowUp);
@@ -133,6 +136,7 @@ export function ProviderAccountsSettingsSection({ serverId }: { serverId: string
           {error ?? t("providerAccounts.loadError")}
         </Text>
       ) : null}
+      <PooledAccountUsage serverId={serverId} />
       <AccountList serverId={serverId} edit={setEditing} perform={perform} pending={pending} />
       <SelectField
         label={t("providerAccounts.unknownUsage")}
@@ -298,7 +302,7 @@ function AccountRow({
       {account.removedAt ? <Text style={styles.text}>{t("providerAccounts.removed")}</Text> : null}
       {account.error ? <Text style={styles.error}>{account.error}</Text> : null}
       <AccountCapacityStatus account={account} usage={usage} />
-      <AccountRowUsage account={account} entry={usageEntry} />
+      <AccountRowUsage account={account} entry={usageEntry} serverId={serverId} />
     </View>
   );
 }
@@ -306,9 +310,11 @@ function AccountRow({
 function AccountRowUsage({
   account,
   entry,
+  serverId,
 }: {
   account: ProviderAccount;
   entry: NonNullable<ReturnType<typeof useProviderAccounts>["data"]>["usage"][number] | undefined;
+  serverId: string;
 }) {
   const { t } = useTranslation();
   if (!entry || account.removedAt || account.authState !== "ready") return null;
@@ -316,6 +322,7 @@ function AccountRowUsage({
     <>
       {entry.stale ? <Text style={styles.text}>{t("providerAccounts.stale")}</Text> : null}
       <ProviderUsageCard usage={entry.usage} compact showIdentity={false} showResetDates />
+      <ResetCreditControl serverId={serverId} accountId={account.id} />
     </>
   );
 }
@@ -327,16 +334,13 @@ function AccountCapacityStatus({
   account: ProviderAccount;
   usage: import("@getpaseo/protocol/messages").ProviderUsage | null | undefined;
 }) {
+  const limit = effectiveCapacityLimit(account);
   return (
     <>
-      {account.capacityLimit ? (
+      {limit ? (
         <Text style={styles.text}>
-          {account.capacityLimit.model
-            ? `Capacity limit for ${account.capacityLimit.model}`
-            : "Account capacity exhausted"}
-          {account.capacityLimit.resetsAt
-            ? ` · Reported reset ${new Date(account.capacityLimit.resetsAt).toLocaleString()}`
-            : ""}
+          {limit.model ? `Capacity limit for ${limit.model}` : "Account capacity exhausted"}
+          {limit.resetsAt ? ` · Reported reset ${new Date(limit.resetsAt).toLocaleString()}` : ""}
         </Text>
       ) : null}
       {account.authState === "ready" &&
