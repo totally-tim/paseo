@@ -138,6 +138,7 @@ import type { RequestedSpeechProviders } from "./speech/speech-types.js";
 import { createSpeechService } from "./speech/speech-runtime.js";
 import { AgentManager } from "./agent/agent-manager.js";
 import { AgentStorage } from "./agent/agent-storage.js";
+import { LifecycleBus } from "./agent/lifecycle-bus.js";
 import { attachAgentStoragePersistence } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
 import {
@@ -619,6 +620,9 @@ export async function createPaseoDaemon(
     managedSources: new ManagedPluginSources(config.paseoHome),
     settingsDirectory: path.join(config.paseoHome, "plugin-settings"),
   });
+  // In-process lifecycle fan-out: the same events pluginRuntime ships to plugin
+  // subprocesses, for daemon-internal subscribers (the coordinator service).
+  const lifecycleBus = new LifecycleBus(logger);
 
   const serverId = getOrCreateServerId(config.paseoHome, { logger });
   const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, logger);
@@ -889,13 +893,14 @@ export async function createPaseoDaemon(
   });
   workspaceRegistry.subscribeToMutations((mutation) => {
     if (mutation.kind === "archive" && mutation.workspace) {
-      pluginRuntime.emit("workspace.archived", {
-        workspace: describeHookWorkspace(mutation.workspace),
-      });
+      const hookWorkspace = describeHookWorkspace(mutation.workspace);
+      pluginRuntime.emit("workspace.archived", { workspace: hookWorkspace });
+      lifecycleBus.emit("workspace.archived", { workspace: hookWorkspace });
     }
   });
   const workspaceProvisioning = createWorkspaceProvisioningService({
     lifecycle: pluginRuntime,
+    lifecycleBus,
     serverId,
     projectRegistry,
     workspaceRegistry,
@@ -951,6 +956,7 @@ export async function createPaseoDaemon(
         providerSnapshotManager.createAccountClient.bind(providerSnapshotManager)
       )(provider, context),
     pluginLifecycle: pluginRuntime,
+    lifecycleBus,
     clients: initialAgentManagerState.clients,
     providerDefinitions: initialAgentManagerState.providerDefinitions,
     registry: agentStorage,
@@ -1028,6 +1034,8 @@ export async function createPaseoDaemon(
     workspaceRegistry,
     createWorkspaceForDirectory: (cwd, title, projectId) =>
       workspaceProvisioning.createWorkspaceForDirectory(cwd, title, projectId),
+    lifecycleBus,
+    workspaceGitService,
     paseoHome: config.paseoHome,
     logger,
   });

@@ -6,6 +6,7 @@ import type { ProviderAccountContext } from "./provider-account-context.js";
 import { buildSerializableConfig } from "./agent-projections.js";
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import { describeHookAgent, publishAgentStream } from "../plugins/lifecycle/index.js";
+import type { LifecycleBus } from "./lifecycle-bus.js";
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { randomUUID } from "node:crypto";
 import { basename, resolve } from "node:path";
@@ -314,6 +315,12 @@ export interface AgentManagerOptions {
   accounts?: ProviderAccountService;
   createAccountClient?: (provider: string, context: ProviderAccountContext) => AgentClient;
   pluginLifecycle?: PluginLifecycle;
+  /**
+   * In-process lifecycle sink emitted beside every pluginLifecycle emit —
+   * same events, same payloads, for daemon-internal subscribers (the
+   * coordinator service) that are not plugin subprocesses.
+   */
+  lifecycleBus?: LifecycleBus;
   clients?: ProviderClientMap;
   providerDefinitions?: ProviderEnabledMap;
   idFactory?: () => string;
@@ -734,6 +741,7 @@ export class AgentManager {
   private readonly accountLeases = new Map<string, AccountLease>();
 
   private readonly pluginLifecycle: PluginLifecycle | undefined;
+  private readonly lifecycleBus: LifecycleBus | undefined;
   private readonly clients = new Map<AgentProvider, AgentClient>();
   private readonly providerEnabled = new Map<AgentProvider, boolean>();
   private readonly providerDefinitions = new Map<AgentProvider, ProviderEnabledFlag>();
@@ -779,6 +787,7 @@ export class AgentManager {
     this.createAccountClient = options.createAccountClient;
 
     this.pluginLifecycle = options.pluginLifecycle;
+    this.lifecycleBus = options.lifecycleBus;
     this.idFactory = options?.idFactory ?? (() => randomUUID());
     this.registry = options?.registry;
     this.durableTimelineStore = options?.durableTimelineStore;
@@ -1614,9 +1623,9 @@ export class AgentManager {
       historyPrimed: true,
     });
     if (!agent.internal) {
-      this.pluginLifecycle?.emit("agent.created", {
-        agent: describeHookAgent({ ...agent, title: agent.config.title }),
-      });
+      const hookAgent = describeHookAgent({ ...agent, title: agent.config.title });
+      this.pluginLifecycle?.emit("agent.created", { agent: hookAgent });
+      this.lifecycleBus?.emit("agent.created", { agent: hookAgent });
     }
     return agent;
   }
@@ -2294,8 +2303,13 @@ export class AgentManager {
     const archivedRecord = buildArchivedAgentRecord(record, options);
     await this.requireRegistry().upsert(archivedRecord);
     if (!record.archivedAt && !record.internal) {
+      const hookAgent = describeHookAgent(archivedRecord);
       this.pluginLifecycle?.emit("agent.archived", {
-        agent: describeHookAgent(archivedRecord),
+        agent: hookAgent,
+        archivedAt: archivedRecord.archivedAt,
+      });
+      this.lifecycleBus?.emit("agent.archived", {
+        agent: hookAgent,
         archivedAt: archivedRecord.archivedAt,
       });
     }
@@ -5540,13 +5554,15 @@ export class AgentManager {
       "agent.manager.dispatch_stream",
     );
     this.dispatch({ type: "agent_stream", agentId, event, ...metadata });
-    if (this.pluginLifecycle && agent && !agent.internal && event.type !== "timeline") {
-      publishAgentStream(
-        this.pluginLifecycle,
-        describeHookAgent({ ...agent, title: agent.config.title }),
-        event,
-        this.timelineStore.getItems(agentId),
-      );
+    if (agent && !agent.internal && event.type !== "timeline") {
+      const hookAgent = describeHookAgent({ ...agent, title: agent.config.title });
+      const timeline = this.timelineStore.getItems(agentId);
+      if (this.pluginLifecycle) {
+        publishAgentStream(this.pluginLifecycle, hookAgent, event, timeline);
+      }
+      if (this.lifecycleBus) {
+        publishAgentStream(this.lifecycleBus, hookAgent, event, timeline);
+      }
     }
   }
 

@@ -97,6 +97,8 @@ export function createWorkspaceProvisioningService(deps: {
   workspaceGitService: Pick<WorkspaceGitService, "getCheckout" | "getSnapshot" | "peekSnapshot">;
   logger: Logger;
   lifecycle?: PluginLifecycle;
+  /** In-process lifecycle sink emitted beside `lifecycle` — see LifecycleBus. */
+  lifecycleBus?: Pick<PluginLifecycle, "emit">;
 }): WorkspaceProvisioningService {
   const { serverId, workspaceRegistry, projectRegistry, workspaceGitService, logger } = deps;
 
@@ -224,7 +226,9 @@ export function createWorkspaceProvisioningService(deps: {
       updatedAt: timestamp,
     });
     await workspaceRegistry.upsert(workspace, context);
-    deps.lifecycle?.emit("workspace.created", { workspace: describeHookWorkspace(workspace) });
+    const hookWorkspace = describeHookWorkspace(workspace);
+    deps.lifecycle?.emit("workspace.created", { workspace: hookWorkspace });
+    deps.lifecycleBus?.emit("workspace.created", { workspace: hookWorkspace });
     return workspace;
   }
 
@@ -260,7 +264,9 @@ export function createWorkspaceProvisioningService(deps: {
     await workspaceRegistry.upsert(workspace, {
       expectsInitialAgent: input.expectsInitialAgent,
     });
-    deps.lifecycle?.emit("workspace.created", { workspace: describeHookWorkspace(workspace) });
+    const hookWorkspace = describeHookWorkspace(workspace);
+    deps.lifecycle?.emit("workspace.created", { workspace: hookWorkspace });
+    deps.lifecycleBus?.emit("workspace.created", { workspace: hookWorkspace });
     return workspace;
   }
 

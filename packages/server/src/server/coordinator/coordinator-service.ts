@@ -19,13 +19,16 @@ import type {
   CoordinatorProfiles,
   CoordinatorScope,
   CoordinatorTrustLevel,
+  CoordinatorUsage,
   CoordinatorUsageExpectation,
   CoordinatorWorkingBoardRow,
   ProjectCoordinatorState,
 } from "@getpaseo/protocol/messages";
+import type { PluginHookAgent, PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import { ensureUnarchivedAgentLoaded } from "../agent/agent-loading.js";
-import { sendPromptToAgent } from "../agent/agent-prompt.js";
+import { formatSystemNotificationPrompt, sendPromptToAgent } from "../agent/agent-prompt.js";
 import type { AgentManager, AgentManagerEvent, ManagedAgent } from "../agent/agent-manager.js";
+import type { LifecycleBus } from "../agent/lifecycle-bus.js";
 import type {
   AgentPermissionRequest,
   AgentSessionConfig,
@@ -42,7 +45,14 @@ import type {
 } from "../workspace-registry.js";
 import { areEquivalentPaths } from "../../utils/path.js";
 import { writeFileAtomic } from "../atomic-file.js";
+import type { WorkspaceGitService } from "../workspace-git-service.js";
 
+import {
+  ChangeRequestPoll,
+  hashChangeRequestSnapshot,
+  type ChangeRequestPollChange,
+  type ChangeRequestPollOutcome,
+} from "./change-request-poll.js";
 import {
   CoordinatorStore,
   type PersistedCoordinatorBoard,
@@ -52,10 +62,13 @@ import {
   buildProjectCoordinatorFirstContactPrompt,
   buildProjectCoordinatorSystemPrompt,
 } from "./prompts.js";
+import { composeWakeEnvelope } from "./wake-envelope.js";
 
 const DONE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const DONE_SNAPSHOT_LIMIT = 20;
 const COORDINATOR_TITLE = "Coordinator";
+const STALL_SWEEP_INTERVAL_MS = 60_000;
+const STALL_THRESHOLD_MS = 30 * 60 * 1000;
 
 export class CoordinatorRequestError extends Error {
   constructor(message: string) {
@@ -111,6 +124,34 @@ export interface CoordinatorServiceDeps {
   ) => Promise<PersistedWorkspaceRecord>;
   paseoHome: string;
   logger: Logger;
+  /**
+   * In-process lifecycle events emitted beside pluginLifecycle in
+   * AgentManager. The service subscribes for stall tracking and coordinator
+   * turn-end wake delivery; without it, stall detection is disabled.
+   */
+  lifecycleBus?: LifecycleBus;
+  /** Forge + repo-root resolution for the change-request poll and CI detection. */
+  workspaceGitService?: Pick<WorkspaceGitService, "resolveForge" | "resolveRepoRoot">;
+  /**
+   * This month's coordinator spawn/token actuals for the wake envelope.
+   * Optional until the usage-tracking slice wires a reader.
+   */
+  readProjectUsage?: (projectId: string) => CoordinatorUsage | undefined;
+  changeRequestPollIntervalMs?: number;
+  stallSweepIntervalMs?: number;
+  stallThresholdMs?: number;
+  now?: () => number;
+}
+
+/**
+ * One coordinator wake: `key` dedupes identical wakes queued while the
+ * coordinator is mid-turn, `reason` is the short line on the board's wake row,
+ * and `details` is the longer body (diff lines, stall context) in the prompt.
+ */
+export interface CoordinatorWake {
+  key: string;
+  reason: string;
+  details?: string;
 }
 
 function recordActivityMs(record: StoredAgentRecord): number {
@@ -273,6 +314,14 @@ export class CoordinatorService {
   private readonly workspaceRegistry: CoordinatorServiceDeps["workspaceRegistry"];
   private readonly createWorkspaceForDirectory: CoordinatorServiceDeps["createWorkspaceForDirectory"];
   private readonly logger: Logger;
+  private readonly lifecycleBus?: LifecycleBus;
+  private readonly workspaceGitService?: CoordinatorServiceDeps["workspaceGitService"];
+  private readonly readProjectUsage?: CoordinatorServiceDeps["readProjectUsage"];
+  private readonly paseoHome: string;
+  private readonly now: () => number;
+  private readonly stallSweepIntervalMs: number;
+  private readonly stallThresholdMs: number;
+  private readonly changeRequestPollIntervalMs?: number;
 
   private readonly states = new Map<string, PersistedProjectCoordinator | null>();
   private readonly boards = new Map<string, PersistedCoordinatorBoard>();
@@ -283,6 +332,16 @@ export class CoordinatorService {
   private readonly agentCoverage = new Map<string, CoordinatorCoverageEntry>();
   private readonly knownDecisionQuestions = new Map<string, string>();
   private readonly dirtyBoards = new Set<string>();
+  private changeRequestPoll: ChangeRequestPoll | null = null;
+  private stallSweepTimer: NodeJS.Timeout | null = null;
+  /** Wakes waiting on a mid-turn coordinator; flushed combined on turn_ended. */
+  private readonly pendingWakes = new Map<string, CoordinatorWake[]>();
+  /** Retry timers for queued wakes that outlasted the turn's run record. */
+  private readonly wakeFlushTimers = new Map<string, NodeJS.Timeout>();
+  /** Agents already woken for an errored turn; cleared on the next sign of life. */
+  private readonly erroredAgents = new Set<string>();
+  /** Stall keys already woken; cleared when the request resolves/recovers. */
+  private readonly stalledWakeKeys = new Set<string>();
   private agentMcpAvailable: boolean | undefined;
   private boardFlushScheduled = false;
   private unsubscribers: Array<() => void> = [];
@@ -295,6 +354,14 @@ export class CoordinatorService {
     this.projectRegistry = deps.projectRegistry;
     this.workspaceRegistry = deps.workspaceRegistry;
     this.createWorkspaceForDirectory = deps.createWorkspaceForDirectory;
+    this.lifecycleBus = deps.lifecycleBus;
+    this.workspaceGitService = deps.workspaceGitService;
+    this.readProjectUsage = deps.readProjectUsage;
+    this.paseoHome = deps.paseoHome;
+    this.now = deps.now ?? Date.now;
+    this.stallSweepIntervalMs = deps.stallSweepIntervalMs ?? STALL_SWEEP_INTERVAL_MS;
+    this.stallThresholdMs = deps.stallThresholdMs ?? STALL_THRESHOLD_MS;
+    this.changeRequestPollIntervalMs = deps.changeRequestPollIntervalMs;
     this.logger = deps.logger.child({ module: "coordinator" });
     this.store = new CoordinatorStore(deps.paseoHome, deps.logger);
   }
@@ -328,10 +395,26 @@ export class CoordinatorService {
       void this.onProjectMutation(mutation);
     });
     if (unsubProject) this.unsubscribers.push(unsubProject);
+    this.subscribeLifecycleBus();
+    this.startStallSweep();
+    try {
+      await this.startChangeRequestPolling();
+    } catch (error) {
+      this.logger.warn({ err: error }, "Failed to start change-request polling");
+    }
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.changeRequestPoll?.stop();
+    if (this.stallSweepTimer) {
+      clearInterval(this.stallSweepTimer);
+      this.stallSweepTimer = null;
+    }
+    for (const timer of this.wakeFlushTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.wakeFlushTimers.clear();
     for (const unsubscribe of this.unsubscribers.splice(0)) {
       try {
         unsubscribe();
@@ -406,7 +489,8 @@ export class CoordinatorService {
         state.agentId = agent.id;
         await this.appendWakeRow(
           input.projectId,
-          `Woke: coordinator enabled · ${capitalizeTrust("observe")}`,
+          `Woke: coordinator enabled · Level: ${capitalizeTrust("observe")}`,
+          "observe",
         );
         // CreateAgentOptions.initialPrompt only feeds title derivation — the
         // first-contact prompt must be dispatched as a real turn.
@@ -443,6 +527,7 @@ export class CoordinatorService {
       }
 
       await this.setState(input.projectId, state);
+      this.changeRequestPoll?.trackProject(input.projectId);
       this.queueBoardRefresh(input.projectId);
       return this.toProjectCoordinatorState(state);
     });
@@ -458,6 +543,13 @@ export class CoordinatorService {
         updatedAt: new Date().toISOString(),
       };
       await this.setState(projectId, next);
+      this.changeRequestPoll?.untrackProject(projectId);
+      this.pendingWakes.delete(projectId);
+      const flushTimer = this.wakeFlushTimers.get(projectId);
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        this.wakeFlushTimers.delete(projectId);
+      }
       if (next.agentId) {
         // Pause the session but keep transcript and memory on disk; re-enable
         // resumes the same agent record through ensureAgentLoaded.
@@ -508,6 +600,41 @@ export class CoordinatorService {
       this.queueBoardRefresh(input.projectId);
       return this.toProjectCoordinatorState(next);
     });
+  }
+
+  /**
+   * Whether the project's repository carries a recognized CI config. The
+   * coordinator.project.* responses ship this so the setup sheet can say the
+   * CI watch has nothing to poll (story 34); the PR poll itself runs either
+   * way.
+   */
+  async resolveCiConfigured(projectId: string): Promise<boolean | undefined> {
+    const project = await this.projectRegistry.get(projectId).catch(() => null);
+    if (!project) return undefined;
+    const rootPath = this.workspaceGitService
+      ? await this.workspaceGitService
+          .resolveRepoRoot(project.rootPath)
+          .catch(() => project.rootPath)
+      : project.rootPath;
+    try {
+      const workflows = await fs.readdir(path.join(rootPath, ".github", "workflows"));
+      if (workflows.some((name) => !name.startsWith("."))) return true;
+    } catch {
+      // No .github/workflows directory.
+    }
+    for (const candidate of [".gitlab-ci.yml", "Jenkinsfile"]) {
+      try {
+        if ((await fs.stat(path.join(rootPath, candidate))).isFile()) return true;
+      } catch {
+        // Absent.
+      }
+    }
+    try {
+      if ((await fs.stat(path.join(rootPath, ".circleci", "config.yml"))).isFile()) return true;
+    } catch {
+      // Absent.
+    }
+    return false;
   }
 
   // -------------------------------------------------------------------------
@@ -633,7 +760,7 @@ export class CoordinatorService {
       try {
         const state = await this.getState(projectId);
         if (!state?.enabled) continue;
-        await this.appendWakeRow(projectId, text);
+        await this.appendWakeRow(projectId, text, state.trustLevel);
       } catch (error) {
         this.logger.warn({ err: error, projectId }, "Failed to record MCP availability on board");
       }
@@ -866,6 +993,7 @@ export class CoordinatorService {
           );
         }
       }
+      await this.maybeWakeForErroredAgent(agent, effectiveProjectId, previous, delegated);
       if (agent.lifecycle === "closed") {
         this.agentCoverage.delete(agent.id);
       }
@@ -875,6 +1003,31 @@ export class CoordinatorService {
       const coordinatorProjectId = getCoordinatorProjectIdFromLabels(agent.labels);
       if (coordinatorProjectId) this.queueBoardRefresh(coordinatorProjectId);
     }
+  }
+
+  /**
+   * "Idle after an error" stall: a lifecycle error that arrives without a
+   * turn_failed stream event (a failed resume, a provider-side crash) wakes
+   * the coordinator too. The claim is shared with the lifecycle-bus path so
+   * the pair wakes once.
+   */
+  private async maybeWakeForErroredAgent(
+    agent: ManagedAgent,
+    projectId: string,
+    previous: CoordinatorCoverageEntry | undefined,
+    delegated: boolean,
+  ): Promise<void> {
+    if (agent.lifecycle !== "error" || previous?.lifecycle === "error") return;
+    if (isCoordinatorAgent(agent)) return;
+    const state = await this.getState(projectId);
+    if (!state?.enabled || (state.scope !== "everything" && !delegated)) return;
+    if (this.erroredAgents.has(agent.id)) return;
+    this.erroredAgents.add(agent.id);
+    await this.wakeProjectCoordinator(projectId, {
+      key: `error:${agent.id}`,
+      reason: `Session errored: ${firstLine(agent.config.title ?? agent.id)}`,
+      details: `Agent ${agent.id} (${agent.config.title ?? "untitled"}) in ${agent.cwd} is idle after an error: ${agent.lastError ?? "unknown error"}`,
+    });
   }
 
   private async onAgentStream(agentId: string, event: AgentStreamEvent): Promise<void> {
@@ -939,8 +1092,19 @@ export class CoordinatorService {
 
   private async onProjectMutation(mutation: ProjectMutation): Promise<void> {
     if (this.stopped) return;
+    // A project addition arrives here as kind "upsert" — that is where the
+    // global coordinator's project-added wake belongs once the global
+    // coordinator exists (spec wake sources). Today only the per-project
+    // board refreshes; no wake is emitted for upserts.
     this.queueBoardRefresh(mutation.projectId);
     if (mutation.kind !== "archive" && mutation.kind !== "remove") return;
+    this.changeRequestPoll?.untrackProject(mutation.projectId);
+    this.pendingWakes.delete(mutation.projectId);
+    const flushTimer = this.wakeFlushTimers.get(mutation.projectId);
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      this.wakeFlushTimers.delete(mutation.projectId);
+    }
     const state = await this.getState(mutation.projectId);
     if (state?.agentId) {
       await this.agentManager
@@ -962,6 +1126,326 @@ export class CoordinatorService {
           );
       }
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Wakes: envelope delivery, mid-turn queueing, and the stall sweep
+  // -------------------------------------------------------------------------
+
+  /**
+   * Every wake source funnels here. One wake at a time per project behind the
+   * project lock; a wake arriving while the coordinator is mid-turn queues and
+   * flushes combined on `agent.turn_ended`, so a wake never interrupts or
+   * races the coordinator's running turn.
+   */
+  async wakeProjectCoordinator(projectId: string, wake: CoordinatorWake): Promise<void> {
+    await this.withProjectLock(projectId, async () => {
+      if (this.stopped) return;
+      const state = await this.getState(projectId);
+      if (!state?.enabled || !state.agentId) return;
+      const project = await this.projectRegistry.get(projectId).catch(() => null);
+      if (!project || project.archivedAt) return;
+      if (this.agentManager.hasInFlightRun(state.agentId)) {
+        const queued = this.pendingWakes.get(projectId) ?? [];
+        if (!queued.some((entry) => entry.key === wake.key)) {
+          this.pendingWakes.set(projectId, [...queued, wake]);
+        }
+        return;
+      }
+      await this.deliverWake(projectId, state, project, wake);
+    });
+  }
+
+  /**
+   * Runs one change-request poll cycle for a project immediately, serialized
+   * with its timer loop. Exists for tests and any later "refresh now" surface.
+   */
+  async runChangeRequestPollOnce(projectId: string): Promise<ChangeRequestPollOutcome | undefined> {
+    return this.changeRequestPoll?.runOnce(projectId);
+  }
+
+  /**
+   * The wake row lands before dispatch so the board shows the wake even when
+   * prompt delivery fails (a wedged provider still leaves the row and the log).
+   */
+  private async deliverWake(
+    projectId: string,
+    state: PersistedProjectCoordinator,
+    project: PersistedProjectRecord,
+    wake: CoordinatorWake,
+  ): Promise<void> {
+    const agentId = state.agentId;
+    if (!agentId) return;
+    const changeRequests = this.changeRequestPoll
+      ? await this.changeRequestPoll.lastSnapshot(projectId).catch(() => null)
+      : null;
+    // Envelope failure must not eat the wake — the poll hash is already
+    // persisted, so a lost delivery here never re-fires. Fall back to the
+    // identity lines and let the coordinator re-derive context itself.
+    const envelope = await composeWakeEnvelope({
+      projectId,
+      projectName: project.customName ?? project.displayName,
+      rootPath: project.rootPath,
+      paseoHome: this.paseoHome,
+      trustLevel: state.trustLevel,
+      scope: state.scope,
+      ...(state.usageExpectation ? { usageExpectation: state.usageExpectation } : {}),
+      usage: this.readUsageSafely(projectId),
+      changeRequests,
+    }).catch((error: unknown) => {
+      this.logger.warn(
+        { err: error, projectId },
+        "Wake envelope composition failed; delivering identity only",
+      );
+      return `<wake-context>\nProject: ${projectId}\nTrust: ${state.trustLevel} · Scope: ${state.scope}\n</wake-context>`;
+    });
+    await this.appendWakeRow(
+      projectId,
+      `Woke: ${wake.reason} · Level: ${capitalizeTrust(state.trustLevel)}`,
+      state.trustLevel,
+    );
+    const prompt = formatSystemNotificationPrompt(
+      [`Wake: ${wake.reason}`, ...(wake.details ? [wake.details] : []), envelope].join("\n\n"),
+    );
+    try {
+      await sendPromptToAgent({
+        agentManager: this.agentManager,
+        agentStorage: this.agentStorage,
+        agentId,
+        prompt,
+        // Delivery steers an in-flight turn rather than replacing it; with the
+        // queue above this fires only when the run record lags turn_ended.
+        activeTurnBehavior: "steer",
+        replaceRunning: false,
+        logger: this.logger,
+      });
+    } catch (error) {
+      this.logger.warn({ err: error, projectId, agentId }, "Failed to deliver coordinator wake");
+    }
+  }
+
+  /**
+   * Releases queued wakes as one combined prompt once the coordinator's turn
+   * ends. `hasInFlightRun` can still report busy a hair after `turn_ended`
+   * lands (the run record outlives the event), so a still-busy flush retries
+   * once shortly rather than stranding the queue.
+   */
+  private async flushPendingWakes(projectId: string): Promise<void> {
+    const queued = this.pendingWakes.get(projectId);
+    if (!queued || queued.length === 0) return;
+    const state = await this.getState(projectId);
+    if (state?.agentId && this.agentManager.hasInFlightRun(state.agentId)) {
+      if (!this.stopped && !this.wakeFlushTimers.has(projectId)) {
+        this.wakeFlushTimers.set(
+          projectId,
+          setTimeout(() => {
+            this.wakeFlushTimers.delete(projectId);
+            void this.flushPendingWakes(projectId);
+          }, 250),
+        );
+      }
+      return;
+    }
+    this.pendingWakes.delete(projectId);
+    const combined: CoordinatorWake =
+      queued.length === 1
+        ? queued[0]
+        : {
+            key: queued.map((entry) => entry.key).join("+"),
+            reason: `${queued.length} updates while mid-turn`,
+            details: queued
+              .map((entry) => `- ${entry.reason}${entry.details ? `\n${entry.details}` : ""}`)
+              .join("\n\n"),
+          };
+    await this.wakeProjectCoordinator(projectId, combined);
+  }
+
+  private subscribeLifecycleBus(): void {
+    const bus = this.lifecycleBus;
+    if (!bus) return;
+    this.unsubscribers.push(
+      bus.on("agent.turn_ended", (event) => {
+        void this.onLifecycleTurnEnded(event);
+      }),
+      bus.on("agent.turn_started", (event) => {
+        this.erroredAgents.delete(event.agent.id);
+      }),
+      bus.on("agent.archived", (event) => {
+        this.onLifecycleAgentArchived(event.agent.id);
+      }),
+    );
+  }
+
+  /**
+   * Two jobs on one event: a covered session whose turn failed is the spec's
+   * "idle after an error" stall, and a coordinator ending a turn releases the
+   * wakes queued while it ran.
+   */
+  private async onLifecycleTurnEnded(
+    event: PluginLifecycleEvents["agent.turn_ended"],
+  ): Promise<void> {
+    if (this.stopped) return;
+    try {
+      if (event.outcome.kind !== "failed") {
+        this.erroredAgents.delete(event.agent.id);
+      }
+      const managed = this.agentManager.getAgent(event.agent.id);
+      if (managed && isCoordinatorAgent(managed)) {
+        const projectId = getCoordinatorProjectIdFromLabels(managed.labels);
+        if (projectId) await this.flushPendingWakes(projectId);
+        return;
+      }
+      if (event.outcome.kind !== "failed") {
+        return;
+      }
+      const projectId = await this.projectIdForHookAgent(event.agent);
+      if (!projectId) return;
+      const state = await this.getState(projectId);
+      if (!state?.enabled) return;
+      // Scope mirrors board coverage: `project` sees delegated sessions only.
+      if (state.scope !== "everything" && event.agent.parentAgentId === null) return;
+      // Check-and-claim stays synchronous so the agent_state error path can't
+      // slip a second wake between this check and the set.
+      if (this.erroredAgents.has(event.agent.id)) return;
+      this.erroredAgents.add(event.agent.id);
+      await this.wakeProjectCoordinator(projectId, {
+        key: `error:${event.agent.id}`,
+        reason: `Session errored: ${firstLine(event.agent.title ?? event.agent.id)}`,
+        details: `Agent ${event.agent.id} (${event.agent.title ?? "untitled"}) ended a turn with an error: ${event.outcome.error.message}`,
+      });
+    } catch (error) {
+      this.logger.warn(
+        { err: error, agentId: event.agent.id },
+        "Coordinator turn_ended handling failed",
+      );
+    }
+  }
+
+  private onLifecycleAgentArchived(agentId: string): void {
+    this.erroredAgents.delete(agentId);
+    const prefix = `stall:${agentId}:`;
+    for (const key of this.stalledWakeKeys) {
+      if (key.startsWith(prefix)) this.stalledWakeKeys.delete(key);
+    }
+  }
+
+  private async projectIdForHookAgent(agent: PluginHookAgent): Promise<string | null> {
+    if (!agent.workspaceId) return null;
+    const workspace = await this.workspaceRegistry.get(agent.workspaceId).catch(() => null);
+    return workspace && !workspace.archivedAt ? workspace.projectId : null;
+  }
+
+  /** Usage actuals are enrichment, never worth losing a wake over. */
+  private readUsageSafely(projectId: string): CoordinatorUsage | null {
+    try {
+      return this.readProjectUsage?.(projectId) ?? null;
+    } catch (error) {
+      this.logger.warn({ err: error, projectId }, "Project usage read failed");
+      return null;
+    }
+  }
+
+  private startStallSweep(): void {
+    if (this.stallSweepTimer) return;
+    this.stallSweepTimer = setInterval(() => {
+      void this.sweepStalledSessions().catch((error) =>
+        this.logger.warn({ err: error }, "Coordinator stall sweep failed"),
+      );
+    }, this.stallSweepIntervalMs);
+    this.stallSweepTimer.unref?.();
+  }
+
+  /**
+   * One pass of the spec's 30-minute stall rule: a covered session holding a
+   * permission request older than the threshold wakes its coordinator once.
+   * The sweep reads live permission state rather than tracking event history,
+   * so a request resolved between sweeps never wakes. Stall keys are
+   * in-memory, so a still-pending request wakes once more after a daemon
+   * restart — correct, since the stall is still real.
+   */
+  async sweepStalledSessions(): Promise<void> {
+    if (this.stopped) return;
+    const nowMs = this.now();
+    const liveStallKeys = new Set<string>();
+    for (const agent of this.agentManager.listAgents()) {
+      if (agent.lifecycle === "closed" || agent.pendingPermissions.size === 0) continue;
+      // A coordinator's own pending request is a question to the user; waking
+      // the coordinator about it could never answer it.
+      if (isCoordinatorAgent(agent)) continue;
+      const projectId = await this.projectIdForAgent(agent).catch(() => null);
+      if (!projectId) continue;
+      const state = await this.getState(projectId);
+      if (!state?.enabled) continue;
+      if (state.scope !== "everything" && !isDelegatedAgent(agent)) continue;
+      for (const request of agent.pendingPermissions.values()) {
+        const askedAt = request.requestedAt ?? agent.permissionRequestedAt.get(request.id);
+        const askedMs = askedAt ? Date.parse(askedAt) : Number.NaN;
+        if (!Number.isFinite(askedMs) || nowMs - askedMs < this.stallThresholdMs) continue;
+        const key = `stall:${agent.id}:${request.id}`;
+        liveStallKeys.add(key);
+        if (this.stalledWakeKeys.has(key)) continue;
+        this.stalledWakeKeys.add(key);
+        const waitedMin = Math.max(1, Math.round((nowMs - askedMs) / 60_000));
+        const goal = await this.goalForAgent(agent).catch(() => agent.id);
+        await this.wakeProjectCoordinator(projectId, {
+          key,
+          reason: `Stalled session: ${goal} has waited on a permission for ${waitedMin}m`,
+          details: `Agent ${agent.id} in ${agent.cwd} is waiting on "${decisionQuestionText(request)}" (request ${request.id}).`,
+        });
+      }
+    }
+    // Resolved or out-of-coverage requests drop their stall key, so a request
+    // that stalls again later wakes again instead of staying silenced.
+    for (const key of this.stalledWakeKeys) {
+      if (!liveStallKeys.has(key)) this.stalledWakeKeys.delete(key);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Change-request poll
+  // -------------------------------------------------------------------------
+
+  private async startChangeRequestPolling(): Promise<void> {
+    const git = this.workspaceGitService;
+    if (!git) return;
+    const poll = new ChangeRequestPoll({
+      resolveProjectRoot: async (projectId) => {
+        const project = await this.projectRegistry.get(projectId).catch(() => null);
+        if (!project || project.archivedAt) return null;
+        // Poll the repository root, not the coordinator's checkout: every
+        // workspace in the project shares one change-request list.
+        return git.resolveRepoRoot(project.rootPath).catch(() => project.rootPath);
+      },
+      workspaceGitService: git,
+      paseoHome: this.paseoHome,
+      logger: this.logger,
+      onChange: (projectId, change) => this.onChangeRequestDiff(projectId, change),
+      ...(this.changeRequestPollIntervalMs !== undefined
+        ? { intervalMs: this.changeRequestPollIntervalMs }
+        : {}),
+      now: this.now,
+    });
+    this.changeRequestPoll = poll;
+    const projectIds = new Set<string>(await this.store.listProjectIds());
+    for (const projectId of this.states.keys()) projectIds.add(projectId);
+    for (const projectId of projectIds) {
+      const state = await this.getState(projectId);
+      if (state?.enabled) poll.trackProject(projectId);
+    }
+  }
+
+  private async onChangeRequestDiff(
+    projectId: string,
+    change: ChangeRequestPollChange,
+  ): Promise<void> {
+    const lines = change.diffSummary.split("\n").filter((line) => line.trim().length > 0);
+    const head = firstLine(change.diffSummary);
+    const extra = lines.length - 1;
+    await this.wakeProjectCoordinator(projectId, {
+      key: `cr:${hashChangeRequestSnapshot(change.snapshot)}`,
+      reason: extra > 0 ? `${head} (+${extra} more)` : head,
+      details: change.diffSummary,
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -1265,7 +1749,11 @@ export class CoordinatorService {
     this.queueBoardRefresh(projectId);
   }
 
-  private async appendWakeRow(projectId: string, text: string): Promise<void> {
+  private async appendWakeRow(
+    projectId: string,
+    text: string,
+    level: CoordinatorTrustLevel = "observe",
+  ): Promise<void> {
     await this.withBoardLock(projectId, async () => {
       const board = await this.getBoard(projectId);
       await this.saveBoard(projectId, {
@@ -1275,7 +1763,7 @@ export class CoordinatorService {
           id: `wake:${randomUUID()}`,
           projectId,
           text,
-          level: "observe",
+          level,
           at: new Date().toISOString(),
         },
       });
