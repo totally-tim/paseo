@@ -1,4 +1,7 @@
-import { getAccountUsageWindows as applicableWindows } from "@getpaseo/protocol/provider-accounts";
+import {
+  effectiveCapacityLimit,
+  getAccountUsageWindows as applicableWindows,
+} from "@getpaseo/protocol/provider-accounts";
 import pLimit from "p-limit";
 import { randomUUID } from "node:crypto";
 import type {
@@ -318,7 +321,9 @@ export class ProviderAccountService {
     identity: ProviderAccountIdentity,
   ): Promise<ProviderAccount> {
     const commit = this.identityQueue.then(async () => {
-      const duplicate = this.duplicateOf(account, identity);
+      // Queued commits are serialized, so re-read the record an earlier commit may have moved.
+      const current = this.store.get(account.id);
+      const duplicate = this.duplicateOf(current, identity);
       if (duplicate)
         return this.update(account.id, {
           authState: "error",
@@ -329,8 +334,14 @@ export class ProviderAccountService {
       return this.update(account.id, {
         authState: "ready",
         identity,
-        enabled: account.enabled,
+        enabled: current.enabled,
         error: null,
+        // A remembered rejection belongs to the subscription that reported it. The host CLI
+        // login can be switched outside Paseo, so a different verified identity must not
+        // inherit the previous one's limit.
+        ...(current.identity && current.identity.key !== identity.key
+          ? { capacityLimit: null }
+          : {}),
       });
     });
     this.identityQueue = commit.catch(() => undefined);
@@ -376,8 +387,16 @@ export class ProviderAccountService {
   }
 
   async reportCapacity(id: string, model?: string, resetsAt?: string): Promise<void> {
+    const identityKey = this.store.get(id).identity?.key;
     await this.update(id, {
-      capacityLimit: { observedAt: new Date(this.now()).toISOString(), model, resetsAt },
+      capacityLimit: {
+        observedAt: new Date(this.now()).toISOString(),
+        model,
+        resetsAt,
+        // Bound to the verified login that reported it; a host login switched outside Paseo
+        // must not inherit another subscription's limit.
+        ...(identityKey ? { identityKey } : {}),
+      },
     });
   }
 
@@ -434,14 +453,27 @@ export class ProviderAccountService {
 
   refreshUsage(): void {
     if (this.closed || this.usageRefresh) return;
-    // The user can sign in to a provider CLI after the daemon started; nothing tells us.
-    for (const account of this.list())
-      if (account.ownership === "external" && account.authState !== "ready")
-        void this.inspect(account.id).catch(() => undefined);
-    const accounts = this.list().filter(
-      (account) => account.authState === "ready" && !account.removedAt,
-    );
+    // The user can sign in to — or switch — a provider CLI after the daemon started; nothing
+    // tells us. Re-verify the host identity on the usage cadence so a switched login does not
+    // keep wearing the previous subscription's identity and remembered limits.
+    const inspections = this.list()
+      .filter((account) => account.ownership === "external" && !account.removedAt)
+      .map((account) => {
+        const cached = this.usageCache.get(account.id);
+        const due =
+          account.authState !== "ready" ||
+          !cached ||
+          cached.revision !== account.revision ||
+          this.now() - cached.at >= USAGE_TTL_MS;
+        return due ? this.inspect(account.id).catch(() => undefined) : null;
+      });
     this.usageRefresh = (async () => {
+      // Settle identity first: a commit bumps the revision, which would discard a usage read
+      // that was already in flight for the account it just changed.
+      await Promise.allSettled(inspections);
+      const accounts = this.list().filter(
+        (account) => account.authState === "ready" && !account.removedAt,
+      );
       for (let offset = 0; offset < accounts.length && !this.closed; offset += 2) {
         await Promise.allSettled(
           accounts.slice(offset, offset + 2).map((account) => this.usage(account.id)),
@@ -607,8 +639,9 @@ export class ProviderAccountService {
           100 - window.usedPct <= (account.reservePercent ?? 0),
       )
       .map((window) => Date.parse(window.resetsAt ?? ""));
-    if (!account.capacityLimit?.model || account.capacityLimit.model === model)
-      deadlines.push(Date.parse(account.capacityLimit?.resetsAt ?? ""));
+    const limit = effectiveCapacityLimit(account);
+    if (limit && (!limit.model || limit.model === model))
+      deadlines.push(Date.parse(limit.resetsAt ?? ""));
     const future = deadlines.filter((at) => Number.isFinite(at) && at > this.now());
     // Every blocking window must reset before this account can run again.
     return future.length ? Math.max(...future) : null;
@@ -719,8 +752,7 @@ export class ProviderAccountService {
     if (!unattended || account.interactiveOnly) return false;
     const usage = this.currentUsage(account);
     const windows = applicableWindows(usage, model);
-    if (capacityRejection(account.capacityLimit, usage, windows.length, model, this.now()))
-      return false;
+    if (capacityRejection(account, usage, windows.length, model, this.now())) return false;
     if (
       windows.some(
         (window) =>
@@ -902,13 +934,7 @@ export class ProviderAccountService {
       return no("This account is reserved for interactive work.");
     const usage = this.currentUsage(account);
     const windows = applicableWindows(usage, model);
-    const capacityError = capacityRejection(
-      account.capacityLimit,
-      usage,
-      windows.length,
-      model,
-      this.now(),
-    );
+    const capacityError = capacityRejection(account, usage, windows.length, model, this.now());
     if (capacityError) return no(capacityError);
     const blocked = windows.find(
       (window) => typeof window.usedPct === "number" && window.usedPct >= 100,
@@ -1060,12 +1086,13 @@ function automaticAccountKey(
 }
 
 function capacityRejection(
-  capacity: ProviderAccount["capacityLimit"],
+  account: ProviderAccount,
   usage: ProviderUsage | null,
   windowCount: number,
   model: string | undefined,
   now: number,
 ): string | null {
+  const capacity = effectiveCapacityLimit(account);
   if (
     !capacity ||
     (capacity.model && capacity.model !== model) ||
