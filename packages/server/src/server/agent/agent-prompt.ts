@@ -247,7 +247,7 @@ const PROMPT_TAG_PATTERN =
 
 export function sanitizeUntrustedText(text: string): string {
   return text.replace(PROMPT_TAG_PATTERN, (match) =>
-    match.replace(/</, "&lt;").replace(/>/, "&gt;"),
+    match.replace(/</g, "&lt;").replace(/>/g, "&gt;"),
   );
 }
 
