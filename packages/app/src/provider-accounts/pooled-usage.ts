@@ -46,7 +46,7 @@ export interface AccountUsagePool {
 }
 
 /**
- * Compatible windows share a pool key: the window's positional name plus its real length.
+ * Compatible windows share a pool key: the metered bucket, position, and real length.
  * Codex reports `primary`/`secondary` as positions — the same position can be a five-hour
  * session on one plan and a monthly allowance on another, so duration must be part of the
  * key or a month of quota would average into a session pool. `model:` rows keep the model
@@ -54,9 +54,9 @@ export interface AccountUsagePool {
  */
 function windowPoolKey(window: ProviderUsageWindow): string {
   const parts = window.id.split(":");
-  const position = parts[parts.length - 1];
   const kind = window.id.startsWith("model:") ? "model" : "window";
-  return `${kind}:${position}:${window.periodMinutes ?? "unknown"}`;
+  const identity = kind === "model" ? parts.slice(2).join(":") : window.id;
+  return `${kind}:${identity}:${window.periodMinutes ?? "unknown"}`;
 }
 
 function windowSortMinutes(window: ProviderUsageWindow): number {
@@ -166,10 +166,7 @@ export function collectAccountUsagePools(input: {
           row = {
             sortMinutes: windowSortMinutes(window),
             periodMinutes: window.periodMinutes ?? null,
-            // Pooled labels drop the per-bucket ` · limitName` suffix; model rows keep it.
-            label: key.startsWith("model:")
-              ? window.label
-              : (window.label.split(" · ")[0] ?? window.label),
+            label: window.label,
             segments: Array.from({ length: accounts.length }, () => null),
           };
           rows.set(key, row);

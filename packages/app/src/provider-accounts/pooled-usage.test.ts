@@ -56,6 +56,40 @@ function entry(
 }
 
 describe("collectAccountUsagePools", () => {
+  it("keeps separate Codex buckets even when their positions and periods match", () => {
+    const pools = collectAccountUsagePools({
+      now: NOW,
+      accounts: [account("a", "codex"), account("b", "codex")],
+      usage: [
+        entry("a", [
+          window({
+            id: "codex:primary",
+            label: "5-hour window · Codex",
+            usedPct: 100,
+            periodMinutes: 300,
+          }),
+          window({
+            id: "codex-mini:primary",
+            label: "5-hour window · Codex Mini",
+            usedPct: 0,
+            periodMinutes: 300,
+          }),
+        ]),
+        entry("b", [
+          window({
+            id: "codex:primary",
+            label: "5-hour window · Codex",
+            usedPct: 40,
+            periodMinutes: 300,
+          }),
+        ]),
+      ],
+    });
+    expect(pools[0].windows.map((row) => [row.label, row.remainingPct])).toEqual([
+      ["5-hour window · Codex", 30],
+      ["5-hour window · Codex Mini", 100],
+    ]);
+  });
   it("folds a host login and a managed login on the same identity into one column", () => {
     const pools = collectAccountUsagePools({
       now: NOW,
@@ -121,7 +155,7 @@ describe("collectAccountUsagePools", () => {
       ],
     });
     const keys = pools[0].windows.map((row) => row.key);
-    expect(keys).toEqual(["window:primary:300", "window:primary:43200"]);
+    expect(keys).toEqual(["window:codex:primary:300", "window:codex:primary:43200"]);
     expect(pools[0].windows[0].segments).toEqual([expect.objectContaining({ usedPct: 50 }), null]);
     expect(pools[0].windows[1].segments).toEqual([null, expect.objectContaining({ usedPct: 10 })]);
   });

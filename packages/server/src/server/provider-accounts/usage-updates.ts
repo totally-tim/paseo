@@ -173,18 +173,23 @@ function resolveUpdateWindowId(
   update: UsageUpdateWindow,
   existing: ProviderUsageWindow[],
 ): string | null {
-  if (existing.some((window) => window.id === update.id)) return update.id;
   if (update.modelScoped) {
-    const scoped = existing.find((window) => window.id.startsWith("model:"));
-    return scoped?.id ?? null;
+    const scoped = existing.filter((window) => window.id.startsWith("model:"));
+    return scoped.length === 1 ? scoped[0].id : null;
   }
   if (!update.position) return update.id;
-  if (existing.some((window) => window.id === update.position)) return update.position;
-  const prefixed = existing.filter((window) => window.id.endsWith(`:${update.position}`));
-  if (update.unprefixed) {
-    if (prefixed.length === 1) return prefixed[0].id;
-    if (prefixed.length > 1) return null;
+  const families = new Set<string>();
+  for (const window of existing) {
+    const match = /^(?:(.*):)?(primary|secondary|account_limit)$/.exec(window.id);
+    if (match) families.add(match[1] ?? "");
   }
+  if (update.unprefixed) {
+    if (families.size > 1) return null;
+    const [family] = families;
+    return family ? `${family}:${update.position}` : update.id;
+  }
+  if (existing.some((window) => window.id === update.id)) return update.id;
+  if (families.size === 1 && families.has("")) return update.position;
   return update.id;
 }
 

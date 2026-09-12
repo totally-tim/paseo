@@ -1,4 +1,7 @@
-import { getAccountUsageWindows as applicableWindows } from "@getpaseo/protocol/provider-accounts";
+import {
+  effectiveCapacityLimit,
+  getAccountUsageWindows as applicableWindows,
+} from "@getpaseo/protocol/provider-accounts";
 import pLimit from "p-limit";
 import { randomUUID } from "node:crypto";
 import type {
@@ -103,9 +106,10 @@ export class ProviderAccountService {
   private readonly usageLimit = pLimit(2);
   private readonly updates = new Map<string, Promise<unknown>>();
   private readonly redemptions = new Map<string, Promise<unknown>>();
-  private readonly redemptionKeys = new Map<string, string>();
   private identityQueue: Promise<unknown> = Promise.resolve();
   private readonly listeners = new Set<(account: ProviderAccount) => void>();
+  private readonly capacityListeners = new Set<(accountId: string) => void>();
+  private readonly pendingCapacityChanges = new Set<string>();
 
   constructor(
     readonly store: ProviderAccountStore,
@@ -137,6 +141,12 @@ export class ProviderAccountService {
   onChange(listener: (account: ProviderAccount) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /** Capacity reopened without changing account metadata (for example, a reset credit). */
+  onCapacityChange(listener: (accountId: string) => void): () => void {
+    this.capacityListeners.add(listener);
+    return () => this.capacityListeners.delete(listener);
   }
 
   activeLogins(): AccountLogin[] {
@@ -175,7 +185,7 @@ export class ProviderAccountService {
     >,
   ): Promise<ProviderAccount> {
     this.assertOpen();
-    if (this.busy.has(id))
+    if (this.busy.has(id) || this.redemptions.has(id))
       throw new AccountOperationError("An account operation is still in progress.");
     this.busy.add(id);
     try {
@@ -215,7 +225,7 @@ export class ProviderAccountService {
 
   private async inspectAccount(id: string): Promise<ProviderAccount> {
     const account = this.store.get(id);
-    if (this.busy.has(id)) return account;
+    if (this.busy.has(id) || this.redemptions.has(id)) return account;
     this.busy.add(id);
     try {
       const identity = await this.backend(account, this.store.context(id)).inspect();
@@ -340,7 +350,9 @@ export class ProviderAccountService {
     identity: ProviderAccountIdentity,
   ): Promise<ProviderAccount> {
     const commit = this.identityQueue.then(async () => {
-      const duplicate = this.duplicateOf(account, identity);
+      // Queued commits are serialized, so re-read the record an earlier commit may have moved.
+      const current = this.store.get(account.id);
+      const duplicate = this.duplicateOf(current, identity);
       if (duplicate)
         return this.update(account.id, {
           authState: "error",
@@ -351,8 +363,14 @@ export class ProviderAccountService {
       return this.update(account.id, {
         authState: "ready",
         identity,
-        enabled: account.enabled,
+        enabled: current.enabled,
         error: null,
+        // A remembered rejection belongs to the subscription that reported it. The host CLI
+        // login can be switched outside Paseo, so a different verified identity must not
+        // inherit the previous one's limit.
+        ...(current.identity && current.identity.key !== identity.key
+          ? { capacityLimit: null }
+          : {}),
       });
     });
     this.identityQueue = commit.catch(() => undefined);
@@ -398,8 +416,16 @@ export class ProviderAccountService {
   }
 
   async reportCapacity(id: string, model?: string, resetsAt?: string): Promise<void> {
+    const identityKey = this.store.get(id).identity?.key;
     await this.update(id, {
-      capacityLimit: { observedAt: new Date(this.now()).toISOString(), model, resetsAt },
+      capacityLimit: {
+        observedAt: new Date(this.now()).toISOString(),
+        model,
+        resetsAt,
+        // Bound to the verified login that reported it; a host login switched outside Paseo
+        // must not inherit another subscription's limit.
+        ...(identityKey ? { identityKey } : {}),
+      },
     });
   }
 
@@ -408,6 +434,40 @@ export class ProviderAccountService {
    * idempotency key survives a failed attempt so retrying it can never spend two credits.
    */
   async redeemResetCredit(id: string): Promise<ResetCreditRedemption> {
+    this.resetCreditAccount(id);
+    const run = (this.redemptions.get(id) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(() =>
+        this.usageLimit(async () => {
+          const account = this.resetCreditAccount(id);
+          const backend = this.backend(account, this.store.context(id));
+          if (!backend.consumeResetCredit)
+            throw new AccountOperationError("This provider does not support reset credits.");
+          const key = await this.store.resetCreditKey(id);
+          try {
+            const outcome = await backend.consumeResetCredit({ idempotencyKey: key });
+            await this.store.completeResetCredit(id, key);
+            return outcome;
+          } catch (error) {
+            if (error instanceof AccountHelperShutdownError) this.busy.add(id);
+            throw error;
+          }
+        }),
+      )
+      .then((outcome) => this.confirmResetCredit(id, outcome));
+    this.redemptions.set(id, run);
+    void run
+      .finally(() => {
+        if (this.redemptions.get(id) !== run) return;
+        this.redemptions.delete(id);
+        if (this.pendingCapacityChanges.delete(id))
+          for (const listener of this.capacityListeners) listener(id);
+      })
+      .catch(() => undefined);
+    return run;
+  }
+
+  private resetCreditAccount(id: string): ProviderAccount {
     this.assertOpen();
     const account = this.list().find((entry) => entry.id === id);
     if (!account) throw new AccountOperationError("Account not found.");
@@ -419,36 +479,27 @@ export class ProviderAccountService {
       throw new AccountOperationError("Sign in to the account before using a reset credit.");
     if (this.busy.has(id))
       throw new AccountOperationError("An account operation is still in progress.");
-    const run = (this.redemptions.get(id) ?? Promise.resolve())
-      .catch(() => undefined)
-      .then(() => this.consumeResetCredit(account, this.backend(account, this.store.context(id))));
-    this.redemptions.set(id, run);
-    void run
-      .finally(() => {
-        if (this.redemptions.get(id) === run) this.redemptions.delete(id);
-      })
-      .catch(() => undefined);
-    return run;
+    return account;
   }
 
-  private async consumeResetCredit(
-    account: ProviderAccount,
-    backend: AccountBackend,
+  private async confirmResetCredit(
+    id: string,
+    outcome: ProviderAccountResetCreditOutcome,
   ): Promise<ResetCreditRedemption> {
-    if (!backend.consumeResetCredit)
-      throw new AccountOperationError("This provider does not support reset credits.");
-    const key = this.redemptionKeys.get(account.id) ?? randomUUID();
-    this.redemptionKeys.set(account.id, key);
-    const outcome = await backend.consumeResetCredit({ idempotencyKey: key });
-    // The provider answered definitively; the next spend is a new attempt with a new key.
-    this.redemptionKeys.delete(account.id);
-    // Re-probe so the cache shows the spend, the credit count, and whether windows reopened.
-    const usage = await this.usage(account.id, true);
+    // A forced read normally joins an in-flight probe. Drain older reads first so the
+    // confirmation and credit count come from a request started after the spend.
+    await Promise.allSettled(
+      [...this.usageRequests.entries()]
+        .filter(([key]) => key.startsWith(`${id}:`))
+        .map(([, request]) => request),
+    );
+    const usage = await this.usage(id, true);
     const confirmed = usage.status === "available";
-    if (outcome !== "noCredit" && this.store.get(account.id).capacityLimit) {
+    if (outcome !== "noCredit") this.pendingCapacityChanges.add(id);
+    if (outcome !== "noCredit" && this.store.get(id).capacityLimit) {
       // The remembered rejection predates this outcome; a provider saying nothing was left to
       // reset is still saying the account is not blocked. Preserve the just-fetched usage.
-      await this.update(account.id, { capacityLimit: null }, true);
+      await this.update(id, { capacityLimit: null }, true);
     }
     return { outcome, confirmed };
   }
@@ -485,18 +536,20 @@ export class ProviderAccountService {
     const cached = this.usageCache.get(id);
     const current = cached?.revision === account.revision ? cached : null;
     const at = this.now();
+    // Sparse events cannot renew the complete reading's age, including untouched windows.
+    const probedAt = current?.at ?? at;
     const usage = mergeAccountUsageUpdate({
       previous: current?.usage ?? null,
       update,
       providerId: account.provider,
       displayName: account.label,
       fetchedAt: new Date(at).toISOString(),
-      nextRefreshAt: new Date(at + USAGE_TTL_MS).toISOString(),
+      nextRefreshAt: new Date(probedAt + USAGE_TTL_MS).toISOString(),
     });
     if (!usage) return;
     this.usageCache.set(id, {
       revision: account.revision,
-      at,
+      at: probedAt,
       usage,
       partial: current ? current.partial : true,
     });
@@ -555,14 +608,27 @@ export class ProviderAccountService {
 
   refreshUsage(): void {
     if (this.closed || this.usageRefresh) return;
-    // The user can sign in to a provider CLI after the daemon started; nothing tells us.
-    for (const account of this.list())
-      if (account.ownership === "external" && account.authState !== "ready")
-        void this.inspect(account.id).catch(() => undefined);
-    const accounts = this.list().filter(
-      (account) => account.authState === "ready" && !account.removedAt,
-    );
+    // The user can sign in to — or switch — a provider CLI after the daemon started; nothing
+    // tells us. Re-verify the host identity on the usage cadence so a switched login does not
+    // keep wearing the previous subscription's identity and remembered limits.
+    const inspections = this.list()
+      .filter((account) => account.ownership === "external" && !account.removedAt)
+      .map((account) => {
+        const cached = this.usageCache.get(account.id);
+        const due =
+          account.authState !== "ready" ||
+          !cached ||
+          cached.revision !== account.revision ||
+          this.now() - cached.at >= USAGE_TTL_MS;
+        return due ? this.inspect(account.id).catch(() => undefined) : null;
+      });
     this.usageRefresh = (async () => {
+      // Settle identity first: a commit bumps the revision, which would discard a usage read
+      // that was already in flight for the account it just changed.
+      await Promise.allSettled(inspections);
+      const accounts = this.list().filter(
+        (account) => account.authState === "ready" && !account.removedAt,
+      );
       for (let offset = 0; offset < accounts.length && !this.closed; offset += 2) {
         await Promise.allSettled(
           accounts.slice(offset, offset + 2).map((account) => this.usage(account.id)),
@@ -660,7 +726,7 @@ export class ProviderAccountService {
         }
         // Inspection and usage both return the stored value while another operation holds the
         // account. A skipped read is not a reading, so it cannot establish capacity.
-        if (this.busy.has(account.id)) return;
+        if (this.busy.has(account.id) || this.redemptions.has(account.id)) return;
         const usage = await this.usage(account.id, true);
         if (usage.status === "available") readings.set(account.id, usage);
       }),
@@ -740,8 +806,9 @@ export class ProviderAccountService {
           100 - window.usedPct <= (account.reservePercent ?? 0),
       )
       .map((window) => Date.parse(window.resetsAt ?? ""));
-    if (!account.capacityLimit?.model || account.capacityLimit.model === model)
-      deadlines.push(Date.parse(account.capacityLimit?.resetsAt ?? ""));
+    const limit = effectiveCapacityLimit(account);
+    if (limit && (!limit.model || limit.model === model))
+      deadlines.push(Date.parse(limit.resetsAt ?? ""));
     const future = deadlines.filter((at) => Number.isFinite(at) && at > this.now());
     // Every blocking window must reset before this account can run again.
     return future.length ? Math.max(...future) : null;
@@ -852,8 +919,7 @@ export class ProviderAccountService {
     if (!unattended || account.interactiveOnly) return false;
     const usage = this.currentUsage(account);
     const windows = applicableWindows(usage, model);
-    if (capacityRejection(account.capacityLimit, usage, windows.length, model, this.now()))
-      return false;
+    if (capacityRejection(account, usage, windows.length, model, this.now())) return false;
     if (
       windows.some(
         (window) =>
@@ -1012,6 +1078,7 @@ export class ProviderAccountService {
     this.closed = true;
     for (const active of this.logins.values()) active.abort.abort();
     await Promise.allSettled([...this.logins.values()].map((login) => login.done));
+    await Promise.allSettled(this.redemptions.values());
     await Promise.allSettled(this.usageRequests.values());
     await Promise.allSettled(this.inspections.values());
     await Promise.allSettled(this.updates.values());
@@ -1035,13 +1102,7 @@ export class ProviderAccountService {
       return no("This account is reserved for interactive work.");
     const usage = this.currentUsage(account);
     const windows = applicableWindows(usage, model);
-    const capacityError = capacityRejection(
-      account.capacityLimit,
-      usage,
-      windows.length,
-      model,
-      this.now(),
-    );
+    const capacityError = capacityRejection(account, usage, windows.length, model, this.now());
     if (capacityError) return no(capacityError);
     const blocked = windows.find(
       (window) => typeof window.usedPct === "number" && window.usedPct >= 100,
@@ -1160,7 +1221,7 @@ export class ProviderAccountService {
       throw new AccountOperationError(
         "Manage the host CLI login in its own terminal. Add an account for a separate Paseo login.",
       );
-    if (this.busy.has(id))
+    if (this.busy.has(id) || this.redemptions.has(id))
       throw new AccountOperationError("An account operation is still in progress.");
     if (this.hasRuntime(id))
       throw new AccountOperationError("Close this account's agents before changing its login.");
@@ -1197,12 +1258,13 @@ function automaticAccountKey(
 }
 
 function capacityRejection(
-  capacity: ProviderAccount["capacityLimit"],
+  account: ProviderAccount,
   usage: ProviderUsage | null,
   windowCount: number,
   model: string | undefined,
   now: number,
 ): string | null {
+  const capacity = effectiveCapacityLimit(account);
   if (
     !capacity ||
     (capacity.model && capacity.model !== model) ||

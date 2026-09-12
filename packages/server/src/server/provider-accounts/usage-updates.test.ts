@@ -135,6 +135,21 @@ describe("claudeRateLimitEventUpdate", () => {
 });
 
 describe("mergeAccountUsageUpdate", () => {
+  it("drops an ambiguous clear even when only one family has an account limit", () => {
+    const previous = probed([
+      { id: "codex:primary", label: "Codex", usedPct: 10 },
+      { id: "codex-mini:secondary", label: "Mini", usedPct: 20 },
+      { id: "codex-mini:account_limit", label: "Mini limit", usedPct: 100 },
+    ]);
+    expect(merge(previous, { spendControlReached: false })).toBeNull();
+    expect(merge(previous, { primary: { usedPercent: 90 } })).toBeNull();
+  });
+
+  it("binds a previously unreported position to the only known family", () => {
+    const previous = probed([{ id: "codex:primary", label: "Codex", usedPct: 10 }]);
+    const next = merge(previous, { secondary: { usedPercent: 30 } });
+    expect(next?.windows.map((window) => window.id)).toEqual(["codex:primary", "codex:secondary"]);
+  });
   it("keeps probe fields an update omits and clears derived estimates", () => {
     const previous = probed([
       {

@@ -39,6 +39,7 @@ export class AgentContinuationService {
   private readonly now: () => number;
   private unsubscribe?: () => void;
   private unsubscribeAccounts?: () => void;
+  private unsubscribeCapacity?: () => void;
   private closed = false;
 
   constructor(private readonly deps: Dependencies) {
@@ -110,19 +111,26 @@ export class AgentContinuationService {
       const signal = accountSignal(account);
       if (this.accountSignals.get(account.id) === signal) return;
       this.accountSignals.set(account.id, signal);
-      for (const record of this.deps.store.list()) {
-        if (record.recovery?.status !== "waiting") continue;
-        if (!record.policy?.accountIds.includes(account.id)) continue;
-        const agentId = record.agentId;
-        void this.change(record.rootAgentId, (current) => {
-          // Clearing the deadline lets the wake below retry now instead of at nextCheckAt.
-          if (current.recovery?.status === "waiting") current.recovery.nextCheckAt = undefined;
-        })
-          .then(() => this.wake(agentId))
-          .catch(() => undefined);
-      }
+      this.wakeWaitingForAccount(account.id);
     });
+    this.unsubscribeCapacity = this.deps.accounts.onCapacityChange((id) =>
+      this.wakeWaitingForAccount(id),
+    );
     for (const record of this.deps.store.list()) this.wake(record.agentId);
+  }
+
+  private wakeWaitingForAccount(accountId: string): void {
+    if (this.closed) return;
+    for (const record of this.deps.store.list()) {
+      if (record.recovery?.status !== "waiting") continue;
+      if (!record.policy?.accountIds.includes(accountId)) continue;
+      const agentId = record.agentId;
+      void this.change(record.rootAgentId, (current) => {
+        if (current.recovery?.status === "waiting") current.recovery.nextCheckAt = undefined;
+      })
+        .then(() => this.wake(agentId))
+        .catch(() => undefined);
+    }
   }
 
   private observeCapacity(agentId: string, eventId: string, turnId: string): void {
@@ -164,6 +172,7 @@ export class AgentContinuationService {
     this.closed = true;
     this.unsubscribe?.();
     this.unsubscribeAccounts?.();
+    this.unsubscribeCapacity?.();
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
     await Promise.allSettled(this.jobs.values());

@@ -8,6 +8,7 @@ import { Linking, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { AccountOperation, ProviderAccount } from "@getpaseo/protocol/provider-accounts";
+import { effectiveCapacityLimit } from "@getpaseo/protocol/provider-accounts";
 import { AdaptiveModalSheet } from "@/components/adaptive-modal-sheet";
 import { Button } from "@/components/ui/button";
 import { Field, FormTextInput } from "@/components/ui/form-field";
@@ -333,16 +334,13 @@ function AccountCapacityStatus({
   account: ProviderAccount;
   usage: import("@getpaseo/protocol/messages").ProviderUsage | null | undefined;
 }) {
+  const limit = effectiveCapacityLimit(account);
   return (
     <>
-      {account.capacityLimit ? (
+      {limit ? (
         <Text style={styles.text}>
-          {account.capacityLimit.model
-            ? `Capacity limit for ${account.capacityLimit.model}`
-            : "Account capacity exhausted"}
-          {account.capacityLimit.resetsAt
-            ? ` · Reported reset ${new Date(account.capacityLimit.resetsAt).toLocaleString()}`
-            : ""}
+          {limit.model ? `Capacity limit for ${limit.model}` : "Account capacity exhausted"}
+          {limit.resetsAt ? ` · Reported reset ${new Date(limit.resetsAt).toLocaleString()}` : ""}
         </Text>
       ) : null}
       {account.authState === "ready" &&

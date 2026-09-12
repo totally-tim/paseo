@@ -63,7 +63,11 @@ afterEach(async () => {
 
 async function setup() {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-account-test-"));
-  const store = new ProviderAccountStore(directory);
+  const hostConfigDir = path.join(directory, "host-config");
+  await fs.mkdir(hostConfigDir);
+  const store = new ProviderAccountStore(directory, {
+    resolveHostConfigDir: () => hostConfigDir,
+  });
   const backends = new Map<string, TestAccountBackend>();
   let now = Date.parse("2026-09-05T00:00:00Z");
   const service = new ProviderAccountService(
@@ -96,6 +100,7 @@ async function setup() {
     service,
     store,
     directory,
+    hostConfigDir,
     backends,
     add,
     advance: (ms: number) => {
@@ -202,15 +207,18 @@ it("waits for in-flight identity inspection before closing the account store", a
 
 describe("provider accounts", () => {
   it("persists only metadata with private permissions and stable directories", async () => {
-    const { add, store, directory } = await setup();
+    const { add, store, directory, hostConfigDir } = await setup();
     const { account } = await add("a", "claude");
     const context = store.context(account.id);
-    const restored = new ProviderAccountStore(directory);
+    const restored = new ProviderAccountStore(directory, {
+      resolveHostConfigDir: () => hostConfigDir,
+    });
     await restored.initialize();
     expect(restored.get(account.id)).toEqual(account);
     expect(restored.context(account.id)).toEqual(context);
     expect((await fs.stat(store.directory)).mode & 0o777).toBe(0o700);
     expect((await fs.stat(path.join(store.directory, "accounts.json"))).mode & 0o777).toBe(0o600);
+    // The host config dir is empty here, so the shared user layer links nothing in.
     expect(await fs.readdir(context!.configDir)).toEqual([]);
   });
 
@@ -647,6 +655,95 @@ it("follows the host CLI login when the user signs in as somebody else", async (
   });
 });
 
+it("drops a remembered rejection when the host login becomes a different identity", async () => {
+  const { service, store, backends } = await setup();
+  const host = store.get("default:codex");
+  const backend = new TestAccountBackend();
+  backend.identity = { key: "codex:first", email: "first@example.invalid" };
+  backends.set(host.id, backend);
+  await service.inspect(host.id);
+  await service.reportCapacity(host.id, undefined, "2099-01-01T00:00:00Z");
+  expect(store.get(host.id).capacityLimit).toMatchObject({
+    resetsAt: "2099-01-01T00:00:00Z",
+    identityKey: "codex:first",
+  });
+  backend.identity = { key: "codex:second", email: "second@example.invalid" };
+  await service.inspect(host.id);
+  // The rejection belongs to the subscription that reported it; a switched login must not
+  // wear the previous one's limit.
+  expect(store.get(host.id).capacityLimit).toBeNull();
+});
+
+it("ignores a remembered rejection that cannot be attributed to the current identity", async () => {
+  const { service, store, backends, add } = await setup();
+  const host = store.get("default:codex");
+  const backend = new TestAccountBackend();
+  backend.identity = { key: "codex:first", email: "first@example.invalid" };
+  backends.set(host.id, backend);
+  await service.inspect(host.id);
+  // Records written before the identity binding carry no key, and the host login may have
+  // changed since — neither shape may block an external account.
+  for (const capacityLimit of [
+    { observedAt: "2026-09-05T00:00:00Z", resetsAt: "2099-01-01T00:00:00Z" },
+    {
+      observedAt: "2026-09-05T00:00:00Z",
+      resetsAt: "2099-01-01T00:00:00Z",
+      identityKey: "codex:someone-else",
+    },
+  ]) {
+    await store.save({ ...store.get(host.id), capacityLimit });
+    const lease = await service.reserve({
+      provider: "codex",
+      selection: { kind: "fixed", accountId: host.id },
+      unattended: false,
+    });
+    lease?.release();
+  }
+  // A managed account's identity is directory-pinned, so a legacy record still gates it.
+  const managed = await add("managed");
+  await store.save({
+    ...store.get(managed.account.id),
+    capacityLimit: { observedAt: "2026-09-05T00:00:00Z", resetsAt: "2099-01-01T00:00:00Z" },
+  });
+  await expect(
+    service.reserve({
+      provider: "codex",
+      selection: { kind: "fixed", accountId: managed.account.id },
+      unattended: false,
+    }),
+  ).rejects.toThrow("2099-01-01");
+});
+
+it("keeps a remembered rejection while the same identity verifies again", async () => {
+  const { service, store, backends } = await setup();
+  const host = store.get("default:codex");
+  const backend = new TestAccountBackend();
+  backend.identity = { key: "codex:first", email: "first@example.invalid" };
+  backends.set(host.id, backend);
+  await service.inspect(host.id);
+  await service.reportCapacity(host.id, undefined, "2099-01-01T00:00:00Z");
+  await service.inspect(host.id);
+  expect(store.get(host.id).capacityLimit?.resetsAt).toBe("2099-01-01T00:00:00Z");
+});
+
+it("re-verifies a ready host login when its usage reading is due", async () => {
+  const { service, store, backends, advance } = await setup();
+  const host = store.get("default:codex");
+  const backend = new TestAccountBackend();
+  backend.identity = { key: "codex:first", email: "first@example.invalid" };
+  backends.set(host.id, backend);
+  await service.inspect(host.id);
+  service.refreshUsage();
+  await vi.waitFor(() => expect(service.usageSnapshot(host.id).stale).toBe(false));
+  backend.identity = { key: "codex:second", email: "second@example.invalid" };
+  advance(5 * 60_000);
+  // refreshUsage no-ops while a pass is in flight, so keep calling until the next pass lands.
+  await vi.waitFor(() => {
+    service.refreshUsage();
+    expect(store.get(host.id).identity?.key).toBe("codex:second");
+  });
+});
+
 it("keeps the account locked when a login helper will not shut down", async () => {
   const { service, store, add } = await setup();
   const { account, backend } = await add("stranded");
@@ -711,7 +808,11 @@ it("keeps unreadable account metadata and refuses to replace it", async () => {
       .catch(() => undefined);
     await fs.rm(directory, { recursive: true, force: true });
   });
-  const first = new ProviderAccountStore(directory);
+  const hostConfigDir = path.join(directory, "host-config");
+  await fs.mkdir(hostConfigDir);
+  const first = new ProviderAccountStore(directory, {
+    resolveHostConfigDir: () => hostConfigDir,
+  });
   await first.initialize();
   await first.create("codex", "Keep me");
   const file = path.join(directory, "provider-accounts", "accounts.json");
@@ -827,7 +928,7 @@ it("keeps a newly verified account out of automatic selection until setup is sav
 });
 
 it("keeps automatic accounts through a rename, a reorder, an earlier account resetting, and restart", async () => {
-  const { service, add, store, directory, backends } = await setup();
+  const { service, add, store, directory, backends, hostConfigDir } = await setup();
   const a = await add("sticky-a");
   const b = await add("sticky-b");
   const input = {
@@ -868,7 +969,7 @@ it("keeps automatic accounts through a rename, a reorder, an earlier account res
   ]);
   await service.close();
   const restarted = new ProviderAccountService(
-    new ProviderAccountStore(directory),
+    new ProviderAccountStore(directory, { resolveHostConfigDir: () => hostConfigDir }),
     (account) => backends.get(account.id) ?? new TestAccountBackend(),
   );
   cleanups.push(() => restarted.close());
@@ -1334,15 +1435,17 @@ describe("reset credits", () => {
     const context = await setup();
     const { account, backend } = await context.add("credited");
     const keys: string[] = [];
+    const started = Promise.withResolvers<void>();
     const outcomes: Array<
       ProviderAccountResetCreditOutcome | Error | Promise<ProviderAccountResetCreditOutcome>
     > = [];
     backend.consumeResetCredit = (input: { idempotencyKey: string }) => {
       keys.push(input.idempotencyKey);
+      started.resolve();
       const outcome = outcomes.shift() ?? "reset";
       return outcome instanceof Error ? Promise.reject(outcome) : Promise.resolve(outcome);
     };
-    return { ...context, account, backend, keys, outcomes };
+    return { ...context, account, backend, keys, outcomes, started };
   }
 
   it("spends one credit, re-reads usage, and clears a remembered capacity limit", async () => {
@@ -1375,8 +1478,100 @@ describe("reset credits", () => {
     expect(keys[2]).not.toBe(keys[0]);
   });
 
+  it("reuses an unresolved redemption after restarting the account service", async () => {
+    const { service, directory, hostConfigDir, account, backend, keys, outcomes } =
+      await credited();
+    outcomes.push(new Error("response lost"), "alreadyRedeemed", "reset");
+    await expect(service.redeemResetCredit(account.id)).rejects.toThrow("response lost");
+    await service.edit(account.id, { label: "Retry after restart" });
+    await service.close();
+    const restarted = new ProviderAccountService(
+      new ProviderAccountStore(directory, { resolveHostConfigDir: () => hostConfigDir }),
+      () => backend,
+    );
+    cleanups.push(() => restarted.close());
+    await restarted.initialize();
+    await restarted.redeemResetCredit(account.id);
+    expect(keys[1]).toBe(keys[0]);
+    await restarted.redeemResetCredit(account.id);
+    expect(keys[2]).not.toBe(keys[0]);
+  });
+
+  it("does not spend when the idempotency key cannot be persisted", async () => {
+    const { service, directory, account, keys } = await credited();
+    const metadata = path.join(directory, "provider-accounts", "accounts.json");
+    await fs.rename(metadata, `${metadata}.saved`);
+    await fs.mkdir(metadata);
+    await expect(service.redeemResetCredit(account.id)).rejects.toThrow();
+    expect(keys).toEqual([]);
+  });
+
+  it("keeps credentials locked when the reset helper did not confirm shutdown", async () => {
+    const { service, account, outcomes } = await credited();
+    outcomes.push(new AccountHelperShutdownError());
+    await expect(service.redeemResetCredit(account.id)).rejects.toThrow("did not shut down");
+    await expect(service.logout(account.id)).rejects.toThrow("operation");
+  });
+
+  it("protects credentials and waits for the redemption helper during shutdown", async () => {
+    const { service, account, backend } = await credited();
+    const started = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<"reset">();
+    backend.consumeResetCredit = () => {
+      started.resolve();
+      return finish.promise;
+    };
+    const first = service.redeemResetCredit(account.id);
+    await started.promise;
+    await expect(service.logout(account.id)).rejects.toThrow("operation");
+    await expect(service.remove(account.id, "retain")).rejects.toThrow("operation");
+    await expect(service.startLogin(account.id)).rejects.toThrow("operation");
+    const queued = service.redeemResetCredit(account.id);
+    const queuedResult = expect(queued).rejects.toThrow("shutting down");
+    let closed = false;
+    const closing = service.close().then(() => {
+      closed = true;
+      return undefined;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(closed).toBe(false);
+    finish.resolve("reset");
+    await first;
+    await queuedResult;
+    await closing;
+    expect(closed).toBe(true);
+  });
+
+  it("does not confirm a reset with a usage probe started before the spend", async () => {
+    const { service, account, backend } = await credited();
+    const started = Promise.withResolvers<void>();
+    const oldReading = Promise.withResolvers<ProviderUsage>();
+    let probes = 0;
+    const freshUsage = await backend.usage();
+    backend.usage = () => {
+      probes++;
+      if (probes === 1) {
+        started.resolve();
+        return oldReading.promise;
+      }
+      return Promise.resolve(freshUsage);
+    };
+    const before = service.usage(account.id);
+    await started.promise;
+    const spend = service.redeemResetCredit(account.id);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    oldReading.resolve({
+      ...freshUsage,
+      windows: [{ id: "weekly", label: "Weekly", usedPct: 100 }],
+    });
+    await before;
+    expect(await spend).toEqual({ outcome: "reset", confirmed: true });
+    expect(probes).toBe(2);
+    expect(service.usageSnapshot(account.id).usage.windows).toEqual(freshUsage.windows);
+  });
+
   it("serializes concurrent redemptions so one credit cannot be spent twice", async () => {
-    const { service, account, keys, outcomes } = await credited();
+    const { service, account, keys, outcomes, started } = await credited();
     let release!: () => void;
     const gate = new Promise<"reset">((resolve) => {
       release = () => resolve("reset");
@@ -1384,8 +1579,7 @@ describe("reset credits", () => {
     outcomes.push(gate, "reset");
     const first = service.redeemResetCredit(account.id);
     const second = service.redeemResetCredit(account.id);
-    await Promise.resolve();
-    await Promise.resolve();
+    await started.promise;
     expect(keys).toHaveLength(1);
     release();
     await Promise.all([first, second]);
@@ -1437,6 +1631,34 @@ describe("reset credits", () => {
 });
 
 describe("live usage updates", () => {
+  it("does not extend the complete probe lifetime when sparse events arrive", async () => {
+    const { service, add, advance } = await setup();
+    const { account, backend } = await add("sparse-ttl");
+    let probes = 0;
+    backend.usage = async () => {
+      probes++;
+      return ranked([
+        { id: "primary", label: "Session", usedPct: 20, periodMinutes: FIVE_HOUR },
+        {
+          id: "secondary",
+          label: "Weekly",
+          usedPct: probes === 1 ? 30 : 100,
+          periodMinutes: SEVEN_DAY,
+        },
+      ]);
+    };
+    await service.usage(account.id);
+    advance(4 * 60_000);
+    service.applyLiveUsage(account.id, { primary: { usedPercent: 25 } });
+    await service.usage(account.id);
+    expect(probes).toBe(1);
+    advance(2 * 60_000);
+    service.applyLiveUsage(account.id, { primary: { usedPercent: 30 } });
+    expect(service.usageSnapshot(account.id).stale).toBe(true);
+    const reading = await service.usage(account.id);
+    expect(probes).toBe(2);
+    expect(reading.windows[1].usedPct).toBe(100);
+  });
   it("seeds a partial snapshot from events and still probes for admission", async () => {
     const { service, add } = await setup();
     const { account, backend } = await add("live");
