@@ -3253,6 +3253,7 @@ export class Session {
               ...(msg.profiles !== undefined ? { profiles: msg.profiles } : {}),
               ...(msg.trustLevel !== undefined ? { trustLevel: msg.trustLevel } : {}),
               ...(msg.scope !== undefined ? { scope: msg.scope } : {}),
+              ...(msg.guard !== undefined ? { guard: msg.guard } : {}),
               ...(Object.prototype.hasOwnProperty.call(msg, "usageExpectation")
                 ? { usageExpectation: msg.usageExpectation }
                 : {}),
