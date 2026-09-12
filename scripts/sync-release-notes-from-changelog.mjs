@@ -142,7 +142,7 @@ export function syncReleaseNotes(argv = process.argv.slice(2), deps = {}) {
     "--repo",
     args.repo,
     "--title",
-    `Paseo ${targetTag}`,
+    `Forkeo ${targetTag}`,
     "--notes-file",
     notesPath,
     "--verify-tag",

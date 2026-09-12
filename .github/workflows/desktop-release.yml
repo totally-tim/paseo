@@ -71,7 +71,7 @@ jobs:
             fi
             gh release create "$RELEASE_TAG" \
               --repo "${{ github.repository }}" \
-              --title "Paseo $RELEASE_TAG" \
+              --title "Forkeo $RELEASE_TAG" \
               --notes "" \
               --draft \
               $prerelease_flag || {

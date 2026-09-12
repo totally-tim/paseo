@@ -30,4 +30,4 @@ PASEO_DESKTOP_SMOKE=1 npm run build:desktop -- --mac --arm64 -c.mac.notarize=fal
 
 echo
 echo "Built $version into packages/desktop/release/. Check the bundle before installing:"
-echo "  grep owner packages/desktop/release/mac-arm64/Paseo.app/Contents/Resources/app-update.yml"
+echo "  grep owner packages/desktop/release/mac-arm64/Forkeo.app/Contents/Resources/app-update.yml"

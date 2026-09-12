@@ -66,7 +66,7 @@ function resolveSecretFile(params) {
 
 const variants = {
   production: {
-    name: "Paseo",
+    name: "Forkeo",
     packageId: "dev.svpg.paseo",
     googleServicesFile: resolveSecretFile({
       envKey: "GOOGLE_SERVICES_FILE_PROD",
@@ -78,7 +78,7 @@ const variants = {
     }),
   },
   development: {
-    name: "Paseo Debug",
+    name: "Forkeo Debug",
     packageId: "dev.svpg.paseo.debug",
     googleServicesFile: resolveSecretFile({
       envKey: "GOOGLE_SERVICES_FILE_DEBUG",

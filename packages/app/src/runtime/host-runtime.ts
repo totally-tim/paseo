@@ -1277,7 +1277,7 @@ export class HostRuntimeController {
     };
     const requireAppHost = () => {
       if (client.getLastServerInfoMessage()?.features?.ownedSubscriptions !== true)
-        throw new Error("Update the host to use this version of Paseo.");
+        throw new Error("Update the host to use this version of Forkeo.");
     };
     try {
       if (!existingClient) await client.connect();

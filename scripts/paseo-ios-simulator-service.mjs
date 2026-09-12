@@ -6,7 +6,7 @@ import { spawn, spawnSync } from "node:child_process";
 
 const rootDir = resolvePath(import.meta.dirname, "..");
 const appDir = join(rootDir, "packages/app");
-const appProductName = "PaseoDebug";
+const appProductName = "ForkeoDebug";
 const appScheme = "paseo";
 const preferredSimulatorType = process.env.PASEO_IOS_DEVICE_TYPE || "iPhone 16 Pro";
 const paseoPort = requiredEnv("PASEO_PORT");
@@ -14,7 +14,7 @@ const worktreePath = process.env.PASEO_WORKTREE_PATH || rootDir;
 const worktreeName = process.env.PASEO_BRANCH_NAME || basename(worktreePath);
 const worktreeHash = createHash("sha1").update(worktreePath).digest("hex").slice(0, 8);
 const simulatorName =
-  process.env.PASEO_IOS_SIMULATOR_NAME || `Paseo ${worktreeName} ${worktreeHash}`;
+  process.env.PASEO_IOS_SIMULATOR_NAME || `Forkeo ${worktreeName} ${worktreeHash}`;
 const daemonEndpoint =
   process.env.PASEO_DEV_DAEMON_ENDPOINT ||
   `localhost:${process.env.PASEO_SERVICE_DAEMON_PORT || "6768"}`;
