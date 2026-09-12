@@ -24,6 +24,14 @@ sync PR and remove its line here.
 | In-app changelog reads the fork repository                       | `packages/app/src/changelog/internal/changelog-source.ts`                                                                                                                                                                                                                               | Upstream fetches `getpaseo/paseo` CHANGELOG.md, which would show upstream release notes inside fork builds                                                                                                                      |
 | Agent-spawned `paseo run` isolation                              | `packages/cli/src/commands/agent/run.ts`, `packages/server/src/server/agent/tools/paseo-tools.ts`, `packages/server/src/server/test-utils/session-stubs.ts`, `public-docs/cli.md`, `public-docs/mcp.md`                                                                                 | Stderr notice when a spawned run shares the caller checkout, and `PASEO_AGENT_SPAWN_ISOLATION=worktree` to default spawned runs to a managed worktree, on both `paseo run` and the `create_agent` tool. Candidate for upstream. |
 | Fork identity: feed owner, drift check, this doc, the fork skill | `packages/desktop/electron-builder.yml`, `.github/workflows/fork-upstream-drift.yml`, `scripts/fork/`, `docs/fork.md`, `.agents/skills/fork`                                                                                                                                            | Only meaningful on the fork                                                                                                                                                                                                     |
+| Product display name Forkeo                                      | `packages/app/app.config.js`, `packages/desktop/electron-builder.yml`, `packages/desktop/src/main.ts`, `packages/desktop/bin/paseo`, `packages/cli/src/commands/open.ts`, `packages/app/src/i18n/resources`                                                                             | The fork ships its own app name; every internal identifier stays paseo so upstream merges keep working                                                                                                                          |
+| Forkeo icon assets and glyph                                     | `packages/app/assets/images`, `packages/app/public`, `packages/desktop/assets`, `packages/app/src/components/icons/paseo-logo.tsx`, `scripts/fork/generate-icons.mjs`                                                                                                                   | Shared `forkeo-glyph.json` defines the open f-shaped fork; regenerate everything with `node scripts/fork/generate-icons.mjs`                                                                                                    |
+
+The app presents as Forkeo; the internals stay paseo. `appId`, the iOS bundle id
+(`dev.svpg.paseo`), `PASEO_HOME`, the `paseo` CLI, the `paseo://` schemes, the `@getpaseo`
+package scope, and translation keys are unchanged. Visible app copy uses Forkeo.
+`main.ts` pins `userData` to `~/Library/Application Support/Paseo` so existing profiles carry
+over. Keep the persisted identifiers stable so existing profiles and links survive the rename.
 
 Project groups cannot be a plugin. The plugin API contributes native surfaces, sidebar items,
 workspace panels, Command Center items, slash commands, composer pills, attachment sources,
@@ -171,13 +179,16 @@ is downloadable by anyone who finds it.
 scripts/fork/build-desktop.sh 1.0.1
 ```
 
-The artifacts land in `packages/desktop/release/`. To install, quit Paseo first and wait for port
-6767 to go quiet. The desktop settings ship `daemon.keepRunningAfterQuit: false`, so quitting
-stops the daemon and kills every agent it manages. Remove the existing `/Applications/Paseo.app`
-before copying the new one in, because of the shared settings profile below.
+The artifacts land in `packages/desktop/release/`. To install, quit Forkeo first and wait for
+port 6767 to go quiet. The desktop settings ship `daemon.keepRunningAfterQuit: false`, so
+quitting stops the daemon and kills every agent it manages. Remove the existing
+`/Applications/Paseo.app` or `/Applications/Forkeo.app` before copying the new one in, because
+of the shared settings profile below.
 
 Confirm the swap took: `paseo daemon status` reports the fork version for both `CLI` and
 `Daemon Version`. The CLI shim at `~/.local/bin/paseo` resolves into the installed app bundle.
+A shim installed while `Paseo.app` was the bundle path dangles after the swap; reinstall the
+CLI from the app's integrations settings to repoint it at `Forkeo.app`.
 
 A locally built app carries no quarantine flag and launches even though `spctl` rejects it as
 "Unnotarized Developer ID". A teammate who downloads a DMG in a browser gets the quarantine flag
