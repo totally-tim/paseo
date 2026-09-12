@@ -1,7 +1,10 @@
 import { AgentContinuationService } from "./agent-continuation/service.js";
 import { AgentContinuationStore } from "./agent-continuation/store.js";
 import { AccountProviderSchema } from "@getpaseo/protocol/provider-accounts";
-import { ProviderAccountStore } from "./provider-accounts/account-store.js";
+import {
+  ProviderAccountStore,
+  type ProviderAccountStoreOptions,
+} from "./provider-accounts/account-store.js";
 import { ProviderAccountService } from "./provider-accounts/account-service.js";
 import { createAccountBackend } from "./provider-accounts/provider-backends.js";
 import { describeHookWorkspace } from "./plugins/lifecycle/index.js";
@@ -481,6 +484,7 @@ export interface PaseoDaemon {
 export interface PaseoDaemonDependencies {
   accountBackend?: ConstructorParameters<typeof ProviderAccountService>[1];
   accountClient?: NonNullable<ConstructorParameters<typeof AgentManager>[0]["createAccountClient"]>;
+  accountStoreOptions?: ProviderAccountStoreOptions;
   hubRelationshipRemote?: HubRelationshipRemote;
   hubRelationshipClock?: HubRelationshipClock;
   hubRelationshipRetryPolicy?: HubRelationshipRetryPolicy;
@@ -928,7 +932,10 @@ export async function createPaseoDaemon(
   });
   const initialAgentManagerState = providerSnapshotManager.getAgentManagerProviderState();
   const providerAccounts = new ProviderAccountService(
-    new ProviderAccountStore(config.paseoHome),
+    new ProviderAccountStore(config.paseoHome, {
+      logger,
+      ...dependencies.accountStoreOptions,
+    }),
     (account, context) =>
       dependencies.accountBackend
         ? dependencies.accountBackend(account, context)

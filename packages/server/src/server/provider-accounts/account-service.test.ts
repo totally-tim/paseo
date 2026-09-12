@@ -62,7 +62,11 @@ afterEach(async () => {
 
 async function setup() {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-account-test-"));
-  const store = new ProviderAccountStore(directory);
+  const hostConfigDir = path.join(directory, "host-config");
+  await fs.mkdir(hostConfigDir);
+  const store = new ProviderAccountStore(directory, {
+    resolveHostConfigDir: () => hostConfigDir,
+  });
   const backends = new Map<string, TestAccountBackend>();
   let now = Date.parse("2026-09-05T00:00:00Z");
   const service = new ProviderAccountService(
@@ -95,6 +99,7 @@ async function setup() {
     service,
     store,
     directory,
+    hostConfigDir,
     backends,
     add,
     advance: (ms: number) => {
@@ -201,15 +206,18 @@ it("waits for in-flight identity inspection before closing the account store", a
 
 describe("provider accounts", () => {
   it("persists only metadata with private permissions and stable directories", async () => {
-    const { add, store, directory } = await setup();
+    const { add, store, directory, hostConfigDir } = await setup();
     const { account } = await add("a", "claude");
     const context = store.context(account.id);
-    const restored = new ProviderAccountStore(directory);
+    const restored = new ProviderAccountStore(directory, {
+      resolveHostConfigDir: () => hostConfigDir,
+    });
     await restored.initialize();
     expect(restored.get(account.id)).toEqual(account);
     expect(restored.context(account.id)).toEqual(context);
     expect((await fs.stat(store.directory)).mode & 0o777).toBe(0o700);
     expect((await fs.stat(path.join(store.directory, "accounts.json"))).mode & 0o777).toBe(0o600);
+    // The host config dir is empty here, so the shared user layer links nothing in.
     expect(await fs.readdir(context!.configDir)).toEqual([]);
   });
 
@@ -710,7 +718,11 @@ it("keeps unreadable account metadata and refuses to replace it", async () => {
       .catch(() => undefined);
     await fs.rm(directory, { recursive: true, force: true });
   });
-  const first = new ProviderAccountStore(directory);
+  const hostConfigDir = path.join(directory, "host-config");
+  await fs.mkdir(hostConfigDir);
+  const first = new ProviderAccountStore(directory, {
+    resolveHostConfigDir: () => hostConfigDir,
+  });
   await first.initialize();
   await first.create("codex", "Keep me");
   const file = path.join(directory, "provider-accounts", "accounts.json");
@@ -826,7 +838,7 @@ it("keeps a newly verified account out of automatic selection until setup is sav
 });
 
 it("keeps automatic accounts through a rename, a reorder, an earlier account resetting, and restart", async () => {
-  const { service, add, store, directory, backends } = await setup();
+  const { service, add, store, directory, backends, hostConfigDir } = await setup();
   const a = await add("sticky-a");
   const b = await add("sticky-b");
   const input = {
@@ -867,7 +879,7 @@ it("keeps automatic accounts through a rename, a reorder, an earlier account res
   ]);
   await service.close();
   const restarted = new ProviderAccountService(
-    new ProviderAccountStore(directory),
+    new ProviderAccountStore(directory, { resolveHostConfigDir: () => hostConfigDir }),
     (account) => backends.get(account.id) ?? new TestAccountBackend(),
   );
   cleanups.push(() => restarted.close());

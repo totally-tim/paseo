@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
@@ -33,8 +33,10 @@ async function setup(input: { close?: () => Promise<void>; holdSourceCompletion?
   const sourceEvents: AgentStreamEvent[] = [];
   const starts: Array<{ accountId: string; prompt: string }> = [];
   const emitters = new Map<string, (event: AgentStreamEvent) => void>();
+  const hostConfigDir = path.join(directory, "host-config");
+  await mkdir(hostConfigDir);
   const accounts = new ProviderAccountService(
-    new ProviderAccountStore(directory),
+    new ProviderAccountStore(directory, { resolveHostConfigDir: () => hostConfigDir }),
     (account) => ({
       inspect: async () => ({ key: account.id }),
       login: async () => ({ key: account.id }),
