@@ -9,25 +9,46 @@ import {
   type ProviderAccount,
   type AccountProvider,
 } from "@getpaseo/protocol/provider-accounts";
-import type { ProviderAccountContext } from "../agent/provider-account-context.js";
+import type { Logger } from "pino";
+import {
+  providerConfigDir,
+  type ProviderAccountContext,
+} from "../agent/provider-account-context.js";
+import { ensureProviderAccountUserLayer } from "./user-layer.js";
+
+export interface ProviderAccountStoreOptions {
+  logger?: Logger;
+  /**
+   * Resolves the host config dir the managed home links its user layer from.
+   * Tests inject a temp dir; production defaults to the daemon's environment.
+   */
+  resolveHostConfigDir?: (provider: AccountProvider) => string;
+}
 
 const StoreSchema = z.object({
   accounts: z.array(ProviderAccountSchema),
   policy: AccountPolicySchema.nullable(),
   automaticAccounts: z.record(z.string(), z.string()).optional(),
+  resetCreditKeys: z.record(z.string(), z.string()).optional(),
 });
 
 export class ProviderAccountStore {
   private accounts: ProviderAccount[] = [];
   private policy: AccountPolicy | null = null;
   private automaticAccounts: Record<string, string> = {};
+  private resetCreditKeys: Record<string, string> = {};
   private writeQueue: Promise<unknown> = Promise.resolve();
   /** Set when the metadata on disk must not be replaced; every mutation refuses. */
   private readOnlyReason: string | null = null;
   readonly directory: string;
+  private readonly logger?: Logger;
+  private readonly resolveHostConfigDir: (provider: AccountProvider) => string;
 
-  constructor(paseoHome: string) {
+  constructor(paseoHome: string, options: ProviderAccountStoreOptions = {}) {
     this.directory = path.join(paseoHome, "provider-accounts");
+    this.logger = options.logger;
+    this.resolveHostConfigDir =
+      options.resolveHostConfigDir ?? ((provider) => providerConfigDir(provider, process.env));
   }
 
   async initialize(): Promise<void> {
@@ -49,6 +70,7 @@ export class ProviderAccountStore {
       this.accounts = data.accounts;
       this.policy = data.policy;
       this.automaticAccounts = data.automaticAccounts ?? {};
+      this.resetCreditKeys = data.resetCreditKeys ?? {};
     } catch {
       // Truncated bytes, or a file a newer daemon wrote, must not stop this one from starting.
       // Keep them for inspection; the accounts are re-added rather than silently overwritten.
@@ -88,12 +110,43 @@ export class ProviderAccountStore {
     });
   }
 
+  /** Persist before contacting the provider; a restart must retry the same spend. */
+  async resetCreditKey(accountId: string): Promise<string> {
+    return this.serialize(async () => {
+      this.get(accountId);
+      const existing = this.resetCreditKeys[accountId];
+      if (existing) return existing;
+      const key = randomUUID();
+      const resetCreditKeys = { ...this.resetCreditKeys, [accountId]: key };
+      await this.write({ accounts: this.accounts, policy: this.policy, resetCreditKeys });
+      this.resetCreditKeys = resetCreditKeys;
+      return key;
+    });
+  }
+
+  async completeResetCredit(accountId: string, key: string): Promise<void> {
+    await this.serialize(async () => {
+      if (this.resetCreditKeys[accountId] !== key) return;
+      const resetCreditKeys = { ...this.resetCreditKeys };
+      delete resetCreditKeys[accountId];
+      await this.write({ accounts: this.accounts, policy: this.policy, resetCreditKeys });
+      this.resetCreditKeys = resetCreditKeys;
+    });
+  }
+
   context(id: string): ProviderAccountContext | undefined {
     const account = this.get(id);
     if (account.ownership === "external") return undefined;
     // IDs originate here, never from paths supplied by a client.
     if (!/^[a-f0-9-]{36}$/.test(account.id)) throw new Error("Invalid managed account ID");
-    return { accountId: id, provider: account.provider, configDir: path.join(this.directory, id) };
+    const configDir = path.join(this.directory, id);
+    ensureProviderAccountUserLayer({
+      provider: account.provider,
+      accountDir: configDir,
+      hostConfigDir: this.resolveHostConfigDir(account.provider),
+      logger: this.logger,
+    });
+    return { accountId: id, provider: account.provider, configDir };
   }
 
   async create(provider: AccountProvider, label: string): Promise<ProviderAccount> {
@@ -112,6 +165,12 @@ export class ProviderAccountStore {
       updatedAt: now,
     });
     await fs.mkdir(path.join(this.directory, account.id), { mode: 0o700 });
+    ensureProviderAccountUserLayer({
+      provider: account.provider,
+      accountDir: path.join(this.directory, account.id),
+      hostConfigDir: this.resolveHostConfigDir(account.provider),
+      logger: this.logger,
+    });
     await this.save(account);
     return account;
   }
@@ -173,7 +232,7 @@ export class ProviderAccountStore {
     });
   }
 
-  private serialize(work: () => Promise<void>): Promise<void> {
+  private serialize<T>(work: () => Promise<T>): Promise<T> {
     const next = this.writeQueue.then(work, work);
     this.writeQueue = next.catch(() => undefined);
     return next;
@@ -190,7 +249,11 @@ export class ProviderAccountStore {
       await fs.writeFile(
         temporary,
         JSON.stringify(
-          { ...data, automaticAccounts: data.automaticAccounts ?? this.automaticAccounts },
+          {
+            ...data,
+            automaticAccounts: data.automaticAccounts ?? this.automaticAccounts,
+            resetCreditKeys: data.resetCreditKeys ?? this.resetCreditKeys,
+          },
           null,
           2,
         ),

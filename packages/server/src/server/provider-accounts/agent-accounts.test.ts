@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -25,7 +25,11 @@ afterEach(async () => {
 async function setup(usedPct = 10) {
   const directory = await mkdtemp(path.join(tmpdir(), "paseo-agent-accounts-"));
   const logger = createTestLogger();
-  const store = new ProviderAccountStore(directory);
+  const hostConfigDir = path.join(directory, "host-config");
+  await mkdir(hostConfigDir);
+  const store = new ProviderAccountStore(directory, {
+    resolveHostConfigDir: () => hostConfigDir,
+  });
   /** Per-account windows, for tests that need the accounts to rank differently. */
   const windowsByLabel = new Map<string, ProviderUsage["windows"]>();
   let now = Date.parse("2026-09-05T00:00:00Z");

@@ -2433,6 +2433,7 @@ type ParsedCodexNotification =
     }
   | { kind: "diff_updated"; diff: string; threadId: string | null }
   | { kind: "token_usage_updated"; tokenUsage: unknown; threadId: string | null }
+  | { kind: "account_rate_limits"; snapshot: unknown }
   | { kind: "agent_message_delta"; itemId: string; delta: string; threadId: string | null }
   | { kind: "reasoning_delta"; itemId: string; delta: string; threadId: string | null }
   | {
@@ -2635,6 +2636,25 @@ const CodexNotificationSchema = z.union([
       }),
     ),
   z.object({ method: z.literal("thread/tokenUsage/updated"), params: z.unknown() }).transform(
+    ({ method, params }): ParsedCodexNotification => ({
+      kind: "invalid_payload",
+      method,
+      params,
+    }),
+  ),
+  z
+    .object({
+      method: z.literal("account/rateLimits/updated"),
+      // The account service validates the snapshot itself; here it only needs to be present.
+      params: z.object({ rateLimits: z.unknown() }).loose(),
+    })
+    .transform(
+      ({ params }): ParsedCodexNotification => ({
+        kind: "account_rate_limits",
+        snapshot: params.rateLimits,
+      }),
+    ),
+  z.object({ method: z.literal("account/rateLimits/updated"), params: z.unknown() }).transform(
     ({ method, params }): ParsedCodexNotification => ({
       kind: "invalid_payload",
       method,
@@ -5308,6 +5328,13 @@ export class CodexAppServerAgentSession implements AgentSession {
         return;
       case "token_usage_updated":
         this.handleTokenUsageUpdatedNotification(parsed);
+        return;
+      case "account_rate_limits":
+        this.emitEvent({
+          type: "account_rate_limits",
+          provider: CODEX_PROVIDER,
+          payload: parsed.snapshot,
+        });
         return;
       case "exec_command_started":
         this.handleExecCommandStartedNotification(parsed);

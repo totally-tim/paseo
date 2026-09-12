@@ -1,4 +1,8 @@
-import { getAccountUsageWindows, type ProviderAccount } from "@getpaseo/protocol/provider-accounts";
+import {
+  effectiveCapacityLimit,
+  getAccountUsageWindows,
+  type ProviderAccount,
+} from "@getpaseo/protocol/provider-accounts";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
 
 export function continuationAccountChoices(
@@ -29,7 +33,7 @@ export function activeCapacityLimit(
   model?: string | null,
   now: number = Date.now(),
 ): NonNullable<ProviderAccount["capacityLimit"]> | null {
-  const limit = account.capacityLimit;
+  const limit = effectiveCapacityLimit(account);
   if (!limit) return null;
   if (limit.model && limit.model !== model?.trim()) return null;
   const clearsAt = limit.resetsAt

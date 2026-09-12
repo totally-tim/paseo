@@ -1,4 +1,8 @@
-import type { SessionInboundMessage, SessionOutboundMessage } from "../messages.js";
+import type {
+  ProviderAccountResetCreditOutcome,
+  SessionInboundMessage,
+  SessionOutboundMessage,
+} from "../messages.js";
 import { AccountOperationError, type ProviderAccountService } from "./account-service.js";
 import type { AccountLogin, ProviderAccount } from "@getpaseo/protocol/provider-accounts";
 
@@ -47,6 +51,10 @@ export async function handleAccountOperation(
 ): Promise<void> {
   let account: ProviderAccount | null = null;
   let login: AccountLogin | null = null;
+  let resetCredit: {
+    outcome: ProviderAccountResetCreditOutcome;
+    confirmed: boolean;
+  } | null = null;
   let error: string | null = null;
   try {
     if (!service) throw new Error("Update the host to manage provider accounts.");
@@ -90,6 +98,9 @@ export async function handleAccountOperation(
       case "restore":
         await service.restore(operation.accountId);
         break;
+      case "consume-reset-credit":
+        resetCredit = await service.redeemResetCredit(operation.accountId);
+        break;
       case "reorder":
         await service.reorder(operation.accountIds);
         break;
@@ -107,6 +118,6 @@ export async function handleAccountOperation(
   }
   emit({
     type: "provider.accounts.manage.response",
-    payload: { requestId: request.requestId, error, account, login },
+    payload: { requestId: request.requestId, error, account, login, resetCredit },
   });
 }

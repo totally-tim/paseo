@@ -494,6 +494,16 @@ export type AgentStreamEvent =
       type: "provider_subagent";
       provider: AgentProvider;
       event: import("./provider-subagents/store.js").ProviderSubagentInputEvent;
+    }
+  | {
+      /**
+       * Internal-only account quota event: Codex's `account/rateLimits/updated` snapshot or
+       * Claude's `rate_limit_event` info. Folded into the account usage cache; never becomes
+       * a timeline item or crosses the WebSocket.
+       */
+      type: "account_rate_limits";
+      provider: AgentProvider;
+      payload: unknown;
     };
 
 export function getAgentStreamEventTurnId(event: AgentStreamEvent): string | undefined {
