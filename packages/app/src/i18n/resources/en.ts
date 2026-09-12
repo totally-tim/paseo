@@ -2075,6 +2075,10 @@ export const en = {
       title: "Set up a coordinator",
       providerHint:
         "A coordinator watches this project's workspaces and answers from the board. Claude, Codex, and OpenCode can run coordinators.",
+      profilesHint:
+        "Investigators and implementers run on the coordinator's provider unless you pick another.",
+      investigatorProfile: "Investigator",
+      implementerProfile: "Implementer",
       enable: "Enable",
     },
   },

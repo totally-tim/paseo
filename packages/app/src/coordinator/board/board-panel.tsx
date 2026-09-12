@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -25,6 +25,7 @@ import type { PendingPermission } from "@/types/shared";
 import { buildWorkspaceTabPersistenceKey } from "@/workspace-tabs/model";
 import { openWorkspaceChanges } from "@/workspace-tabs/open-supporting-view";
 import { useCoordinatorBoardSnapshot } from "@/coordinator/board-store";
+import { buildComposerQuoteText } from "@/coordinator/decisions";
 import { lastAssistantLine } from "@/coordinator/timeline-text";
 import { CoordinatorBoard, type CoordinatorBoardHandlers } from "./board";
 
@@ -104,6 +105,9 @@ function CoordinatorBoardPanel() {
     ? buildDraftStoreKey({ serverId, agentId: coordinatorAgentId })
     : `coordinator-board:${serverId}:${projectId}`;
   const draftInput = useAgentInputDraft({ draftKey });
+  // Bumping the composer focus key re-runs its web autofocus, so a Correct-it
+  // answer lands the cursor on the quoted question.
+  const [composerFocusNonce, setComposerFocusNonce] = useState(0);
 
   const workspaceAttachmentScopeKey = useWorkspaceAttachmentScopeKey({
     serverId,
@@ -128,13 +132,24 @@ function CoordinatorBoardPanel() {
     [openTab],
   );
 
+  const quoteQuestionInComposer = useCallback(
+    (question: string) => {
+      const quote = buildComposerQuoteText(question);
+      const existing = draftInput.text.trim();
+      draftInput.replaceText(existing ? `${existing}\n\n${quote}` : quote);
+      setComposerFocusNonce((nonce) => nonce + 1);
+    },
+    [draftInput],
+  );
+
   const handlers = useMemo<CoordinatorBoardHandlers>(
     () => ({
       onOpenChat: openChat,
       onOpenAgent: openAgent,
       onOpenFile: openFileInWorkspace,
+      onComposerQuote: quoteQuestionInComposer,
     }),
-    [openAgent, openChat, openFileInWorkspace],
+    [openAgent, openChat, openFileInWorkspace, quoteQuestionInComposer],
   );
 
   const handleOpenWorkspaceAttachment = useCallback(
@@ -196,7 +211,7 @@ function CoordinatorBoardPanel() {
                 cwd={cwd}
                 clearDraft={draftInput.clear}
                 autoFocus
-                autoFocusKey={String(draftInput.attachmentFocusRequestId)}
+                autoFocusKey={`${draftInput.attachmentFocusRequestId}:${composerFocusNonce}`}
                 placeholder={t("coordinator.board.composerPlaceholder")}
                 isCompactLayout={isCompactComposerLayout}
                 submitButtonTestID="coordinator-board-send"
