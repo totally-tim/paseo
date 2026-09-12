@@ -62,12 +62,21 @@ describe("assertCoordinatorToolAllowed", () => {
       "get_agent_status",
       "get_agent_activity",
       "list_pending_permissions",
-      "capture_terminal",
+      "list_terminals",
       "inspect_schedule",
       "remember",
     ]) {
       expect(() => assertCoordinatorToolAllowed(coordinator, tool)).not.toThrow();
     }
+  });
+
+  test("observe coordinators may list terminals but not capture output", () => {
+    // Listing is live metadata; capture reads agent output — a covered session's
+    // transcript content is not observational at Observe.
+    expect(() => assertCoordinatorToolAllowed(coordinator, "list_terminals")).not.toThrow();
+    expect(() => assertCoordinatorToolAllowed(coordinator, "capture_terminal")).toThrow(
+      /not available/,
+    );
   });
 
   test("observe coordinators may not spawn, mutate, or answer", () => {

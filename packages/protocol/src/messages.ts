@@ -3504,6 +3504,7 @@ export const CoordinatorBoardSnapshotSchema = z.object({
   scope: CoordinatorScopeSchema,
   enabled: z.boolean(),
   /** This month's spawn and token actuals; feeds the trust-pill meter. */
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-12 once daemon floor >= v0.8.0.
   usage: CoordinatorUsageSchema.optional(),
 });
 export type CoordinatorBoardSnapshot = z.infer<typeof CoordinatorBoardSnapshotSchema>;
@@ -3521,6 +3522,7 @@ export const ProjectCoordinatorStateSchema = z.object({
   profiles: CoordinatorProfilesSchema.optional(),
   usageExpectation: CoordinatorUsageExpectationSchema.optional(),
   /** Hard spawn limits; daemon defaults 8 concurrent, depth 2. */
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-12 once daemon floor >= v0.8.0.
   guard: CoordinatorGuardSchema.optional(),
 });
 export type ProjectCoordinatorState = z.infer<typeof ProjectCoordinatorStateSchema>;
@@ -3558,6 +3560,7 @@ export const CoordinatorProjectUpdateRequestSchema = z.object({
   /** Null clears the expectation. */
   usageExpectation: CoordinatorUsageExpectationSchema.nullable().optional(),
   /** Partial guard override; absent keys keep daemon defaults. */
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-12 once daemon floor >= v0.8.0.
   guard: CoordinatorGuardSchema.optional(),
 });
 export type CoordinatorProjectUpdateRequest = z.infer<typeof CoordinatorProjectUpdateRequestSchema>;
@@ -3573,6 +3576,7 @@ const CoordinatorProjectStateResultSchema = z.object({
   requestId: z.string(),
   coordinator: ProjectCoordinatorStateSchema.nullable(),
   /** False when the project repository has no CI config; drives the setup-sheet note. */
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-12 once daemon floor >= v0.8.0.
   ciConfigured: z.boolean().optional(),
   error: z.string().nullable(),
 });

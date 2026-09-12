@@ -167,15 +167,18 @@ export interface PaseoToolHostDependencies {
   coordinator?: {
     remember(input: CoordinatorRememberInput): Promise<CoordinatorRememberResult>;
     /**
-     * Reviewer gate for coordinator-opened change requests. The service
-     * resolves the reviewer through its own agent registry, verifies it is a
-     * reviewer-kind subagent of the caller that finished at least one turn, and
-     * throws an actionable error when the review requirement is unmet. Optional
-     * while the service-side method lands separately; `create_change_request`
-     * enforces the same checks locally either way, so a missing bridge never
-     * skips the gate.
+     * Change-request writes stay with the coordinator: delegated subagents in
+     * its tree are denied (they report upward; the coordinator posts under its
+     * trust level and reviewer gate). No-op for ungoverned callers.
      */
-    assertReviewerGate?(callerAgentId: string, reviewerAgentId: string): Promise<void>;
+    assertForgeWriteAllowed(callerAgentId: string): Promise<void>;
+    /**
+     * Reviewer gate for coordinator-opened change requests. The service
+     * resolves the reviewer through live agents and stored records, verifies
+     * it is a reviewer-kind subagent of the caller that finished a turn, and
+     * throws an actionable error when the review requirement is unmet.
+     */
+    assertReviewerGate(callerAgentId: string, reviewerAgentId: string): Promise<void>;
     /** Read-only spawn precheck; run before any workspace or worktree is minted. */
     assertSpawnAllowed(input: CoordinatorSpawnGateInput): Promise<CoordinatorSpawnDecision | null>;
     /** Serialized check + create per coordinator; the decision merges into create options. */
@@ -595,18 +598,23 @@ function resolveChildAgentCwd(params: {
  * prompted" and mid-review agents both fail. Runs before any forge call so a
  * denied request never creates a pull request.
  */
-function assertChangeRequestReviewer(params: {
-  callerAgentId: string;
-  reviewerAgentId: string | undefined;
-  agentManager: AgentManager;
-}): string {
-  const reviewerAgentId = params.reviewerAgentId?.trim();
-  if (!reviewerAgentId) {
+function requireChangeRequestReviewerId(reviewerAgentId: string | undefined): string {
+  const trimmed = reviewerAgentId?.trim();
+  if (!trimmed) {
     throw new Error(
       "create_change_request requires reviewerAgentId for coordinator callers — " +
         "spawn a reviewer subagent, let it finish its review turn, then pass its agent id",
     );
   }
+  return trimmed;
+}
+
+function assertChangeRequestReviewer(params: {
+  callerAgentId: string;
+  reviewerAgentId: string;
+  agentManager: AgentManager;
+}): string {
+  const reviewerAgentId = params.reviewerAgentId;
   const reviewer = params.agentManager.getAgent(reviewerAgentId);
   if (!reviewer) {
     throw new Error(`Reviewer agent ${reviewerAgentId} not found`);
@@ -3838,15 +3846,26 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     },
     async ({ cwd, workspaceId, title, body, head, base, reviewerAgentId }) => {
       const callerAgent = callerAgentId ? agentManager.getAgent(callerAgentId) : null;
-      if (callerAgent && isCoordinatorAgent(callerAgent)) {
-        const verifiedReviewerId = assertChangeRequestReviewer({
-          callerAgentId: callerAgent.id,
-          reviewerAgentId,
-          agentManager,
-        });
-        await options.coordinator?.assertReviewerGate?.(callerAgent.id, verifiedReviewerId);
-      }
       const repoCwd = await resolveForgeActionCwd({ cwd, workspaceId });
+      // Forge writes are coordinator authority inside a governed tree — a
+      // delegated caller is denied before any forge call, and the resolved
+      // cwd must sit under the caller's own checkout.
+      if (callerAgentId) await options.coordinator?.assertForgeWriteAllowed(callerAgentId);
+      await assertScopedCwdAllowed(repoCwd);
+      if (callerAgent && isCoordinatorAgent(callerAgent)) {
+        const verifiedReviewerId = requireChangeRequestReviewerId(reviewerAgentId);
+        if (options.coordinator) {
+          // The service gate resolves stored records too, so a reviewer that
+          // finished and unloaded across a daemon restart still counts.
+          await options.coordinator.assertReviewerGate(callerAgent.id, verifiedReviewerId);
+        } else {
+          assertChangeRequestReviewer({
+            callerAgentId: callerAgent.id,
+            reviewerAgentId: verifiedReviewerId,
+            agentManager,
+          });
+        }
+      }
       const { service } = await requireForgeResolution(repoCwd);
       const result = await service.createPullRequest({
         cwd: repoCwd,
@@ -3880,6 +3899,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     },
     async ({ cwd, workspaceId, prNumber, body }) => {
       const repoCwd = await resolveForgeActionCwd({ cwd, workspaceId });
+      if (callerAgentId) await options.coordinator?.assertForgeWriteAllowed(callerAgentId);
+      await assertScopedCwdAllowed(repoCwd);
       const { service } = await requireForgeResolution(repoCwd);
       const result = await service.createPullRequestComment({ cwd: repoCwd, prNumber, body });
       return {
@@ -3906,6 +3927,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     },
     async ({ cwd, workspaceId, prNumber }) => {
       const repoCwd = await resolveForgeActionCwd({ cwd, workspaceId });
+      if (callerAgentId) await options.coordinator?.assertForgeWriteAllowed(callerAgentId);
+      await assertScopedCwdAllowed(repoCwd);
       const { service } = await requireForgeResolution(repoCwd);
       const result = await service.retryPullRequestChecks({ cwd: repoCwd, prNumber });
       return {

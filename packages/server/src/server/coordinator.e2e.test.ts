@@ -39,10 +39,11 @@ async function openProject(cwd: string): Promise<{ projectId: string; workspaceI
 }
 
 async function enableCoordinator(projectId: string) {
-  return ctx.client.enableProjectCoordinator({
+  const result = await ctx.client.enableProjectCoordinator({
     projectId,
     profile: { provider: "codex" },
   });
+  return result.coordinator;
 }
 
 function hasWorkingRow(snapshot: CoordinatorBoardSnapshot): boolean {
@@ -90,7 +91,7 @@ describe("project coordinator over the wire", () => {
     expect(state.agentId).not.toBeNull();
 
     const fetched = await ctx.client.getProjectCoordinator(projectId);
-    expect(fetched?.agentId).toBe(state.agentId);
+    expect(fetched.coordinator?.agentId).toBe(state.agentId);
 
     const directory = await ctx.client.fetchAgents({});
     const coordinator = directory.entries.find((entry) => entry.agent.id === state.agentId);
@@ -193,8 +194,8 @@ describe("project coordinator over the wire", () => {
     };
 
     const state = await client.getProjectCoordinator(projectId);
-    expect(state?.enabled).toBe(true);
-    expect(state?.agentId).toBe(enabled.agentId);
+    expect(state.coordinator?.enabled).toBe(true);
+    expect(state.coordinator?.agentId).toBe(enabled.agentId);
 
     // The coordinator record is live in the restarted daemon, not just on disk.
     const directory = await client.fetchAgents({});

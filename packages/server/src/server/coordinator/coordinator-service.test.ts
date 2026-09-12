@@ -304,7 +304,6 @@ type HarnessOptions = Partial<
   Pick<
     CoordinatorServiceDeps,
     | "workspaceGitService"
-    | "readProjectUsage"
     | "changeRequestPollIntervalMs"
     | "stallSweepIntervalMs"
     | "stallThresholdMs"
@@ -2274,7 +2273,6 @@ describe("change request tools", () => {
     callerAgentId?: string;
     forge: ForgeService;
     resolveForge?: "default" | "none";
-    assertReviewerGate?: (callerAgentId: string, reviewerAgentId: string) => Promise<void>;
   }) {
     const workspaceGitService: PaseoToolHostDependencies["workspaceGitService"] = {
       getSnapshot: async () => {
@@ -2297,7 +2295,12 @@ describe("change request tools", () => {
       callerAgentId: input.callerAgentId,
       coordinator: {
         remember: (rememberInput) => harness.service.remember(rememberInput),
-        assertReviewerGate: input.assertReviewerGate,
+        assertForgeWriteAllowed: (callerAgentId) =>
+          harness.service.assertForgeWriteAllowed(callerAgentId),
+        assertReviewerGate: (callerAgentId, reviewerAgentId) =>
+          harness.service.assertReviewerGate(callerAgentId, reviewerAgentId),
+        assertScopedCwdAllowed: (callerAgentId, cwd) =>
+          harness.service.assertScopedCwdAllowed(callerAgentId, cwd),
       },
       logger,
     });
@@ -2416,7 +2419,7 @@ describe("change request tools", () => {
     expect(calls).toHaveLength(0);
   });
 
-  test("a finished reviewer-kind child opens the change request and triggers the bridge", async () => {
+  test("a finished reviewer-kind child opens the change request through the service gate", async () => {
     const state = await harness.service.enableProjectCoordinator(enableInput());
     const reviewer = await createReviewer(state.agentId!, { kind: "reviewer" });
     await harness.agentManager.runAgent(reviewer.id, "review the diff", {
@@ -2425,12 +2428,7 @@ describe("change request tools", () => {
     expect(harness.agentManager.getAgent(reviewer.id)?.lifecycle).toBe("idle");
 
     const { service, calls } = createForgeStub();
-    const assertReviewerGate = vi.fn(async () => {});
-    const catalog = forgeCatalog({
-      callerAgentId: state.agentId!,
-      forge: service,
-      assertReviewerGate,
-    });
+    const catalog = forgeCatalog({ callerAgentId: state.agentId!, forge: service });
     const tool = catalog.getTool("create_change_request")!;
 
     const result = await tool.handler(changeRequestInput(reviewer.id), {});
@@ -2451,29 +2449,93 @@ describe("change request tools", () => {
         },
       },
     ]);
-    expect(assertReviewerGate).toHaveBeenCalledWith(state.agentId!, reviewer.id);
   });
 
-  test("a bridge denial still blocks the forge call after local checks pass", async () => {
+  test("a reviewer that finished and unloaded still passes the gate via stored state", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    // A reviewer record that exists in storage but is not live in the manager —
+    // the post-restart shape: its finished turn must still satisfy the gate.
+    const reviewerId = randomUUID();
+    await harness.agentStorage.upsert({
+      id: reviewerId,
+      provider: "codex",
+      cwd: harness.projectDir,
+      workspaceId: harness.workspace.workspaceId,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      lastUserMessageAt: new Date().toISOString(),
+      lastStatus: "idle",
+      labels: {
+        [PARENT_AGENT_ID_LABEL]: state.agentId!,
+        [COORDINATOR_SUBAGENT_KIND_LABEL]: "reviewer",
+      },
+      config: null,
+      persistence: null,
+    });
+    expect(harness.agentManager.getAgent(reviewerId)).toBeNull();
+
+    const { service, calls } = createForgeStub();
+    const catalog = forgeCatalog({ callerAgentId: state.agentId!, forge: service });
+    const tool = catalog.getTool("create_change_request")!;
+
+    const result = await tool.handler(changeRequestInput(reviewerId), {});
+
+    expect(result.structuredContent).toMatchObject({ number: 9 });
+    expect(calls).toHaveLength(1);
+  });
+
+  test("a delegated subagent cannot open, comment on, or retry a change request", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    const delegate = await createReviewer(state.agentId!, { kind: "implementer" });
+    await harness.agentManager.runAgent(delegate.id, "do the work", {
+      clientMessageId: `msg-${randomUUID()}`,
+    });
+
+    const { service, calls } = createForgeStub();
+    const catalog = forgeCatalog({ callerAgentId: delegate.id, forge: service });
+
+    for (const toolName of [
+      "create_change_request",
+      "comment_on_change_request",
+      "retry_change_request_checks",
+    ]) {
+      const tool = catalog.getTool(toolName)!;
+      const input =
+        toolName === "create_change_request"
+          ? changeRequestInput(delegate.id)
+          : {
+              cwd: harness.projectDir,
+              prNumber: 9,
+              ...(toolName === "comment_on_change_request" ? { body: "x" } : {}),
+            };
+      await expect(tool.handler(input, {})).rejects.toThrow(/stay with the coordinator/);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  test("a governed caller cannot aim forge tools at a checkout outside its cwd", async () => {
     const state = await harness.service.enableProjectCoordinator(enableInput());
     const reviewer = await createReviewer(state.agentId!, { kind: "reviewer" });
     await harness.agentManager.runAgent(reviewer.id, "review the diff", {
       clientMessageId: `msg-${randomUUID()}`,
     });
+    const foreignDir = mkdtempSync(path.join(tmpdir(), "foreign-repo-"));
 
     const { service, calls } = createForgeStub();
-    const catalog = forgeCatalog({
-      callerAgentId: state.agentId!,
-      forge: service,
-      assertReviewerGate: async () => {
-        throw new Error("reviewer gate denied by the coordinator service");
-      },
-    });
+    const catalog = forgeCatalog({ callerAgentId: state.agentId!, forge: service });
     const tool = catalog.getTool("create_change_request")!;
 
-    await expect(tool.handler(changeRequestInput(reviewer.id), {})).rejects.toThrow(
-      /coordinator service/,
-    );
+    await expect(
+      tool.handler(
+        {
+          cwd: foreignDir,
+          title: "Ship it",
+          head: "impl/feature",
+          reviewerAgentId: reviewer.id,
+        },
+        {},
+      ),
+    ).rejects.toThrow(/own working directory/);
     expect(calls).toHaveLength(0);
   });
 

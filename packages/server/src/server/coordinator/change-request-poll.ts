@@ -13,7 +13,7 @@ import type {
 import { writeJsonFileAtomic } from "../atomic-file.js";
 import type { WorkspaceGitService } from "../workspace-git-service.js";
 
-const OPEN_PULL_REQUEST_LIMIT = 50;
+export const OPEN_PULL_REQUEST_LIMIT = 50;
 const DEFAULT_INTERVAL_MS = 120_000;
 const MAX_BACKOFF_MULTIPLIER = 16;
 const POLL_READ_REASON = "coordinator-change-request-poll";
@@ -41,6 +41,12 @@ const ChangeRequestSnapshotSchema = z.object({
   fetchedAt: z.string(),
   forge: z.string(),
   entries: z.array(ChangeRequestEntrySchema),
+  /**
+   * True when the forge list hit OPEN_PULL_REQUEST_LIMIT — the tail is unseen,
+   * so "no longer open" diffs against it may be phantoms and the count is a
+   * floor, not a total.
+   */
+  truncated: z.boolean().optional(),
 });
 
 const PersistedPollStateSchema = z.object({
@@ -143,7 +149,13 @@ function normalizedEntries(snapshot: ChangeRequestSnapshot): ChangeRequestEntry[
 /** Everything the hash covers, in a fixed shape and order. */
 export function hashChangeRequestSnapshot(snapshot: ChangeRequestSnapshot): string {
   return createHash("sha256")
-    .update(JSON.stringify({ forge: snapshot.forge, entries: normalizedEntries(snapshot) }))
+    .update(
+      JSON.stringify({
+        forge: snapshot.forge,
+        entries: normalizedEntries(snapshot),
+        truncated: snapshot.truncated === true,
+      }),
+    )
     .digest("hex");
 }
 
@@ -228,6 +240,12 @@ export function diffChangeRequestSnapshots(
     if (!nextNumbers.has(before.number)) {
       lines.push(`#${before.number} is no longer open (${before.state}: ${before.title})`);
     }
+  }
+  if (next.truncated) {
+    lines.push(
+      `(the open list hit the ${OPEN_PULL_REQUEST_LIMIT}-request cap — the tail is unseen, so ` +
+        "closures above may be truncation, not real)",
+    );
   }
   return lines.join("\n");
 }
@@ -403,6 +421,7 @@ export class ChangeRequestPoll {
       fetchedAt: new Date(this.now()).toISOString(),
       forge: resolution.forge,
       entries: entries.sort((a, b) => a.number - b.number),
+      ...(pullRequests.length >= OPEN_PULL_REQUEST_LIMIT ? { truncated: true } : {}),
     };
   }
 

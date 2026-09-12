@@ -57,7 +57,6 @@ const OBSERVE_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   "list_pending_permissions",
   "list_workspace_scripts",
   "list_terminals",
-  "capture_terminal",
   "list_schedules",
   "inspect_schedule",
   "schedule_logs",
