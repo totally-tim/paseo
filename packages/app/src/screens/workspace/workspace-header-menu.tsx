@@ -7,6 +7,7 @@ import {
   Ellipsis,
   Globe,
   Import as ImportIcon,
+  MessagesSquare,
   Settings,
   SquarePen,
 } from "lucide-react-native";
@@ -40,6 +41,7 @@ const ThemedSquarePen = withUnistyles(SquarePen);
 const ThemedGlobe = withUnistyles(Globe);
 const ThemedImport = withUnistyles(ImportIcon);
 const ThemedSettings = withUnistyles(Settings);
+const ThemedMessagesSquare = withUnistyles(MessagesSquare);
 
 const mutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
@@ -49,6 +51,7 @@ const MENU_NEW_TERMINAL_ICON = <TerminalProfileIcon iconKey={undefined} size={16
 const MENU_IMPORT_ICON = <ThemedImport size={16} uniProps={mutedColorMapping} />;
 const MENU_COPY_ICON = <ThemedCopy size={16} uniProps={mutedColorMapping} />;
 const MENU_SETTINGS_ICON = <ThemedSettings size={16} uniProps={mutedColorMapping} />;
+const MENU_COORDINATOR_CHAT_ICON = <ThemedMessagesSquare size={16} uniProps={mutedColorMapping} />;
 function WorkspaceHeaderMenuTriggerIcon() {
   return (
     <ThemedEllipsis
@@ -203,6 +206,9 @@ export interface WorkspaceHeaderMenuMobileProps extends WorkspaceHeaderWorkspace
   normalizedServerId: string;
   showCreateBrowserTab: boolean;
   createTerminalDisabled: boolean;
+  /** The project coordinator session, when one is running — unlocks the chat item. */
+  coordinatorAgentId: string | null;
+  onOpenCoordinatorChat: () => void;
   onCreateDraftTab: () => void;
   onCreateTerminal: () => void;
   onCreateTerminalWithProfile: (profile: TerminalProfile) => void;
@@ -217,6 +223,8 @@ export function WorkspaceHeaderMenuMobile({
   normalizedServerId,
   showCreateBrowserTab,
   createTerminalDisabled,
+  coordinatorAgentId,
+  onOpenCoordinatorChat,
   onCreateDraftTab,
   onCreateTerminal,
   onCreateTerminalWithProfile,
@@ -266,6 +274,15 @@ export function WorkspaceHeaderMenuMobile({
             onSelect={onCreateBrowser}
           >
             {t("workspace.header.actions.newBrowser")}
+          </DropdownMenuItem>
+        ) : null}
+        {coordinatorAgentId ? (
+          <DropdownMenuItem
+            testID="workspace-header-open-coordinator-chat"
+            leading={MENU_COORDINATOR_CHAT_ICON}
+            onSelect={onOpenCoordinatorChat}
+          >
+            {t("coordinator.board.openChat")}
           </DropdownMenuItem>
         ) : null}
         <WorkspaceHeaderWorkspaceActionItems {...workspaceActions} />

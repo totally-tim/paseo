@@ -110,3 +110,51 @@ test("pane retargeting replaces the viewed agent and duplicate panes collapse to
     }),
   }).toEqual({ duplicate: ["agent-a"], retargeted: ["agent-a", "agent-b"] });
 });
+
+test("a visible board keeps its coordinator session's timeline warm", () => {
+  const layout: WorkspaceLayout = {
+    focusedPaneId: "main",
+    root: { kind: "pane", pane: { id: "main", tabIds: ["board"], focusedTabId: "board" } },
+  };
+  const tabs: WorkspaceTab[] = [
+    {
+      tabId: "board",
+      target: { kind: "coordinator_board", projectId: "proj-1" },
+      createdAt: 1,
+    },
+  ];
+
+  expect(
+    selectVisibleAgentIds({
+      layout,
+      tabs,
+      routeFocused: true,
+      focusedPaneOnly: false,
+      coordinatorAgentIdForProjectId: (projectId) => (projectId === "proj-1" ? "coord-1" : null),
+    }),
+  ).toEqual(["coord-1"]);
+});
+
+test("a board with no running coordinator session contributes no agents", () => {
+  const layout: WorkspaceLayout = {
+    focusedPaneId: "main",
+    root: { kind: "pane", pane: { id: "main", tabIds: ["board"], focusedTabId: "board" } },
+  };
+  const tabs: WorkspaceTab[] = [
+    {
+      tabId: "board",
+      target: { kind: "coordinator_board", projectId: "proj-1" },
+      createdAt: 1,
+    },
+  ];
+
+  expect(
+    selectVisibleAgentIds({
+      layout,
+      tabs,
+      routeFocused: true,
+      focusedPaneOnly: false,
+      coordinatorAgentIdForProjectId: () => null,
+    }),
+  ).toEqual([]);
+});

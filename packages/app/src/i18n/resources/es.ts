@@ -1995,6 +1995,7 @@ export const es: TranslationResources = {
       saveAccessibility: "Guardar comentario de revisión",
     },
   },
+  coordinator: en.coordinator,
   settings: {
     title: "Ajustes",
     loading: "Cargando configuración...",

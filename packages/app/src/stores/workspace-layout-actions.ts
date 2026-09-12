@@ -267,6 +267,18 @@ export interface WorkspaceTabSnapshot {
   standaloneTerminalIds: Iterable<string>;
   hasActivePendingTerminalCreate?: boolean;
   hasActivePendingDraftCreate?: boolean;
+  coordinator?: {
+    /** This workspace's project has an enabled coordinator. */
+    projectId: string | null;
+    /** False until the host's board subscription delivers its first payload. */
+    boardsHydrated: boolean;
+    /**
+     * Coordinator sessions on this host. They never count toward workspace
+     * content and explicitly opened coordinator chat tabs are never collapsed
+     * when the coordinator agent leaves the session cache.
+     */
+    agentIds: Iterable<string>;
+  };
 }
 
 export const DEFAULT_PANE_ID = "main";
@@ -2284,11 +2296,20 @@ function collapseStaleEntityTabs(input: {
   snapshot: WorkspaceTabSnapshot;
   visibleAgentIds: Set<string>;
   knownTerminalIds: Set<string>;
+  coordinatorAgentIds: Set<string>;
 }): WorkspaceLayout {
-  const { snapshot, visibleAgentIds, knownTerminalIds } = input;
+  const { snapshot, visibleAgentIds, knownTerminalIds, coordinatorAgentIds } = input;
   let nextLayout = input.layout;
   for (const tab of collectAllTabs(nextLayout.root)) {
-    if (isAgentTab(tab) && snapshot.agentsHydrated && !visibleAgentIds.has(tab.target.agentId)) {
+    // Coordinator sessions are delegate-only daemons, not workspace entities:
+    // an explicitly opened coordinator chat tab survives the agent leaving the
+    // session cache, and reconcile never force-closes it.
+    if (
+      isAgentTab(tab) &&
+      snapshot.agentsHydrated &&
+      !visibleAgentIds.has(tab.target.agentId) &&
+      !coordinatorAgentIds.has(tab.target.agentId)
+    ) {
       nextLayout =
         closeTabInLayout({
           layout: nextLayout,
@@ -2369,7 +2390,7 @@ function addMissingEntityTabs(input: {
   return nextLayout;
 }
 
-function seedDraftForEmptyWorkspace(input: {
+function seedHomeForEmptyWorkspace(input: {
   layout: WorkspaceLayout;
   snapshot: WorkspaceTabSnapshot;
   activeAgentIds: Set<string>;
@@ -2393,65 +2414,43 @@ function seedDraftForEmptyWorkspace(input: {
     return input.layout;
   }
 
-  const draftId = generateDraftId();
+  // Until the host's board subscription answers we cannot know whether this
+  // workspace's project has a coordinator, so hold the seed rather than flash
+  // a draft that the board then replaces.
+  const coordinator = input.snapshot.coordinator;
+  if (coordinator && !coordinator.boardsHydrated) {
+    return input.layout;
+  }
+
+  const homeTarget: WorkspaceTabTarget = coordinator?.projectId
+    ? { kind: "coordinator_board", projectId: coordinator.projectId }
+    : { kind: "draft", draftId: generateDraftId() };
+  const homeTabId = buildDeterministicWorkspaceTabId(homeTarget);
   return (
     createTabInLayout({
       layout: input.layout,
-      target: { kind: "draft", draftId },
+      target: homeTarget,
       now: Date.now(),
       placement: FOCUSED_PANE_PLACEMENT,
       explorerSidebarPaneId: input.explorerSidebarPaneId,
-      createTabId: () => draftId,
+      createTabId: () => homeTabId,
     })?.layout ?? input.layout
   );
 }
 
-export function reconcileWorkspaceTabs(
-  state: WorkspaceTabReconcileState,
-  snapshot: WorkspaceTabSnapshot,
-): WorkspaceTabReconcileState {
-  let nextLayout = state.layout;
-  const originalFocusedTabId =
-    findPaneById(nextLayout.root, nextLayout.focusedPaneId)?.focusedTabId ?? null;
-  let reconciledFocusedTabId = originalFocusedTabId;
-  const pinnedAgentIds = new Set(state.pinnedAgentIds ?? []);
-  const pendingAgentIds = new Set(state.pendingAgentIds ?? []);
-  const hiddenAgentIds = new Set(state.hiddenAgentIds ?? []);
-  const activeAgentIds = normalizeStringSet(snapshot.activeAgentIds);
-  const autoOpenAgentIds = normalizeStringSet(snapshot.autoOpenAgentIds);
-  const knownAgentIds = normalizeStringSet(snapshot.knownAgentIds);
-  const standaloneTerminalIds = normalizeStringSet(snapshot.standaloneTerminalIds);
-  const knownTerminalIds = snapshot.knownTerminalIds
-    ? normalizeStringSet(snapshot.knownTerminalIds)
-    : standaloneTerminalIds;
-  const visibleAgentIds = applyPinnedAndHidden({
-    baseAgentIds: activeAgentIds,
-    pinnedAgentIds,
-    pendingAgentIds,
-    hiddenAgentIds,
-    knownAgentIds,
-  });
-  const autoOpenSet = applyPinnedAndHidden({
-    baseAgentIds: autoOpenAgentIds,
-    pinnedAgentIds,
-    pendingAgentIds,
-    hiddenAgentIds,
-    knownAgentIds,
-  });
-
-  const initialTabs = collectAllTabs(nextLayout.root);
-  const representedAgentIds = new Set(
-    initialTabs.filter(isAgentTab).map((tab) => tab.target.agentId),
-  );
-
-  const entityGroups = buildEntityTabGroups(initialTabs);
-
-  for (const [canonicalTabId, group] of entityGroups) {
+function collapseDuplicateEntityTabs(input: {
+  layout: WorkspaceLayout;
+  entityGroups: ReturnType<typeof buildEntityTabGroups>;
+  originalFocusedTabId: string | null;
+}): { layout: WorkspaceLayout; focusedTabId: string | null } {
+  let nextLayout = input.layout;
+  let reconciledFocusedTabId = input.originalFocusedTabId;
+  for (const [canonicalTabId, group] of input.entityGroups) {
     const keeper = group.tabs.find((tab) => tab.tabId === canonicalTabId) ?? group.tabs[0] ?? null;
     if (!keeper) {
       continue;
     }
-    if (group.tabs.some((tab) => tab.tabId === originalFocusedTabId)) {
+    if (group.tabs.some((tab) => tab.tabId === input.originalFocusedTabId)) {
       reconciledFocusedTabId = keeper.tabId;
     }
     if (!workspaceTabTargetsEqual(keeper.target, group.target)) {
@@ -2476,12 +2475,63 @@ export function reconcileWorkspaceTabs(
         }) ?? nextLayout;
     }
   }
+  return { layout: nextLayout, focusedTabId: reconciledFocusedTabId };
+}
+
+export function reconcileWorkspaceTabs(
+  state: WorkspaceTabReconcileState,
+  snapshot: WorkspaceTabSnapshot,
+): WorkspaceTabReconcileState {
+  let nextLayout = state.layout;
+  const originalFocusedTabId =
+    findPaneById(nextLayout.root, nextLayout.focusedPaneId)?.focusedTabId ?? null;
+  const pinnedAgentIds = new Set(state.pinnedAgentIds ?? []);
+  const pendingAgentIds = new Set(state.pendingAgentIds ?? []);
+  const hiddenAgentIds = new Set(state.hiddenAgentIds ?? []);
+  const activeAgentIds = normalizeStringSet(snapshot.activeAgentIds);
+  const autoOpenAgentIds = normalizeStringSet(snapshot.autoOpenAgentIds);
+  const knownAgentIds = normalizeStringSet(snapshot.knownAgentIds);
+  const standaloneTerminalIds = normalizeStringSet(snapshot.standaloneTerminalIds);
+  const knownTerminalIds = snapshot.knownTerminalIds
+    ? normalizeStringSet(snapshot.knownTerminalIds)
+    : standaloneTerminalIds;
+  const coordinatorAgentIds = normalizeStringSet(snapshot.coordinator?.agentIds ?? []);
+  const visibleAgentIds = applyPinnedAndHidden({
+    baseAgentIds: activeAgentIds,
+    pinnedAgentIds,
+    pendingAgentIds,
+    hiddenAgentIds,
+    knownAgentIds,
+  });
+  const autoOpenSet = applyPinnedAndHidden({
+    baseAgentIds: autoOpenAgentIds,
+    pinnedAgentIds,
+    pendingAgentIds,
+    hiddenAgentIds,
+    knownAgentIds,
+  });
+
+  const initialTabs = collectAllTabs(nextLayout.root);
+  const representedAgentIds = new Set(
+    initialTabs.filter(isAgentTab).map((tab) => tab.target.agentId),
+  );
+
+  const entityGroups = buildEntityTabGroups(initialTabs);
+
+  const collapsed = collapseDuplicateEntityTabs({
+    layout: nextLayout,
+    entityGroups,
+    originalFocusedTabId,
+  });
+  nextLayout = collapsed.layout;
+  let reconciledFocusedTabId = collapsed.focusedTabId;
 
   nextLayout = collapseStaleEntityTabs({
     layout: nextLayout,
     snapshot,
     visibleAgentIds,
     knownTerminalIds,
+    coordinatorAgentIds,
   });
 
   nextLayout = addMissingEntityTabs({
@@ -2494,7 +2544,7 @@ export function reconcileWorkspaceTabs(
     explorerSidebarPaneId: state.explorerSidebarPaneId,
   });
 
-  nextLayout = seedDraftForEmptyWorkspace({
+  nextLayout = seedHomeForEmptyWorkspace({
     layout: nextLayout,
     snapshot,
     activeAgentIds,
