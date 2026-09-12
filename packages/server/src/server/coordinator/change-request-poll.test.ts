@@ -412,4 +412,17 @@ describe("diffChangeRequestSnapshots", () => {
     expect(diff).toContain("check e2e appeared (pending)");
     expect(diff).not.toContain("build");
   });
+
+  test("a truncated snapshot warns that closures may be phantoms and hashes differently", () => {
+    const before = snapshot([entry()]);
+    const afterTruncated = { ...snapshot([entry()]), truncated: true };
+
+    const diff = diffChangeRequestSnapshots(before, afterTruncated);
+    expect(diff).toContain("cap");
+    expect(diff).toContain("truncation");
+
+    expect(hashChangeRequestSnapshot(afterTruncated)).not.toBe(
+      hashChangeRequestSnapshot(snapshot([entry()])),
+    );
+  });
 });

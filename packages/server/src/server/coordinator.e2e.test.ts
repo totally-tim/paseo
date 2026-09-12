@@ -100,6 +100,21 @@ describe("project coordinator over the wire", () => {
     expect(coordinator!.agent.labels[COORDINATOR_PROJECT_ID_LABEL]).toBe(projectId);
   });
 
+  test("update forwards guard over the wire and get reads it back", async () => {
+    const projectDir = makeProjectDir();
+    const { projectId } = await openProject(projectDir);
+    await enableCoordinator(projectId);
+
+    const updated = await ctx.client.updateProjectCoordinator({
+      projectId,
+      guard: { maxSpawnDepth: 1 },
+    });
+    expect(updated.coordinator?.guard?.maxSpawnDepth).toBe(1);
+
+    const fetched = await ctx.client.getProjectCoordinator(projectId);
+    expect(fetched.coordinator?.guard?.maxSpawnDepth).toBe(1);
+  });
+
   test("enabling twice keeps the same coordinator session", async () => {
     const projectDir = makeProjectDir();
     const { projectId } = await openProject(projectDir);
