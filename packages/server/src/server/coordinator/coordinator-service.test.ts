@@ -1647,6 +1647,9 @@ describe("change request tools", () => {
     await expect(tool.handler({ cwd: harness.projectDir, prNumber: 9 }, {})).rejects.toThrow(
       /not supported on Gitea/,
     );
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Milestone 2: wakes, stall detection, lifecycle observation, CR poll
 // ---------------------------------------------------------------------------
