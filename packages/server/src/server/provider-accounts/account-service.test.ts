@@ -7,7 +7,7 @@ import type {
   ProviderAccount,
   ProviderAccountIdentity,
 } from "@getpaseo/protocol/provider-accounts";
-import type { ProviderUsage } from "../messages.js";
+import type { ProviderAccountResetCreditOutcome, ProviderUsage } from "../messages.js";
 import { ProviderAccountStore } from "./account-store.js";
 import {
   AccountHelperShutdownError,
@@ -20,6 +20,7 @@ class TestAccountBackend implements AccountBackend {
   usedPct: number | null = 10;
   failUsage = false;
   logouts = 0;
+  consumeResetCredit?: AccountBackend["consumeResetCredit"];
   inspect(): Promise<ProviderAccountIdentity | null> {
     return Promise.resolve(this.identity);
   }
@@ -1325,5 +1326,212 @@ describe("capacity ranking", () => {
       accountIds: [a.account.id, b.account.id],
     });
     expect(choice.accountId).toBe(b.account.id);
+  });
+});
+
+describe("reset credits", () => {
+  async function credited() {
+    const context = await setup();
+    const { account, backend } = await context.add("credited");
+    const keys: string[] = [];
+    const outcomes: Array<
+      ProviderAccountResetCreditOutcome | Error | Promise<ProviderAccountResetCreditOutcome>
+    > = [];
+    backend.consumeResetCredit = (input: { idempotencyKey: string }) => {
+      keys.push(input.idempotencyKey);
+      const outcome = outcomes.shift() ?? "reset";
+      return outcome instanceof Error ? Promise.reject(outcome) : Promise.resolve(outcome);
+    };
+    return { ...context, account, backend, keys, outcomes };
+  }
+
+  it("spends one credit, re-reads usage, and clears a remembered capacity limit", async () => {
+    const { service, store, account, backend, keys } = await credited();
+    const probe = vi.spyOn(backend, "usage");
+    await service.reportCapacity(account.id, undefined, "2026-09-06T00:00:00Z");
+    const result = await service.redeemResetCredit(account.id);
+    expect(result).toEqual({ outcome: "reset", confirmed: true });
+    expect(keys).toHaveLength(1);
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(store.get(account.id).capacityLimit).toBeNull();
+  });
+
+  it("keeps the capacity limit when the provider says there was nothing to spend", async () => {
+    const { service, store, account, outcomes } = await credited();
+    outcomes.push("noCredit");
+    await service.reportCapacity(account.id, undefined, "2026-09-06T00:00:00Z");
+    expect((await service.redeemResetCredit(account.id)).outcome).toBe("noCredit");
+    expect(store.get(account.id).capacityLimit).not.toBeNull();
+  });
+
+  it("pins the idempotency key across a lost response and rotates it after one", async () => {
+    const { service, account, keys, outcomes } = await credited();
+    outcomes.push(new Error("connection lost"), "reset", "reset");
+    await expect(service.redeemResetCredit(account.id)).rejects.toThrow("connection lost");
+    await service.redeemResetCredit(account.id);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toBe(keys[1]);
+    await service.redeemResetCredit(account.id);
+    expect(keys[2]).not.toBe(keys[0]);
+  });
+
+  it("serializes concurrent redemptions so one credit cannot be spent twice", async () => {
+    const { service, account, keys, outcomes } = await credited();
+    let release!: () => void;
+    const gate = new Promise<"reset">((resolve) => {
+      release = () => resolve("reset");
+    });
+    outcomes.push(gate, "reset");
+    const first = service.redeemResetCredit(account.id);
+    const second = service.redeemResetCredit(account.id);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(keys).toHaveLength(1);
+    release();
+    await Promise.all([first, second]);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it("reports an unconfirmed spend when the usage re-read fails", async () => {
+    const { service, account, backend } = await credited();
+    backend.failUsage = true;
+    expect(await service.redeemResetCredit(account.id)).toEqual({
+      outcome: "reset",
+      confirmed: false,
+    });
+  });
+
+  it("refuses accounts that cannot hold or spend a credit", async () => {
+    const { service, add, account, backend } = await credited();
+    const claude = await add("claude-side", "claude");
+    await expect(service.redeemResetCredit("missing")).rejects.toThrow("Account not found");
+    await expect(service.redeemResetCredit(claude.account.id)).rejects.toThrow("Only Codex");
+    const signedOut = await add("signed-out");
+    signedOut.backend.identity = null;
+    await service.inspect(signedOut.account.id);
+    await expect(service.redeemResetCredit(signedOut.account.id)).rejects.toThrow("Sign in");
+    await service.remove(account.id, "retain");
+    await expect(service.redeemResetCredit(account.id)).rejects.toThrow("Restore the account");
+    backend.consumeResetCredit = undefined;
+  });
+
+  it("lists permitted accounts whose last read still shows a banked credit", async () => {
+    const { service, account, backend } = await credited();
+    const usage = ranked([
+      { id: "primary", label: "5-hour window", usedPct: 100, periodMinutes: FIVE_HOUR },
+    ]);
+    vi.spyOn(backend, "usage").mockResolvedValue({
+      ...usage,
+      resetCredits: { availableCount: 1 },
+    });
+    expect(service.resetCreditAccounts("codex", [account.id])).toEqual([]);
+    await service.usage(account.id);
+    expect(service.resetCreditAccounts("codex", [account.id])).toEqual([account.id]);
+    // A metadata edit keeps the reading, but signing out invalidates the account entirely.
+    await service.edit(account.id, { label: "renamed" });
+    expect(service.resetCreditAccounts("codex", [account.id])).toEqual([account.id]);
+    await service.logout(account.id);
+    expect(service.resetCreditAccounts("codex", [account.id])).toEqual([]);
+  });
+});
+
+describe("live usage updates", () => {
+  it("seeds a partial snapshot from events and still probes for admission", async () => {
+    const { service, add } = await setup();
+    const { account, backend } = await add("live");
+    const probe = vi.spyOn(backend, "usage");
+    service.applyLiveUsage(account.id, {
+      primary: { usedPercent: 80, windowDurationMins: 300, resetsAt: 1_800_000_000 },
+    });
+    const snapshot = service.usageSnapshot(account.id);
+    expect(snapshot.usage.windows).toEqual([
+      expect.objectContaining({ id: "primary", usedPct: 80, periodMinutes: 300 }),
+    ]);
+    expect(probe).not.toHaveBeenCalled();
+    // An event names only the windows it carries, so admission re-probes for the full read.
+    await service.usage(account.id);
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it("merges events into a probed snapshot without marking it partial", async () => {
+    const { service, add } = await setup();
+    const { account, backend } = await add("live-merge");
+    vi.spyOn(backend, "usage").mockResolvedValue(
+      ranked([
+        {
+          id: "codex:primary",
+          label: "5-hour window · Codex",
+          usedPct: 40,
+          resetsAt: "2026-09-05T05:00:00Z",
+          periodMinutes: FIVE_HOUR,
+        },
+      ]),
+    );
+    await service.usage(account.id);
+    const probe = vi.mocked(backend.usage);
+    service.applyLiveUsage(account.id, {
+      primary: { usedPercent: 90 },
+    });
+    const snapshot = service.usageSnapshot(account.id);
+    expect(snapshot.usage.windows[0]).toMatchObject({ id: "codex:primary", usedPct: 90 });
+    await service.usage(account.id);
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it("folds Claude rate-limit events into the cached reading", async () => {
+    const { service, add } = await setup();
+    const { account, backend } = await add("live-claude", "claude");
+    vi.spyOn(backend, "usage").mockResolvedValue({
+      providerId: "claude",
+      displayName: "test",
+      status: "available",
+      planLabel: "max",
+      windows: [
+        {
+          id: "five_hour",
+          label: "Session",
+          usedPct: 20,
+          resetsAt: "2026-09-05T05:00:00Z",
+          periodMinutes: FIVE_HOUR,
+        },
+        {
+          id: "seven_day",
+          label: "Weekly",
+          usedPct: 30,
+          resetsAt: "2026-09-12T00:00:00Z",
+          periodMinutes: SEVEN_DAY,
+        },
+      ],
+    });
+    await service.usage(account.id);
+    service.applyLiveUsage(account.id, {
+      rateLimitType: "seven_day",
+      utilization: 0.55,
+      resetsAt: 1_800_000_000,
+    });
+    expect(service.usageSnapshot(account.id).usage.windows).toEqual([
+      expect.objectContaining({ id: "five_hour", usedPct: 20 }),
+      expect.objectContaining({
+        id: "seven_day",
+        usedPct: expect.closeTo(55),
+        resetsAt: "2027-01-15T08:00:00.000Z",
+      }),
+    ]);
+  });
+
+  it("ignores events for accounts that cannot report or payloads that parse to nothing", async () => {
+    const { service, add } = await setup();
+    const { account } = await add("live-off");
+    const signedOut = await add("live-signed-out");
+    signedOut.backend.identity = null;
+    await service.inspect(signedOut.account.id);
+    service.applyLiveUsage(account.id, { unexpected: true });
+    service.applyLiveUsage(signedOut.account.id, {
+      primary: { usedPercent: 90 },
+    });
+    service.applyLiveUsage("missing", { primary: { usedPercent: 90 } });
+    expect(service.usageSnapshot(account.id).usage.status).toBe("unavailable");
+    expect(service.usageSnapshot(signedOut.account.id).usage.status).toBe("unavailable");
   });
 });

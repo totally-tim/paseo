@@ -41,9 +41,19 @@ const CodexBucketSchema = z.object({
   spendControlReached: z.boolean().nullish(),
   rateLimitReachedType: z.string().nullish(),
 });
+const CodexResetCreditSchema = z.object({
+  status: z.string(),
+  expiresAt: z.number().nullish(),
+});
 const CodexUsageSchema = z.object({
   rateLimits: CodexBucketSchema,
   rateLimitsByLimitId: z.record(z.string(), CodexBucketSchema).nullish(),
+  rateLimitResetCredits: z
+    .object({
+      availableCount: z.number().finite(),
+      credits: z.array(CodexResetCreditSchema).nullish(),
+    })
+    .nullish(),
 });
 
 export function normalizeClaudeAccountUsage(label: string, raw: unknown): ProviderUsage {
@@ -100,7 +110,7 @@ export function normalizeClaudeAccountUsage(label: string, raw: unknown): Provid
 }
 
 export function normalizeCodexAccountUsage(label: string, raw: unknown): ProviderUsage {
-  const { rateLimits, rateLimitsByLimitId } = CodexUsageSchema.parse(raw);
+  const { rateLimits, rateLimitsByLimitId, rateLimitResetCredits } = CodexUsageSchema.parse(raw);
   // `rateLimits` is the compatibility view of one metered bucket that also appears in the
   // map. Reading both would count that bucket twice and hide the other buckets' limits.
   const buckets = Object.entries(rateLimitsByLimitId ?? {});
@@ -146,6 +156,22 @@ export function normalizeCodexAccountUsage(label: string, raw: unknown): Provide
     status: "available",
     planLabel: rateLimits.planType ?? metered[0]?.[1].planType ?? null,
     windows,
+    resetCredits: codexResetCredits(rateLimitResetCredits),
     error: null,
+  };
+}
+
+// Codex grants these after it rate-limits a turn unfairly; each spend clears the
+// account's blocked windows. `nextExpiresAt` is the soonest available credit's expiry.
+function codexResetCredits(
+  credits: z.infer<typeof CodexUsageSchema>["rateLimitResetCredits"],
+): ProviderUsage["resetCredits"] {
+  if (!credits || credits.availableCount <= 0) return undefined;
+  const expiries = (credits.credits ?? [])
+    .filter((credit) => credit.status === "available" && typeof credit.expiresAt === "number")
+    .map((credit) => credit.expiresAt as number);
+  return {
+    availableCount: Math.max(0, credits.availableCount),
+    ...(expiries.length ? { nextExpiresAt: toIsoStringOrNull(Math.min(...expiries) * 1000) } : {}),
   };
 }

@@ -97,6 +97,7 @@ export const AccountOperationSchema = z.discriminatedUnion("kind", [
     credentials: z.enum(["retain", "logout"]),
   }),
   z.object({ kind: z.literal("restore"), accountId: z.string() }),
+  z.object({ kind: z.literal("consume-reset-credit"), accountId: z.string() }),
   z.object({ kind: z.literal("policy"), policy: AccountPolicySchema }),
   z.object({ kind: z.literal("reorder"), accountIds: z.array(z.string()).max(34) }),
 ]);

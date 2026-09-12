@@ -853,6 +853,33 @@ test("a rejection with no reported reset waits with a growing backoff instead of
   expect(f.starts).toHaveLength(0);
 });
 
+test("a waiting recovery wakes on a permitted account's capacity signal, not its label", async () => {
+  const f = await setup();
+  f.used.set(f.a, 100);
+  f.used.set(f.b, 100);
+  await f.accounts.reportCapacity(f.a);
+  await f.accounts.reportCapacity(f.b);
+  await f.service.reportCapacity(f.source.id, "limit-1");
+  await f.service.flush();
+  expect(f.store.forAgent(f.source.id)!.recovery!.status).toBe("waiting");
+
+  // Edits and identity probes fire onChange without a signal change, so neither may wake the
+  // wait — recovery's own inspections would otherwise loop it into itself.
+  const spy = vi.spyOn(f.accounts, "recoveryChoice");
+  await f.accounts.edit(f.b, { label: "B renamed" });
+  await f.accounts.inspect(f.b);
+  await f.service.flush();
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(spy).not.toHaveBeenCalled();
+
+  // A replacement rejection whose reset already passed reopens B; the signal change retries
+  // the wait now instead of at nextCheckAt.
+  f.used.set(f.b, 10);
+  await f.accounts.reportCapacity(f.b, undefined, "2026-09-05T09:00:00Z");
+  await vi.waitFor(() => expect(f.starts).toHaveLength(1));
+  expect(f.starts[0].accountId).toBe(f.b);
+});
+
 test("a capacity notification from a settled stopped turn cannot pause later queued work", async () => {
   const f = await setup();
   await f.agentManager.cancelContinuation(f.source.id);
