@@ -5,11 +5,8 @@ import path from "node:path";
 
 import type { GitCommandResult } from "../../utils/run-git-command.js";
 import type { ChangeRequestSnapshot } from "./change-request-poll.js";
-import {
-  composeWakeEnvelope,
-  sanitizeUntrustedText,
-  type WakeEnvelopeInput,
-} from "./wake-envelope.js";
+import { sanitizeUntrustedText } from "../agent/agent-prompt.js";
+import { composeWakeEnvelope, type WakeEnvelopeInput } from "./wake-envelope.js";
 
 const PROJECT_ID = "prj_test";
 

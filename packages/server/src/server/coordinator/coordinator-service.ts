@@ -39,7 +39,11 @@ import {
   nearestCoordinatorAncestor,
   type AgentLineageDeps,
 } from "../agent/agent-lineage.js";
-import { formatSystemNotificationPrompt, sendPromptToAgent } from "../agent/agent-prompt.js";
+import {
+  formatSystemNotificationPrompt,
+  sanitizeUntrustedText,
+  sendPromptToAgent,
+} from "../agent/agent-prompt.js";
 import type { AgentManager, AgentManagerEvent, ManagedAgent } from "../agent/agent-manager.js";
 import type { LifecycleBus } from "../agent/lifecycle-bus.js";
 import type {
@@ -80,7 +84,7 @@ import {
 } from "./prompts.js";
 import { coordinatorSpawnEnv } from "./spawn-isolation.js";
 import { coordinatorTrustAtLeast, coordinatorTrustLevelFromLabels } from "./tool-policy.js";
-import { composeWakeEnvelope, sanitizeUntrustedText } from "./wake-envelope.js";
+import { composeWakeEnvelope } from "./wake-envelope.js";
 
 export { SPAWN_ISOLATION_ENV } from "./spawn-isolation.js";
 

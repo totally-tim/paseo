@@ -228,6 +228,29 @@ export function formatSystemNotificationPrompt(reason: string): string {
   return `<paseo-system>\n${reason}\n</paseo-system>`;
 }
 
+/**
+ * Tag names the daemon wraps notification payloads in. Quoted text — forge
+ * titles, check names, diff summaries, commit subjects, memory files, agent
+ * titles, agent output, permission payloads — is interpolated raw, so a
+ * literal closing tag inside it would end the fence early and put the tail in
+ * system-voiced context. Neutralize every open/close form of our own markers
+ * inside quoted content; a PR title that reads `</untrusted-forge-data>` must
+ * render as text, not markup.
+ *
+ * The lookahead keeps ordinary angle-bracket text (`<untrusted-other>`,
+ * `</div>`) byte-identical while still catching self-closing and
+ * attribute-suffixed forms (`<paseo-system/>`, `<paseo-system lang="x">`,
+ * `</paseo-system >`).
+ */
+const PROMPT_TAG_PATTERN =
+  /<\/?(untrusted-wake-details|untrusted-forge-data|untrusted-git-data|wake-context|paseo-system|agent-response|permission-request)(?=[\s/>"'`])[^>]*>/gi;
+
+export function sanitizeUntrustedText(text: string): string {
+  return text.replace(PROMPT_TAG_PATTERN, (match) =>
+    match.replace(/</, "&lt;").replace(/>/, "&gt;"),
+  );
+}
+
 const SYSTEM_ENVELOPE_PATTERN = /^<paseo-system>\n[\s\S]*\n<\/paseo-system>$/;
 
 export function isSystemInjectedEnvelope(text: string): boolean {
@@ -408,19 +431,24 @@ interface FinishNotificationBodyInput {
 }
 
 function formatFinishNotificationBody(params: FinishNotificationBodyInput): string {
-  const statusLine = `Agent ${params.childAgentId} (${params.title}) ${params.reason}.`;
+  // Titles, permission payloads, and last assistant text are all
+  // agent-influenced — sanitize tag escapes before they land inside
+  // <paseo-system>, or a delegate's output could close the system wrapper.
+  const statusLine = `Agent ${params.childAgentId} (${sanitizeUntrustedText(params.title)}) ${params.reason}.`;
   const sections = [statusLine];
   if (params.reason === "needs permission" && params.permissionRequest) {
     sections.push(
       "Respond with `respond_to_permission` using the `agentId` and `requestId` below.",
-      `<permission-request>\n${JSON.stringify(
-        {
-          agentId: params.childAgentId,
-          requestId: params.permissionRequest.id,
-          request: params.permissionRequest,
-        },
-        null,
-        2,
+      `<permission-request>\n${sanitizeUntrustedText(
+        JSON.stringify(
+          {
+            agentId: params.childAgentId,
+            requestId: params.permissionRequest.id,
+            request: params.permissionRequest,
+          },
+          null,
+          2,
+        ),
       )}\n</permission-request>`,
     );
   }
@@ -430,7 +458,9 @@ function formatFinishNotificationBody(params: FinishNotificationBodyInput): stri
       const omitted = lastAssistantMessage.length - FINISH_NOTIFICATION_MESSAGE_LIMIT;
       lastAssistantMessage = `${lastAssistantMessage.slice(0, FINISH_NOTIFICATION_MESSAGE_LIMIT)}\n[truncated ${omitted} chars; use get_agent_activity for the full response]`;
     }
-    sections.push(`<agent-response>\n${lastAssistantMessage}\n</agent-response>`);
+    sections.push(
+      `<agent-response>\n${sanitizeUntrustedText(lastAssistantMessage)}\n</agent-response>`,
+    );
   }
   return sections.join("\n\n");
 }

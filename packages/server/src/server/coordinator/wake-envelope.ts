@@ -9,26 +9,10 @@ import type {
 } from "@getpaseo/protocol/messages";
 
 import { runGitCommand, type RunGitCommand } from "../../utils/run-git-command.js";
+import { sanitizeUntrustedText } from "../agent/agent-prompt.js";
 import { OPEN_PULL_REQUEST_LIMIT, type ChangeRequestSnapshot } from "./change-request-poll.js";
 
 const GIT_LOG_LIMIT = 20;
-
-/**
- * Tag names the daemon wraps wake payloads in. Quoted text — forge titles,
- * check names, diff summaries, commit subjects, memory files — is interpolated
- * raw, so a literal closing tag inside it would end the fence early and put
- * the tail in system-voiced context. Neutralize every open/close form of our
- * own markers inside quoted content; a PR title that reads
- * `</untrusted-forge-data>` must render as text, not markup.
- */
-const PROMPT_TAG_PATTERN =
-  /<\/?(untrusted-wake-details|untrusted-forge-data|untrusted-git-data|wake-context|paseo-system)(\s[^>]*)?>/gi;
-
-export function sanitizeUntrustedText(text: string): string {
-  return text.replace(PROMPT_TAG_PATTERN, (match) =>
-    match.replace(/</, "&lt;").replace(/>/, "&gt;"),
-  );
-}
 
 export interface WakeEnvelopeInput {
   projectId: string;
