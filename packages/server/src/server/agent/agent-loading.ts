@@ -4,6 +4,7 @@ import { HANDOFF_TO_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import type { AgentProvider } from "./agent-sdk-types.js";
 import type { AgentManager, ManagedAgent } from "./agent-manager.js";
 import type { AgentStorage } from "./agent-storage.js";
+import { spawnIsolationEnvForRecord } from "../coordinator/spawn-isolation.js";
 import {
   buildConfigOverrides,
   buildSessionConfig,
@@ -106,13 +107,21 @@ export async function ensureAgentLoaded(
 
     const handle = toAgentPersistenceHandle(validProviders, record.persistence);
 
+    // Launch env is not persisted; coordinator-governed isolation is rebuilt
+    // from labels so a resumed Ship coordinator and its descendants keep
+    // worktree isolation.
+    const env = await spawnIsolationEnvForRecord(
+      { agentManager: deps.agentManager, agentStorage: deps.agentStorage },
+      record,
+    );
+
     let snapshot: ManagedAgent;
     if (handle) {
       snapshot = await deps.agentManager.resumeAgentFromPersistence(
         handle,
         buildConfigOverrides(record),
         agentId,
-        extractTimestamps(record),
+        { ...extractTimestamps(record), ...(env ? { env } : {}) },
         record.archivedAt ? { purpose: "history" } : undefined,
       );
       deps.logger.info({ agentId, provider: record.provider }, "Agent resumed from persistence");
@@ -127,6 +136,7 @@ export async function ensureAgentLoaded(
         labels: record.labels,
         workspaceId: record.workspaceId,
         owner: record.owner,
+        ...(env ? { env } : {}),
       });
       deps.logger.info({ agentId, provider: record.provider }, "Agent created from stored config");
     }

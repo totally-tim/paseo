@@ -16,6 +16,34 @@ describe("buildProjectCoordinatorSystemPrompt", () => {
     expect(prompt).toMatch(/edit files/);
     expect(prompt).toMatch(/shell commands/);
   });
+
+  test("propose names the read-only kinds and keeps implementers out", () => {
+    const prompt = buildProjectCoordinatorSystemPrompt("paseo", "propose");
+    expect(prompt).toContain("Propose");
+    expect(prompt).toContain('"investigator"');
+    expect(prompt).toContain('"reviewer"');
+    expect(prompt).toContain("subagentKind");
+    expect(prompt).toMatch(/may NOT spawn implementers/);
+    expect(prompt).toMatch(/open change requests/);
+    // The delegation section teaches the steering tools once they exist.
+    expect(prompt).toContain("DELEGATION");
+    expect(prompt).toContain("send_agent_prompt");
+  });
+
+  test("ship names implementers, worktree isolation, and change requests", () => {
+    const prompt = buildProjectCoordinatorSystemPrompt("paseo", "ship");
+    expect(prompt).toContain("Ship");
+    expect(prompt).toMatch(/implementers write in isolated worktrees/i);
+    expect(prompt).toContain("change requests");
+    expect(prompt).toMatch(/may NOT merge/);
+  });
+
+  test("autopilot names merge automation under the merge policy", () => {
+    const prompt = buildProjectCoordinatorSystemPrompt("paseo", "autopilot");
+    expect(prompt).toContain("Autopilot");
+    expect(prompt).toMatch(/merge automation/);
+    expect(prompt).toMatch(/merge policy/);
+  });
 });
 
 describe("buildProjectCoordinatorFirstContactPrompt", () => {
@@ -44,5 +72,20 @@ describe("buildProjectCoordinatorFirstContactPrompt", () => {
       trustLevel: "observe",
     });
     expect(prompt).toContain("delegated sessions only");
+  });
+
+  test("the trust line tracks the level", () => {
+    const at = (trustLevel: "observe" | "propose" | "ship" | "autopilot") =>
+      buildProjectCoordinatorFirstContactPrompt({
+        projectId: "prj_1",
+        projectName: "paseo",
+        rootPath: "/repos/paseo",
+        scope: "everything",
+        trustLevel,
+      });
+    expect(at("observe")).toContain("spawn nothing");
+    expect(at("propose")).toContain("investigator and reviewer subagents");
+    expect(at("ship")).toContain("own worktrees");
+    expect(at("autopilot")).toContain("merge automation");
   });
 });

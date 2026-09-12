@@ -45,6 +45,54 @@ describe("CoordinatorStore", () => {
     expect(await store.loadState("prj_a")).toEqual(state);
   });
 
+  test("trust, guard, profiles, expectation, and usage round-trip through disk", async () => {
+    const { store } = makeStore();
+    const state: PersistedProjectCoordinator = {
+      ...makeState("prj_a"),
+      trustLevel: "ship",
+      profiles: {
+        investigator: { provider: "claude", model: "opus" },
+        fallback: { provider: "codex" },
+      },
+      usageExpectation: { monthlySpawns: 20, monthlyTokens: 500_000 },
+      guard: { maxConcurrentSubagents: 4, maxSpawnDepth: 3 },
+      usage: {
+        month: "2026-02",
+        tokens: 42_000,
+        lastSeenTokensByAgent: { "agent-1": 12_345 },
+        reportedExpectations: ["tokens"],
+      },
+    };
+    await store.saveState("prj_a", state);
+    expect(await store.loadState("prj_a")).toEqual(state);
+  });
+
+  test("older state files without the m2 fields still parse", async () => {
+    const { store } = makeStore();
+    // What a milestone-1 daemon wrote: trust/scope/profile but no guard,
+    // profiles map, expectation, or usage bucket.
+    mkdirSync(path.dirname(store.statePath("prj_old")), { recursive: true });
+    writeFileSync(
+      store.statePath("prj_old"),
+      JSON.stringify({
+        version: 1,
+        projectId: "prj_old",
+        agentId: "agent-1",
+        enabled: true,
+        trustLevel: "observe",
+        scope: "project",
+        profile: { provider: "codex" },
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }),
+    );
+    const state = await store.loadState("prj_old");
+    expect(state?.projectId).toBe("prj_old");
+    expect(state?.trustLevel).toBe("observe");
+    expect(state?.guard).toBeUndefined();
+    expect(state?.usage).toBeUndefined();
+  });
+
   test("board round-trips with done and wake rows", async () => {
     const { store } = makeStore();
     const board = {

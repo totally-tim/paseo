@@ -16,10 +16,13 @@ import {
   type AgentLifecycleStatus,
 } from "@getpaseo/protocol/agent-lifecycle";
 import {
+  getCoordinatorRole,
   getParentAgentIdFromLabels,
   hasOpenAgentTab,
   isDelegatedAgent,
   isOpenAgentTabLabel,
+  COORDINATOR_PROJECT_ID_LABEL,
+  COORDINATOR_SUBAGENT_KIND_LABEL,
   PARENT_AGENT_ID_LABEL,
   HANDOFF_TO_AGENT_ID_LABEL,
   HANDOFF_FROM_AGENT_ID_LABEL,
@@ -708,6 +711,17 @@ function shouldDetachFromArchivedParent(
   parent: StoredAgentRecord,
   child: StoredAgentRecord,
 ): boolean {
+  // Coordinator-tree members never detach: dropping the parent label would
+  // sever the lineage the spawn guard, ownership boundary, and usage meter
+  // all read — the child must archive with the cascade instead of surviving
+  // outside the boundary.
+  if (
+    getCoordinatorRole(child.labels) !== null ||
+    child.labels?.[COORDINATOR_SUBAGENT_KIND_LABEL] !== undefined ||
+    child.labels?.[COORDINATOR_PROJECT_ID_LABEL] !== undefined
+  ) {
+    return false;
+  }
   const isCrossWorkspace =
     parent.workspaceId !== undefined &&
     child.workspaceId !== undefined &&
@@ -1651,6 +1665,8 @@ export class AgentManager {
       labels?: Record<string, string>;
       workspaceId?: string;
       owner?: AgentOwner;
+      /** Rebuilt launch env (e.g. coordinator spawn isolation); env is not persisted. */
+      env?: Record<string, string>;
     },
     resumeOptions?: AgentResumeSessionOptions,
   ): Promise<ManagedAgent> {
@@ -1711,6 +1727,7 @@ export class AgentManager {
       labels?: Record<string, string>;
       workspaceId?: string;
       owner?: AgentOwner;
+      env?: Record<string, string>;
     },
     resumeOptions?: AgentResumeSessionOptions,
   ): Promise<ManagedAgent> {
@@ -1744,7 +1761,7 @@ export class AgentManager {
       client,
       storedConfig.cwd,
       paseoToolPolicy,
-      undefined,
+      options?.env,
       {
         reason: "resume",
         purpose: resumeOptions?.purpose ?? "interactive",
@@ -2526,6 +2543,34 @@ export class AgentManager {
     };
     await registry.upsert(nextRecord);
     return nextRecord;
+  }
+
+  /**
+   * Rewrites the session's system prompt: the live config so anything reading
+   * `agent.config` (and providers that honor it next turn) sees the update,
+   * and the stored record so a resume launches with it.
+   */
+  async setAgentSystemPrompt(agentId: string, systemPrompt: string): Promise<void> {
+    await this.runLifecycleMutation(agentId, async () => {
+      const liveAgent = this.agents.get(agentId);
+      if (liveAgent) {
+        liveAgent.config = { ...liveAgent.config, systemPrompt };
+        this.touchUpdatedAt(liveAgent);
+        await this.persistSnapshot(liveAgent);
+        this.emitState(liveAgent, { persist: false });
+        return;
+      }
+      const registry = this.requireRegistry();
+      const record = await registry.get(agentId);
+      if (!record) {
+        throw new Error(`Agent not found: ${agentId}`);
+      }
+      await registry.upsert({
+        ...record,
+        config: { ...record.config, systemPrompt },
+        updatedAt: this.nextStoredUpdatedAt(record),
+      });
+    });
   }
 
   async detachAgent(agentId: string): Promise<{

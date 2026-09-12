@@ -8,18 +8,21 @@ import {
   COORDINATOR_PROJECT_ID_LABEL,
   COORDINATOR_PROJECT_ROLE,
   COORDINATOR_SUBAGENT_KIND_LABEL,
+  COORDINATOR_TRUST_LABEL,
   PARENT_AGENT_ID_LABEL,
   PASEO_ROLE_LABEL,
 } from "@getpaseo/protocol/agent-labels";
 import type {
   CoordinatorBoardSnapshot,
   CoordinatorProfileSelection,
+  CoordinatorTrustLevel,
 } from "@getpaseo/protocol/messages";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { createProviderSnapshotManagerStub } from "../test-utils/session-stubs.js";
 import { AgentManager } from "../agent/agent-manager.js";
 import { AgentStorage } from "../agent/agent-storage.js";
+import { createAgentCommand } from "../agent/create-agent/create.js";
 import { LifecycleBus } from "../agent/lifecycle-bus.js";
 import {
   createPaseoToolCatalog,
@@ -53,7 +56,9 @@ import {
   CoordinatorRequestError,
   CoordinatorService,
   type CoordinatorServiceDeps,
+  type CoordinatorSpawnDecision,
 } from "./coordinator-service.js";
+import { SPAWN_ISOLATION_ENV } from "./spawn-isolation.js";
 import { CoordinatorToolDeniedError } from "./tool-policy.js";
 
 const logger = createTestLogger();
@@ -153,11 +158,14 @@ class StubAgentSession implements AgentSession {
 class StubAgentClient implements AgentClient {
   readonly capabilities = TEST_CAPABILITIES;
   readonly sessions: StubAgentSession[] = [];
+  /** When true, every new session starts with `holdTurn` set. */
+  holdTurns = false;
 
   constructor(readonly provider: string) {}
 
   async createSession(config: AgentSessionConfig): Promise<AgentSession> {
     const session = new StubAgentSession(config);
+    session.holdTurn = this.holdTurns;
     this.sessions.push(session);
     return session;
   }
@@ -462,10 +470,17 @@ describe("enableProjectCoordinator", () => {
     );
   });
 
-  test("rejects trust levels above observe in this milestone", async () => {
-    await expect(
-      harness.service.enableProjectCoordinator(enableInput({ trustLevel: "propose" })),
-    ).rejects.toThrow(/Trust level "propose"/);
+  test("enables at the requested trust level and stamps it on the agent record", async () => {
+    const state = await harness.service.enableProjectCoordinator(
+      enableInput({ trustLevel: "propose" }),
+    );
+
+    expect(state.trustLevel).toBe("propose");
+    const agent = harness.agentManager.getAgent(state.agentId!);
+    expect(agent?.labels[COORDINATOR_TRUST_LABEL]).toBe("propose");
+    // Persisted state carries the level so a restart restores it.
+    const snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    expect(snapshot.trustLevel).toBe("propose");
   });
 
   test("fails loudly when the daemon cannot serve Paseo tools", async () => {
@@ -593,6 +608,25 @@ describe("get/disable/update", () => {
         profile: { provider: "claude" },
       }),
     ).rejects.toThrow(/provider is fixed/);
+  });
+
+  test("a trust change rewrites the coordinator's system prompt", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    const before = harness.agentManager.getAgent(state.agentId!)?.config?.systemPrompt;
+    expect(before).toContain("may NOT spawn agents");
+
+    await harness.service.updateProjectCoordinator({
+      projectId: PROJECT_ID,
+      trustLevel: "ship",
+    });
+
+    const after = harness.agentManager.getAgent(state.agentId!)?.config?.systemPrompt;
+    expect(after).toContain("spawn subagents of every kind");
+    expect(after).not.toContain("may NOT spawn agents");
+    // The stored record carries it too — a resume must not boot the stale
+    // level's instructions.
+    const record = await harness.agentStorage.get(state.agentId!);
+    expect(record?.config?.systemPrompt).toContain("spawn subagents of every kind");
   });
 
   test("update returns null for an unconfigured project", async () => {
@@ -1230,6 +1264,7 @@ describe("observe gate at the catalog boundary", () => {
       agentStorage: harness.agentStorage,
       providerSnapshotManager: createProviderSnapshotManagerStub().manager,
       callerAgentId,
+      coordinator: harness.service,
       logger,
     });
   }
@@ -1259,6 +1294,921 @@ describe("observe gate at the catalog boundary", () => {
     // the call was not denied by the observe policy.
     const outcome = await catalog.executeTool("create_agent", {}).catch((error) => error);
     expect(outcome).not.toBeInstanceOf(CoordinatorToolDeniedError);
+  });
+
+  test("a delegated caller cannot mutate its coordinator or reach schedules or terminals", async () => {
+    const state = await harness.service.enableProjectCoordinator(
+      enableInput({ trustLevel: "ship" }),
+    );
+    const investigator = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      {
+        workspaceId: harness.workspace.workspaceId,
+        labels: {
+          [PARENT_AGENT_ID_LABEL]: state.agentId!,
+          [COORDINATOR_SUBAGENT_KIND_LABEL]: "investigator",
+        },
+      },
+    );
+    const catalog = catalogFor(investigator.id);
+
+    // Ancestor mutation — the check that a parameter-shadowed helper once
+    // silently skipped.
+    await expect(
+      catalog.executeTool("update_agent", { agentId: state.agentId!, name: "hostile" }),
+    ).rejects.toThrow(/ancestors/);
+    // Self-escalation through runtime settings.
+    await expect(
+      catalog.executeTool("update_agent", {
+        agentId: investigator.id,
+        settings: { modeId: "bypassPermissions" },
+      }),
+    ).rejects.toThrow(/on themselves/);
+    // Schedules mint parent-less agents — denied to the whole tree.
+    await expect(
+      catalog.executeTool("create_schedule", { prompt: "x", cron: "* * * * *" }),
+    ).rejects.toThrow(/schedules/);
+    // A terminal is a shell — denied to read-only roles.
+    await expect(catalog.executeTool("create_terminal", {})).rejects.toThrow(/terminals/);
+  });
+
+  test("a read-only delegated caller cannot provision workspaces", async () => {
+    const state = await harness.service.enableProjectCoordinator(
+      enableInput({ trustLevel: "ship" }),
+    );
+    const investigator = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      {
+        workspaceId: harness.workspace.workspaceId,
+        labels: {
+          [PARENT_AGENT_ID_LABEL]: state.agentId!,
+          [COORDINATOR_SUBAGENT_KIND_LABEL]: "investigator",
+        },
+      },
+    );
+    const catalog = catalogFor(investigator.id);
+
+    // Even inside its own checkout — provisioning is a write the role denies.
+    await expect(
+      catalog.executeTool("create_workspace", {
+        isolation: "local",
+        path: harness.projectDir,
+      }),
+    ).rejects.toThrow(/workspaces/);
+  });
+
+  test("a governed caller cannot mint a workspace at a foreign directory", async () => {
+    const state = await harness.service.enableProjectCoordinator(
+      enableInput({ trustLevel: "ship" }),
+    );
+    const catalog = catalogFor(state.agentId!);
+
+    // Legacy directory placement resolved outside the caller's checkout is
+    // denied before the workspace record can mint.
+    await expect(
+      catalog.executeTool("create_agent", {
+        provider: "codex/gpt-5.4",
+        title: "foreign spawn",
+        initialPrompt: "x",
+        relationship: { kind: "subagent" },
+        workspace: { kind: "create", source: { kind: "directory", path: "/tmp/foreign-dir" } },
+      }),
+    ).rejects.toThrow(/working directory/);
+  });
+
+  test("a delegated caller can still steer inside the tree", async () => {
+    const state = await harness.service.enableProjectCoordinator(
+      enableInput({ trustLevel: "ship" }),
+    );
+    const investigator = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      {
+        workspaceId: harness.workspace.workspaceId,
+        labels: {
+          [PARENT_AGENT_ID_LABEL]: state.agentId!,
+          [COORDINATOR_SUBAGENT_KIND_LABEL]: "investigator",
+        },
+      },
+    );
+    const catalog = catalogFor(investigator.id);
+    // send_agent_prompt to the coordinator reaches the handler — which fails
+    // on a real prompt send only after the boundary check passed.
+    const outcome = await catalog
+      .executeTool("send_agent_prompt", { agentId: state.agentId!, prompt: "report" })
+      .catch((error) => error);
+    expect(outcome).not.toBeInstanceOf(CoordinatorRequestError);
+  });
+});
+
+describe("spawn gate", () => {
+  const enableAt = (
+    trustLevel: CoordinatorTrustLevel,
+    overrides?: Partial<Parameters<CoordinatorService["enableProjectCoordinator"]>[0]>,
+  ) => harness.service.enableProjectCoordinator(enableInput({ trustLevel, ...overrides }));
+
+  /** Mirrors the production path: the gate's decision feeds createAgent. */
+  const spawnThroughGate = (
+    parentAgentId: string,
+    gate: { subagentKind?: "investigator" | "implementer" | "reviewer"; detached?: boolean } = {},
+  ) =>
+    harness.service.runCoordinatorSpawn({ parentAgentId, ...gate }, (decision) =>
+      harness.agentManager.createAgent(
+        { provider: "codex", cwd: harness.projectDir, title: "subagent" },
+        undefined,
+        {
+          workspaceId: harness.workspace.workspaceId,
+          labels: decision?.labels,
+          env: decision?.env,
+        },
+      ),
+    );
+
+  test("observe coordinators cannot spawn", async () => {
+    const state = await enableAt("observe");
+    await expect(
+      harness.service.assertSpawnAllowed({ parentAgentId: state.agentId! }),
+    ).rejects.toThrow(/Observe trust/);
+    await expect(spawnThroughGate(state.agentId!)).rejects.toThrow(/Observe trust/);
+  });
+
+  test("propose requires a subagent kind and rejects implementers", async () => {
+    const state = await enableAt("propose");
+    await expect(
+      harness.service.assertSpawnAllowed({ parentAgentId: state.agentId! }),
+    ).rejects.toThrow(/subagentKind/);
+    await expect(spawnThroughGate(state.agentId!, { subagentKind: "implementer" })).rejects.toThrow(
+      /Ship trust/,
+    );
+
+    const investigator = await spawnThroughGate(state.agentId!, {
+      subagentKind: "investigator",
+    });
+    expect(investigator.labels[COORDINATOR_SUBAGENT_KIND_LABEL]).toBe("investigator");
+    expect(investigator.labels[PARENT_AGENT_ID_LABEL]).toBe(state.agentId);
+  });
+
+  test("ship coordinators stamp kind, lineage, project, and isolation env", async () => {
+    const state = await enableAt("ship");
+    let capturedEnv: Record<string, string> | undefined;
+    const implementer = await harness.service.runCoordinatorSpawn(
+      { parentAgentId: state.agentId!, subagentKind: "implementer" },
+      async (decision) => {
+        capturedEnv = decision?.env;
+        return harness.agentManager.createAgent(
+          { provider: "codex", cwd: harness.projectDir },
+          undefined,
+          {
+            workspaceId: harness.workspace.workspaceId,
+            labels: decision?.labels,
+          },
+        );
+      },
+    );
+
+    expect(implementer.labels[PARENT_AGENT_ID_LABEL]).toBe(state.agentId);
+    expect(implementer.labels[COORDINATOR_SUBAGENT_KIND_LABEL]).toBe("implementer");
+    expect(implementer.labels[COORDINATOR_PROJECT_ID_LABEL]).toBe(PROJECT_ID);
+    expect(capturedEnv).toEqual({ [SPAWN_ISOLATION_ENV]: "worktree" });
+  });
+
+  test("detached creation inside a coordinator tree is rejected", async () => {
+    const state = await enableAt("ship");
+    await expect(spawnThroughGate(state.agentId!, { detached: true })).rejects.toThrow(
+      /Detached creation drops the lineage/,
+    );
+  });
+
+  test("read-only kinds stamp delegateOnly; the writing role stamps worktree isolation", async () => {
+    const state = await enableAt("ship");
+    const decisions = new Map<string, CoordinatorSpawnDecision | null>();
+    for (const kind of ["investigator", "reviewer", "implementer"] as const) {
+      await harness.service.runCoordinatorSpawn(
+        { parentAgentId: state.agentId!, subagentKind: kind },
+        async (decision) => {
+          decisions.set(kind, decision);
+          return harness.agentManager.createAgent(
+            { provider: "codex", cwd: harness.projectDir },
+            undefined,
+            { workspaceId: harness.workspace.workspaceId, labels: decision?.labels },
+          );
+        },
+      );
+    }
+    expect(decisions.get("investigator")?.delegateOnly).toBe(true);
+    expect(decisions.get("reviewer")?.delegateOnly).toBe(true);
+    expect(decisions.get("implementer")?.delegateOnly).toBeUndefined();
+    expect(decisions.get("implementer")?.isolation).toBe("worktree");
+    expect(decisions.get("investigator")?.isolation).toBeUndefined();
+  });
+
+  test("a kindless spawn at ship trust still gets worktree isolation", async () => {
+    const state = await enableAt("ship");
+    const decision = await harness.service.assertSpawnAllowed({
+      parentAgentId: state.agentId!,
+    });
+    // A kindless child writes — without isolation it would edit the
+    // coordinator's checkout alongside every other worker.
+    expect(decision?.isolation).toBe("worktree");
+    expect(decision?.delegateOnly).toBeUndefined();
+  });
+
+  test("callers outside a coordinator tree spawn ungated", async () => {
+    const plain = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    const decision = await harness.service.assertSpawnAllowed({ parentAgentId: plain.id });
+    expect(decision).toBeNull();
+    const child = await spawnThroughGate(plain.id);
+    expect(child.labels[PARENT_AGENT_ID_LABEL]).toBeUndefined();
+  });
+
+  test("the depth cap trips with a deterministic, deduplicated wake row", async () => {
+    const state = await enableAt("ship");
+    await harness.service.updateProjectCoordinator({
+      projectId: PROJECT_ID,
+      guard: { maxSpawnDepth: 2 },
+    });
+    const child = await spawnThroughGate(state.agentId!, { subagentKind: "implementer" });
+    const grandchild = await spawnThroughGate(child.id, { subagentKind: "implementer" });
+    // The grandchild sits at the limit — its own spawn lands at depth 3.
+    await expect(spawnThroughGate(grandchild.id, { subagentKind: "implementer" })).rejects.toThrow(
+      /depth 3/,
+    );
+    await expect(spawnThroughGate(grandchild.id, { subagentKind: "implementer" })).rejects.toThrow(
+      /depth 3/,
+    );
+
+    const snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    expect(snapshot.wake?.id).toBe(`wake:guard:depth:${state.agentId}`);
+    expect(snapshot.wake?.text).toContain("depth 3");
+  });
+
+  test("the concurrency cap counts in-flight descendants and frees slots on close", async () => {
+    const state = await enableAt("ship");
+    await harness.service.updateProjectCoordinator({
+      projectId: PROJECT_ID,
+      guard: { maxConcurrentSubagents: 1 },
+    });
+    const first = await spawnThroughGate(state.agentId!, { subagentKind: "implementer" });
+    // Only a running turn occupies a slot — an idle child holds none.
+    await expect(
+      spawnThroughGate(state.agentId!, { subagentKind: "implementer" }),
+    ).resolves.toBeDefined();
+    await harness.agentManager.closeAgent(harness.agentManager.listAgents().at(-1)!.id);
+
+    const firstSession = harness.client.sessions.at(-2)!;
+    firstSession.holdTurn = true;
+    firstSession.push({ type: "turn_started", provider: "codex", turnId: "t1" });
+    for (
+      let i = 0;
+      i < 10 && harness.agentManager.getAgent(first.id)?.lifecycle !== "running";
+      i++
+    ) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    expect(harness.agentManager.getAgent(first.id)?.lifecycle).toBe("running");
+
+    await expect(spawnThroughGate(state.agentId!, { subagentKind: "implementer" })).rejects.toThrow(
+      /cap of 1/,
+    );
+
+    const snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    expect(snapshot.wake?.id).toBe(`wake:guard:concurrency:${state.agentId}`);
+
+    await harness.agentManager.closeAgent(first.id);
+    const second = await spawnThroughGate(state.agentId!, { subagentKind: "implementer" });
+    expect(second.labels[PARENT_AGENT_ID_LABEL]).toBe(state.agentId);
+  });
+
+  test("concurrent spawns serialize against the cap", async () => {
+    const state = await enableAt("ship");
+    await harness.service.updateProjectCoordinator({
+      projectId: PROJECT_ID,
+      guard: { maxConcurrentSubagents: 1 },
+    });
+    // The cap counts in-flight descendants — the first child must hold a turn
+    // before the second's check runs under the lock.
+    const spawnRunning = () =>
+      harness.service.runCoordinatorSpawn(
+        { parentAgentId: state.agentId!, subagentKind: "implementer" },
+        async (decision) => {
+          const agent = await harness.agentManager.createAgent(
+            { provider: "codex", cwd: harness.projectDir, title: "subagent" },
+            undefined,
+            {
+              workspaceId: harness.workspace.workspaceId,
+              labels: decision?.labels,
+            },
+          );
+          harness.client.sessions
+            .at(-1)!
+            .push({ type: "turn_started", provider: "codex", turnId: "t1" });
+          // The turn event lands on the manager's event queue — wait for the
+          // lifecycle flip before releasing the spawn lock.
+          for (
+            let i = 0;
+            i < 20 && harness.agentManager.getAgent(agent.id)?.lifecycle !== "running";
+            i++
+          ) {
+            await new Promise((resolve) => setImmediate(resolve));
+          }
+          return agent;
+        },
+      );
+    const outcomes = await Promise.allSettled([spawnRunning(), spawnRunning()]);
+    const fulfilled = outcomes.filter((o) => o.status === "fulfilled");
+    const rejected = outcomes.filter((o) => o.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason.message).toMatch(/cap of 1/);
+  });
+
+  test("the gated create dispatches the initial turn inside the lock — the second of two parallel creates hits the cap", async () => {
+    const state = await enableAt("ship");
+    await harness.service.updateProjectCoordinator({
+      projectId: PROJECT_ID,
+      guard: { maxConcurrentSubagents: 1 },
+    });
+    // New sessions hold their turns open, so the first child's run is still
+    // in-flight when the second spawn's check runs.
+    harness.client.holdTurns = true;
+    const spawn = () =>
+      createAgentCommand(
+        {
+          agentManager: harness.agentManager,
+          agentStorage: harness.agentStorage,
+          logger,
+          providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+          coordinator: harness.service,
+        },
+        {
+          kind: "mcp",
+          provider: "codex",
+          title: "investigator",
+          initialPrompt: "look around",
+          background: true,
+          notifyOnFinish: false,
+          callerAgentId: state.agentId!,
+          subagentKind: "investigator",
+        },
+      );
+    const outcomes = await Promise.allSettled([spawn(), spawn()]);
+    const rejected = outcomes.filter((o) => o.status === "rejected");
+    expect(outcomes.filter((o) => o.status === "fulfilled")).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason.message).toMatch(/cap of 1/);
+  });
+});
+
+describe("resolveSubagentProfile", () => {
+  test("kind profiles win; fallback covers the rest; missing profiles name the kind", async () => {
+    await harness.service.enableProjectCoordinator(
+      enableInput({
+        trustLevel: "ship",
+        profiles: {
+          investigator: { provider: "claude", model: "opus" },
+          fallback: { provider: "codex", model: "gpt-5.4", modeId: "plan" },
+        },
+      }),
+    );
+    const state = await harness.service.getProjectCoordinator(PROJECT_ID);
+    const callerAgentId = state!.agentId!;
+
+    const investigator = await harness.service.resolveSubagentProfile({
+      callerAgentId,
+      kind: "investigator",
+    });
+    expect(investigator.provider).toBe("claude");
+    expect(investigator.model).toBe("opus");
+
+    const reviewer = await harness.service.resolveSubagentProfile({
+      callerAgentId,
+      kind: "reviewer",
+    });
+    expect(reviewer.provider).toBe("codex");
+    expect(reviewer.modeId).toBe("plan");
+
+    const withoutFallback = await harness.service.updateProjectCoordinator({
+      projectId: PROJECT_ID,
+      profiles: { implementer: { provider: "codex" } },
+    });
+    expect(withoutFallback?.profiles?.implementer?.provider).toBe("codex");
+    await expect(
+      harness.service.resolveSubagentProfile({ callerAgentId, kind: "investigator" }),
+    ).rejects.toThrow(/investigator/);
+  });
+
+  test("callers outside a coordinator tree cannot resolve profiles", async () => {
+    const plain = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    await expect(
+      harness.service.resolveSubagentProfile({ callerAgentId: plain.id, kind: "investigator" }),
+    ).rejects.toThrow(/under a coordinator/);
+  });
+});
+
+describe("assertAgentTargetAllowed", () => {
+  const enableAt = (
+    trustLevel: CoordinatorTrustLevel,
+    scope: "everything" | "project" = "everything",
+  ) => harness.service.enableProjectCoordinator(enableInput({ trustLevel, scope }));
+
+  const spawnChild = (parentAgentId: string) =>
+    harness.agentManager.createAgent({ provider: "codex", cwd: harness.projectDir }, undefined, {
+      workspaceId: harness.workspace.workspaceId,
+      labels: { [PARENT_AGENT_ID_LABEL]: parentAgentId },
+    });
+
+  test("a coordinator steers its descendants at any level", async () => {
+    const state = await enableAt("observe");
+    const child = await spawnChild(state.agentId!);
+    await expect(
+      harness.service.assertAgentTargetAllowed(state.agentId!, child.id),
+    ).resolves.toBeUndefined();
+    // Self-targeting is always allowed.
+    await expect(
+      harness.service.assertAgentTargetAllowed(state.agentId!, state.agentId!),
+    ).resolves.toBeUndefined();
+  });
+
+  test("a coordinator below ship cannot touch out-of-tree sessions", async () => {
+    const state = await enableAt("propose");
+    const other = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    await expect(
+      harness.service.assertAgentTargetAllowed(state.agentId!, other.id),
+    ).rejects.toThrow(/own subagents/);
+  });
+
+  test("ship trust reaches in-scope project sessions but not foreign ones", async () => {
+    const state = await enableAt("ship");
+    const inScope = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    await expect(
+      harness.service.assertAgentTargetAllowed(state.agentId!, inScope.id),
+    ).resolves.toBeUndefined();
+
+    const outsideWorkspace = makeWorkspace("wks_foreign", "prj_elsewhere", harness.projectDir);
+    harness.workspaceRegistry.add(outsideWorkspace);
+    const foreign = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      { workspaceId: "wks_foreign" },
+    );
+    await expect(
+      harness.service.assertAgentTargetAllowed(state.agentId!, foreign.id),
+    ).rejects.toThrow(/project's scope/);
+  });
+
+  test("project scope narrows ship trust to delegated sessions only", async () => {
+    const state = await enableAt("ship", "project");
+    const yours = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    await expect(
+      harness.service.assertAgentTargetAllowed(state.agentId!, yours.id),
+    ).rejects.toThrow(/outside that boundary|outside that scope|project's scope|own subagents/);
+
+    const delegated = await spawnChild(state.agentId!);
+    await expect(
+      harness.service.assertAgentTargetAllowed(state.agentId!, delegated.id),
+    ).resolves.toBeUndefined();
+  });
+
+  test("delegated callers act inside the tree and nowhere else", async () => {
+    const state = await enableAt("ship");
+    const child = await spawnChild(state.agentId!);
+    const sibling = await spawnChild(state.agentId!);
+    await expect(
+      harness.service.assertAgentTargetAllowed(child.id, sibling.id),
+    ).resolves.toBeUndefined();
+    // A delegated caller may also steer the coordinator it reports to.
+    await expect(
+      harness.service.assertAgentTargetAllowed(child.id, state.agentId!),
+    ).resolves.toBeUndefined();
+
+    const outside = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    await expect(harness.service.assertAgentTargetAllowed(child.id, outside.id)).rejects.toThrow(
+      /outside that boundary/,
+    );
+  });
+
+  test("callers with no coordinator ancestor keep legacy behavior", async () => {
+    const plain = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    const other = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    await expect(
+      harness.service.assertAgentTargetAllowed(plain.id, other.id),
+    ).resolves.toBeUndefined();
+  });
+
+  test("a delegated caller steers but never mutates its ancestors", async () => {
+    const state = await enableAt("ship");
+    const child = await spawnChild(state.agentId!);
+    const grandchild = await spawnChild(child.id);
+    await expect(
+      harness.service.assertAgentTargetAllowed(grandchild.id, state.agentId!, {
+        action: "mutate",
+      }),
+    ).rejects.toThrow(/ancestors/);
+    await expect(
+      harness.service.assertAgentTargetAllowed(grandchild.id, child.id, { action: "mutate" }),
+    ).rejects.toThrow(/ancestors/);
+    // Steering upward stays open — delegates report to what they roll up to.
+    await expect(
+      harness.service.assertAgentTargetAllowed(grandchild.id, state.agentId!),
+    ).resolves.toBeUndefined();
+    // Mutating a sibling inside the tree is still fine.
+    const sibling = await spawnChild(state.agentId!);
+    await expect(
+      harness.service.assertAgentTargetAllowed(grandchild.id, sibling.id, { action: "mutate" }),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe("delegation boundaries", () => {
+  const enableShip = () =>
+    harness.service.enableProjectCoordinator(enableInput({ trustLevel: "ship" }));
+
+  const delegatedChild = (
+    coordinatorAgentId: string,
+    opts: { workspaceId?: string; kind?: "investigator" | "implementer" | "reviewer" } = {},
+  ) =>
+    harness.agentManager.createAgent({ provider: "codex", cwd: harness.projectDir }, undefined, {
+      workspaceId: opts.workspaceId ?? harness.workspace.workspaceId,
+      labels: {
+        [PARENT_AGENT_ID_LABEL]: coordinatorAgentId,
+        ...(opts.kind ? { [COORDINATOR_SUBAGENT_KIND_LABEL]: opts.kind } : {}),
+      },
+    });
+
+  test("a delegate mutates only its own workspace, never one an ancestor shares", async () => {
+    const state = await enableShip();
+    const own = makeWorkspace("wks_delegate", PROJECT_ID, harness.projectDir);
+    harness.workspaceRegistry.add(own);
+    const child = await delegatedChild(state.agentId!, { workspaceId: own.workspaceId });
+    await expect(
+      harness.service.assertWorkspaceTargetAllowed(child.id, own.workspaceId),
+    ).resolves.toBeUndefined();
+
+    // Sharing the coordinator's workspace flips the answer — archiving it
+    // would cascade onto the coordinator itself.
+    const shared = await delegatedChild(state.agentId!);
+    await expect(
+      harness.service.assertWorkspaceTargetAllowed(shared.id, harness.workspace.workspaceId),
+    ).rejects.toThrow(/ancestor occupies/);
+
+    const foreign = makeWorkspace("wks_foreign2", "prj_elsewhere", harness.projectDir);
+    harness.workspaceRegistry.add(foreign);
+    await expect(
+      harness.service.assertWorkspaceTargetAllowed(child.id, foreign.workspaceId),
+    ).rejects.toThrow(/own workspace/);
+  });
+
+  test("a coordinator mutates only workspaces inside its own project", async () => {
+    const state = await enableShip();
+    await expect(
+      harness.service.assertWorkspaceTargetAllowed(state.agentId!, harness.workspace.workspaceId),
+    ).resolves.toBeUndefined();
+
+    const foreign = makeWorkspace("wks_foreign3", "prj_elsewhere", harness.projectDir);
+    harness.workspaceRegistry.add(foreign);
+    await expect(
+      harness.service.assertWorkspaceTargetAllowed(state.agentId!, foreign.workspaceId),
+    ).rejects.toThrow(/own project/);
+  });
+
+  test("governed callers' cwd-bound resources stay under their own checkout", async () => {
+    const state = await enableShip();
+    const child = await delegatedChild(state.agentId!, { kind: "implementer" });
+    await expect(
+      harness.service.assertScopedCwdAllowed(child.id, path.join(harness.projectDir, "sub")),
+    ).resolves.toBeUndefined();
+    await expect(harness.service.assertScopedCwdAllowed(child.id, "/elsewhere")).rejects.toThrow(
+      /own working directory/,
+    );
+  });
+
+  test("read-only roles and the coordinator may not touch terminals", async () => {
+    const state = await enableShip();
+    const investigator = await delegatedChild(state.agentId!, { kind: "investigator" });
+    await expect(harness.service.assertTerminalAccessAllowed(investigator.id)).rejects.toThrow(
+      /terminals/,
+    );
+    // The coordinator itself is delegate-only — terminals are denied to it too.
+    await expect(harness.service.assertTerminalAccessAllowed(state.agentId!)).rejects.toThrow(
+      /terminals/,
+    );
+    // The writing role keeps terminal access.
+    const implementer = await delegatedChild(state.agentId!, { kind: "implementer" });
+    await expect(
+      harness.service.assertTerminalAccessAllowed(implementer.id),
+    ).resolves.toBeUndefined();
+    // Ungoverned callers are unaffected.
+    const plain = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    await expect(harness.service.assertTerminalAccessAllowed(plain.id)).resolves.toBeUndefined();
+  });
+
+  test("governed callers may not create or modify schedules", async () => {
+    const state = await enableShip();
+    const child = await delegatedChild(state.agentId!, { kind: "implementer" });
+    await expect(harness.service.assertScheduleAccessAllowed(child.id)).rejects.toThrow(
+      /schedules/,
+    );
+    await expect(harness.service.assertScheduleAccessAllowed(state.agentId!)).rejects.toThrow(
+      /schedules/,
+    );
+    const plain = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    await expect(harness.service.assertScheduleAccessAllowed(plain.id)).resolves.toBeUndefined();
+  });
+
+  test("a governed caller's workspaces attach only to its own project", async () => {
+    const state = await enableShip();
+    const child = await delegatedChild(state.agentId!, { kind: "implementer" });
+    await expect(
+      harness.service.assertProjectScopeAllowed(child.id, PROJECT_ID),
+    ).resolves.toBeUndefined();
+    await expect(
+      harness.service.assertProjectScopeAllowed(child.id, "prj_elsewhere"),
+    ).rejects.toThrow(/own project/);
+  });
+
+  test("governed callers may not rewrite their own settings or answer their own permissions", async () => {
+    const state = await enableShip();
+    const child = await delegatedChild(state.agentId!);
+    await expect(
+      harness.service.assertSelfActionAllowed(child.id, "change runtime settings"),
+    ).rejects.toThrow(/on themselves/);
+    await expect(
+      harness.service.assertSelfActionAllowed(state.agentId!, "answer permission requests"),
+    ).rejects.toThrow(/on themselves/);
+    const plain = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    await expect(
+      harness.service.assertSelfActionAllowed(plain.id, "change runtime settings"),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe("usage meter", () => {
+  const enableShip = () =>
+    harness.service.enableProjectCoordinator(enableInput({ trustLevel: "ship" }));
+
+  const delegatedChild = async (coordinatorAgentId: string) =>
+    harness.agentManager.createAgent({ provider: "codex", cwd: harness.projectDir }, undefined, {
+      workspaceId: harness.workspace.workspaceId,
+      labels: { [PARENT_AGENT_ID_LABEL]: coordinatorAgentId },
+    });
+
+  const usageEvent = (usage: { inputTokens: number; outputTokens: number }) => ({
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+  });
+
+  test("turn totals without mid-turn updates count whole; advancing updates count deltas", async () => {
+    const state = await enableShip();
+    await harness.service.start();
+    await delegatedChild(state.agentId!);
+    const session = harness.client.sessions.at(-1)!;
+
+    // Per-turn shape: a single total on completion counts whole.
+    session.push({ type: "turn_started", provider: "codex", turnId: "t1" });
+    session.push({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "t1",
+      usage: usageEvent({ inputTokens: 100, outputTokens: 50 }),
+    });
+
+    // Session-cumulative shape: the counter keeps accumulating across turns,
+    // so only the advance over the last reading counts — and a terminal that
+    // repeats the last reading adds nothing.
+    session.push({ type: "turn_started", provider: "codex", turnId: "t2" });
+    session.push({
+      type: "usage_updated",
+      provider: "codex",
+      usage: usageEvent({ inputTokens: 200, outputTokens: 80 }),
+    });
+    session.push({
+      type: "usage_updated",
+      provider: "codex",
+      usage: usageEvent({ inputTokens: 240, outputTokens: 100 }),
+    });
+    session.push({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "t2",
+      usage: usageEvent({ inputTokens: 240, outputTokens: 100 }),
+    });
+
+    await flushBoard();
+    const snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    // 150 counted whole for t1; t2's readings are cumulative against that
+    // baseline, so the meter lands on the final reading, not a sum.
+    expect(snapshot.usage?.monthlyTokens).toBe(340);
+  });
+
+  test("per-step providers count each reading whole and charge the terminal remainder", async () => {
+    const state = await enableShip();
+    await harness.service.start();
+    await delegatedChild(state.agentId!);
+    const session = harness.client.sessions.at(-1)!;
+
+    // OpenCode-style readings are that step's spend, not a running total —
+    // summing them as cumulative diffs would undercount to the last step.
+    session.push({
+      type: "usage_updated",
+      provider: "opencode",
+      usage: usageEvent({ inputTokens: 100, outputTokens: 20 }),
+    });
+    session.push({
+      type: "usage_updated",
+      provider: "opencode",
+      usage: usageEvent({ inputTokens: 60, outputTokens: 10 }),
+    });
+    // The terminal carries the whole turn's total — only the part no step
+    // reading covered still counts.
+    session.push({
+      type: "turn_completed",
+      provider: "opencode",
+      turnId: "t1",
+      usage: usageEvent({ inputTokens: 180, outputTokens: 30 }),
+    });
+
+    await flushBoard();
+    const snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    expect(snapshot.usage?.monthlyTokens).toBe(210);
+  });
+
+  test("a lower reading after a restart counts as fresh spend, not negative", async () => {
+    const state = await enableShip();
+    await harness.service.start();
+    await delegatedChild(state.agentId!);
+    const session = harness.client.sessions.at(-1)!;
+
+    session.push({
+      type: "usage_updated",
+      provider: "codex",
+      usage: usageEvent({ inputTokens: 500, outputTokens: 0 }),
+    });
+    // The counter rebased (resume) — the new reading is new spend.
+    session.push({
+      type: "usage_updated",
+      provider: "codex",
+      usage: usageEvent({ inputTokens: 60, outputTokens: 0 }),
+    });
+
+    await flushBoard();
+    const snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    expect(snapshot.usage?.monthlyTokens).toBe(560);
+  });
+
+  test("crossing the token expectation writes one deduplicated wake row", async () => {
+    const state = await enableShip();
+    await harness.service.updateProjectCoordinator({
+      projectId: PROJECT_ID,
+      usageExpectation: { monthlyTokens: 200 },
+    });
+    await harness.service.start();
+    await delegatedChild(state.agentId!);
+    const session = harness.client.sessions.at(-1)!;
+
+    session.push({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "t1",
+      usage: usageEvent({ inputTokens: 150, outputTokens: 0 }),
+    });
+    await flushBoard();
+    let snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    expect(snapshot.wake?.text ?? "").not.toContain("crossed the");
+
+    session.push({ type: "turn_started", provider: "codex", turnId: "t2" });
+    session.push({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "t2",
+      usage: usageEvent({ inputTokens: 100, outputTokens: 0 }),
+    });
+    await flushBoard();
+    snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    expect(snapshot.wake?.text).toContain("crossed the 200 expectation");
+
+    // More spend must not churn the row.
+    session.push({ type: "turn_started", provider: "codex", turnId: "t3" });
+    session.push({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "t3",
+      usage: usageEvent({ inputTokens: 500, outputTokens: 0 }),
+    });
+    await flushBoard();
+    snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    expect(snapshot.wake?.id ?? "").toContain("wake:usage:tokens:");
+  });
+
+  test("crossing the spawn expectation after a gated spawn writes a wake row", async () => {
+    const state = await enableShip();
+    await harness.service.updateProjectCoordinator({
+      projectId: PROJECT_ID,
+      usageExpectation: { monthlySpawns: 1 },
+    });
+    await harness.service.runCoordinatorSpawn(
+      { parentAgentId: state.agentId!, subagentKind: "implementer" },
+      (decision) =>
+        harness.agentManager.createAgent(
+          { provider: "codex", cwd: harness.projectDir },
+          undefined,
+          { workspaceId: harness.workspace.workspaceId, labels: decision?.labels },
+        ),
+    );
+
+    const snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    expect(snapshot.wake?.text).toContain("1 subagents this month crossed the 1 spawn expectation");
+    expect(snapshot.usage?.monthlySpawns).toBe(1);
+  });
+
+  test("usage from unmanaged agents is not metered", async () => {
+    await enableShip();
+    await harness.service.start();
+    await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    const session = harness.client.sessions.at(-1)!;
+    session.push({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "t1",
+      usage: usageEvent({ inputTokens: 900, outputTokens: 0 }),
+    });
+    await flushBoard();
+    const snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    expect(snapshot.usage?.monthlyTokens).toBe(0);
+  });
+});
+
+describe("trust step-up mid-session", () => {
+  test("raising trust mirrors the label onto the live coordinator", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    const coordinator = harness.agentManager.getAgent(state.agentId!);
+    expect(coordinator?.labels[COORDINATOR_TRUST_LABEL]).toBe("observe");
+
+    await harness.service.updateProjectCoordinator({
+      projectId: PROJECT_ID,
+      trustLevel: "ship",
+    });
+
+    expect(harness.agentManager.getAgent(state.agentId!)?.labels[COORDINATOR_TRUST_LABEL]).toBe(
+      "ship",
+    );
+    const snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    expect(snapshot.wake?.text).toBe("Trust: now at Ship");
+    // The spawn gate immediately honors the raised level.
+    const decision = await harness.service.assertSpawnAllowed({
+      parentAgentId: state.agentId!,
+      subagentKind: "implementer",
+    });
+    expect(decision?.env?.[SPAWN_ISOLATION_ENV]).toBe("worktree");
   });
 });
 

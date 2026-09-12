@@ -1,5 +1,10 @@
 import type { Logger } from "pino";
 
+import type { CoordinatorSubagentKind } from "@getpaseo/protocol/agent-labels";
+import type {
+  CoordinatorService,
+  CoordinatorSpawnDecision,
+} from "../../coordinator/coordinator-service.js";
 import type { TerminalManager } from "../../../terminal/terminal-manager.js";
 import type { CreatePaseoWorktreeInput } from "../../paseo-worktree-service.js";
 import { expandUserPath, resolvePathFromBase } from "../../path-utils.js";
@@ -25,7 +30,8 @@ import {
   appendTimelineItemIfAgentKnown,
   emitLiveTimelineItemIfAgentKnown,
 } from "../timeline-append.js";
-import { resolveCreateAgentIntent } from "./intent.js";
+import { stripAgentToolLabels } from "../daemon-managed-labels.js";
+import { resolveCreateAgentIntent, type CreateAgentIntent } from "./intent.js";
 
 export interface CreateAgentSessionWorktreeResult {
   sessionConfig: AgentSessionConfig;
@@ -46,6 +52,12 @@ export interface CreateAgentCommandDependencies {
   createPaseoWorktree?: CreatePaseoWorktreeWorkflowFn;
   // Mints a fresh directory workspace for a cwd and returns its id.
   ensureWorkspaceForCreate?: EnsureWorkspaceForCreate;
+  /**
+   * Coordinator spawn gate. When present and the create has a caller agent
+   * under a coordinator, the spawn decision (trust, kind, guard caps) runs
+   * serialized around resolution + creation.
+   */
+  coordinator?: Pick<CoordinatorService, "runCoordinatorSpawn">;
 }
 
 export type EnsureWorkspaceForCreate = (
@@ -56,6 +68,12 @@ export type EnsureWorkspaceForCreate = (
 export interface CreateAgentFromSessionInput {
   kind: "session";
   agentId?: string;
+  /**
+   * Managed CLI invocations create agents on behalf of a running agent. When
+   * that caller sits under a coordinator the spawn gate applies: trust, guard
+   * caps, and daemon-owned lineage stamps run serialized around creation.
+   */
+  callerAgentId?: string;
   config: AgentSessionConfig;
   workspaceId: string;
   worktreeName?: string;
@@ -89,6 +107,12 @@ export interface CreateAgentFromMcpInput {
   features?: Record<string, unknown>;
   labels?: Record<string, string>;
   mode?: string;
+  /**
+   * Coordinator role kind for this spawn (investigator/implementer/reviewer).
+   * Only meaningful when the caller sits under a coordinator — the spawn gate
+   * validates kind against the coordinator's trust and resolves its profile.
+   */
+  subagentKind?: CoordinatorSubagentKind;
   unattended?: boolean;
   promptFailure?: CreateAgentPromptFailureMode;
   background: boolean;
@@ -116,6 +140,12 @@ export interface CreateAgentFromMcpInput {
     action?: "branch-off" | "checkout";
     githubPrNumber?: number;
   };
+  /**
+   * The caller asked for a fresh workspace at `cwd` instead of inheriting
+   * its own — the workspace record mints inside the spawn gate so a denied
+   * spawn leaves nothing behind.
+   */
+  mintWorkspaceForCwd?: boolean;
 }
 
 export type CreateAgentCommandInput = CreateAgentFromSessionInput | CreateAgentFromMcpInput;
@@ -175,17 +205,74 @@ export async function createAgentCommand(
   dependencies: CreateAgentCommandDependencies,
   input: CreateAgentCommandInput,
 ): Promise<CreateAgentCommandResult> {
+  const callerAgentId = input.callerAgentId;
+  if (callerAgentId && dependencies.coordinator) {
+    // Coordinator-governed spawn: trust/kind/guard checks and the daemon's
+    // label/env stamps run serialized around resolution and creation, so a
+    // denied spawn never mints a worktree and two concurrent spawns cannot
+    // race the concurrent-subagent cap.
+    const gated = await dependencies.coordinator.runCoordinatorSpawn(
+      {
+        parentAgentId: callerAgentId,
+        ...(input.kind === "mcp" && input.subagentKind ? { subagentKind: input.subagentKind } : {}),
+        ...(input.kind === "mcp" && input.detached ? { detached: true } : {}),
+      },
+      async (decision) => {
+        const gatedResolved =
+          input.kind === "session"
+            ? await resolveSessionCreateAgent(dependencies, input, decision)
+            : await resolveMcpCreateAgent(dependencies, input, decision);
+        const gatedSnapshot = await dependencies.agentManager.createAgent(
+          gatedResolved.config,
+          input.kind === "session" ? input.agentId : undefined,
+          gatedResolved.createOptions,
+        );
+        // Dispatch the initial turn inside the lock: the cap counts in-flight
+        // work, so the new descendant must already hold a run when the next
+        // spawn re-checks — an idle-then-prompted gap would let concurrent
+        // creates all slide under the cap.
+        const promptDispatch =
+          gatedResolved.prompt !== undefined
+            ? await sendInitialPrompt(dependencies, gatedResolved, gatedSnapshot)
+            : undefined;
+        return { resolved: gatedResolved, snapshot: gatedSnapshot, promptDispatch };
+      },
+    );
+    return finishCreatedAgent(
+      dependencies,
+      input,
+      gated.resolved,
+      gated.snapshot,
+      gated.promptDispatch,
+    );
+  }
+
   const resolved =
     input.kind === "session"
-      ? await resolveSessionCreateAgent(dependencies, input)
-      : await resolveMcpCreateAgent(dependencies, input);
+      ? await resolveSessionCreateAgent(dependencies, input, null)
+      : await resolveMcpCreateAgent(dependencies, input, null);
 
   const snapshot = await dependencies.agentManager.createAgent(
     resolved.config,
     input.kind === "session" ? input.agentId : undefined,
     resolved.createOptions,
   );
+  return finishCreatedAgent(dependencies, input, resolved, snapshot);
+}
 
+interface InitialPromptDispatch {
+  started: boolean;
+  liveSnapshot: ManagedAgent;
+  error?: unknown;
+}
+
+async function finishCreatedAgent(
+  dependencies: CreateAgentCommandDependencies,
+  input: CreateAgentCommandInput,
+  resolved: ResolvedCreateAgent,
+  snapshot: ManagedAgent,
+  promptDispatch?: InitialPromptDispatch,
+): Promise<CreateAgentCommandResult> {
   resolved.setupContinuation?.startAfterAgentCreate({
     agentId: snapshot.id,
   });
@@ -196,8 +283,14 @@ export async function createAgentCommand(
   if (input.kind === "mcp") {
     input.onCreated?.({ agentId: snapshot.id, createdWorktree: resolved.createdWorktree ?? null });
   }
-  if (resolved.prompt !== undefined) {
-    const sendResult = await sendInitialPrompt(dependencies, resolved, snapshot);
+  // The gated path dispatches the prompt inside the spawn lock and passes the
+  // result in; the ungated path dispatches here.
+  const sendResult =
+    promptDispatch ??
+    (resolved.prompt !== undefined
+      ? await sendInitialPrompt(dependencies, resolved, snapshot)
+      : undefined);
+  if (sendResult) {
     initialPromptStarted = sendResult.started;
     liveSnapshot = sendResult.liveSnapshot;
     initialPromptError = sendResult.error ?? null;
@@ -227,6 +320,7 @@ export async function createAgentCommand(
 async function resolveSessionCreateAgent(
   dependencies: CreateAgentCommandDependencies,
   input: CreateAgentFromSessionInput,
+  spawnDecision: CoordinatorSpawnDecision | null,
 ): Promise<ResolvedCreateAgent> {
   const trimmedPrompt = input.initialPrompt?.trim();
   const {
@@ -278,13 +372,17 @@ async function resolveSessionCreateAgent(
         }
       : undefined;
   const workspaceId = setupContinuation ? createdWorkspaceId : input.workspaceId;
+  // The gate's stamps win over caller labels; the session path's labels were
+  // already stripped of daemon-managed keys during intent resolution.
+  const labels = spawnDecision ? { ...input.labels, ...spawnDecision.labels } : input.labels;
+  const env = spawnDecision?.env ? { ...input.env, ...spawnDecision.env } : input.env;
 
   return {
     config: sessionConfig,
     createOptions: {
-      labels: input.labels,
+      labels,
       initialPrompt: trimmedPrompt,
-      env: input.env,
+      env,
       initialTitle: input.provisionalTitle,
       // A legacy git/worktreeName worktree creates a fresh workspace, so the
       // agent belongs to that workspace, not the source one. createdWorkspaceId
@@ -305,43 +403,28 @@ async function resolveSessionCreateAgent(
 async function resolveMcpCreateAgent(
   dependencies: CreateAgentCommandDependencies,
   input: CreateAgentFromMcpInput,
+  spawnDecision: CoordinatorSpawnDecision | null,
 ): Promise<ResolvedCreateAgent> {
   const resolvedProviderModel = resolveProviderModel(input.provider);
   const provider = resolvedProviderModel.provider;
   const parentAgent = input.callerAgentId
     ? requireParentAgent(dependencies.agentManager, input.callerAgentId)
     : null;
-  const cwd = resolveMcpInitialCwd(input, parentAgent);
-  const { resolvedCwd, setupContinuation, createdWorkspaceId, createdWorktree } =
-    await resolveMcpCwd({
-      dependencies,
-      cwd,
-      worktree: input.worktree,
-      initialPrompt: input.initialPrompt ?? "",
-    });
-  if (createdWorktree) input.onWorktreeCreated?.(createdWorktree);
-
-  const intent = await resolveCreateAgentIntent({
-    explicitWorkspaceId: setupContinuation ? createdWorkspaceId : input.workspaceId,
-    caller: parentAgent
-      ? { id: parentAgent.id, cwd: parentAgent.cwd, workspaceId: parentAgent.workspaceId }
-      : null,
-    labels: input.labels,
-    childAgentDefaultLabels: input.callerContext?.childAgentDefaultLabels,
-    legacyDetached: input.detached ?? false,
-    resolveWorkspace: async (workspaceId) => ({ workspaceId, cwd: resolvedCwd }),
-    createWorkspace: async () => ({
-      workspaceId: requireResolvedWorkspaceId(
-        await ensureWorkspaceForMcpCreate(dependencies, resolvedCwd, input.initialPrompt ?? ""),
-      ),
-      cwd: resolvedCwd,
-    }),
+  const { intent, setupContinuation, createdWorktree } = await resolveMcpWorkspace({
+    dependencies,
+    input,
+    parentAgent,
+    spawnDecision,
   });
+  // Daemon-managed stamps (lineage, coordinator kind, isolation env) always win
+  // over caller-supplied labels — the gate, not the caller, owns them.
+  const labels = spawnDecision ? { ...intent.labels, ...spawnDecision.labels } : intent.labels;
+  const env = spawnDecision?.env ? { ...input.env, ...spawnDecision.env } : input.env;
   const resolvedCreateConfig = await resolveMcpProviderCreateConfig({
     dependencies,
     input,
     provider,
-    resolvedCwd,
+    resolvedCwd: intent.cwd,
     parentAgent,
   });
 
@@ -355,12 +438,13 @@ async function resolveMcpCreateAgent(
       trimmedPrompt,
       resolvedMode: resolvedCreateConfig.modeId,
       resolvedFeatures: resolvedCreateConfig.featureValues,
+      delegateOnly: spawnDecision?.delegateOnly,
     }),
     createOptions: {
-      ...(Object.keys(intent.labels).length > 0 ? { labels: intent.labels } : {}),
+      ...(Object.keys(labels).length > 0 ? { labels } : {}),
       workspaceId: intent.workspaceId,
       owner: input.owner,
-      env: input.env,
+      env,
       unattended: input.unattended ?? Boolean(input.callerAgentId),
     },
     prompt: trimmedPrompt ? trimmedPrompt : undefined,
@@ -369,6 +453,58 @@ async function resolveMcpCreateAgent(
     background: input.background,
     promptFailure: input.promptFailure ?? "log",
   };
+}
+
+/**
+ * Resolves where an MCP create lands: the requested or inherited cwd, any
+ * worktree the caller or the spawn decision demands (created inside the gate),
+ * and the workspace record the agent gets stamped with.
+ */
+async function resolveMcpWorkspace(params: {
+  dependencies: CreateAgentCommandDependencies;
+  input: CreateAgentFromMcpInput;
+  parentAgent: ManagedAgent | null;
+  spawnDecision: CoordinatorSpawnDecision | null;
+}): Promise<{
+  intent: CreateAgentIntent;
+  setupContinuation?: AgentWorktreeSetupContinuation;
+  createdWorktree?: CreatePaseoWorktreeWorkflowResult;
+}> {
+  const { dependencies, input, parentAgent, spawnDecision } = params;
+  const cwd = resolveMcpInitialCwd(input, parentAgent);
+  // The spawn decision can require worktree isolation — Ship implementers
+  // write, and two of them in the coordinator's checkout would collide. A
+  // caller-supplied worktree request always wins.
+  const worktree =
+    input.worktree ??
+    (spawnDecision?.isolation === "worktree" ? { action: "branch-off" as const } : undefined);
+  const { resolvedCwd, setupContinuation, createdWorkspaceId, createdWorktree } =
+    await resolveMcpCwd({
+      dependencies,
+      cwd,
+      worktree,
+      initialPrompt: input.initialPrompt ?? "",
+    });
+  if (createdWorktree) input.onWorktreeCreated?.(createdWorktree);
+
+  const intent = await resolveCreateAgentIntent({
+    explicitWorkspaceId: setupContinuation ? createdWorkspaceId : input.workspaceId,
+    preferCreateWorkspace: input.mintWorkspaceForCwd,
+    caller: parentAgent
+      ? { id: parentAgent.id, cwd: parentAgent.cwd, workspaceId: parentAgent.workspaceId }
+      : null,
+    labels: stripAgentToolLabels(input.labels),
+    childAgentDefaultLabels: input.callerContext?.childAgentDefaultLabels,
+    legacyDetached: input.detached ?? false,
+    resolveWorkspace: async (workspaceId) => ({ workspaceId, cwd: resolvedCwd }),
+    createWorkspace: async () => ({
+      workspaceId: requireResolvedWorkspaceId(
+        await ensureWorkspaceForMcpCreate(dependencies, resolvedCwd, input.initialPrompt ?? ""),
+      ),
+      cwd: resolvedCwd,
+    }),
+  });
+  return { intent, setupContinuation, createdWorktree };
 }
 
 function resolveMcpInitialCwd(
@@ -414,6 +550,7 @@ function buildMcpSessionConfig(params: {
   trimmedPrompt: string;
   resolvedMode?: string;
   resolvedFeatures?: Record<string, unknown>;
+  delegateOnly?: boolean;
 }): AgentSessionConfig {
   const passthroughConfig = params.input.config;
   const { provisionalTitle } = resolveCreateAgentTitles({
@@ -430,6 +567,10 @@ function buildMcpSessionConfig(params: {
     thinkingOptionId: params.input.thinking ?? passthroughConfig?.thinkingOptionId,
     internal: params.input.internal ?? passthroughConfig?.internal,
   };
+  if (params.delegateOnly) {
+    // The spawn gate marks read-only kinds; the provider enforces it natively.
+    config.delegateOnly = true;
+  }
   if (provisionalTitle) {
     config.title = provisionalTitle;
   }

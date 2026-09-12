@@ -471,3 +471,237 @@ test("session create keeps an explicit title after the initial prompt settles", 
     await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
   }
 });
+
+async function createParentAgent(
+  workdir: string,
+  storage: AgentStorage,
+  agentManager: AgentManager,
+) {
+  const { snapshot } = await createAgentCommand(
+    {
+      agentManager,
+      agentStorage: storage,
+      logger,
+      providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+    },
+    {
+      kind: "session",
+      config: { provider: "codex", cwd: workdir },
+      workspaceId: "ws-parent",
+      labels: {},
+      provisionalTitle: null,
+      firstAgentContext: { attachments: [] },
+      buildSessionConfig: async (config) => ({ sessionConfig: config }),
+    },
+  );
+  return snapshot;
+}
+
+test("a gated mcp spawn applies the decision's delegateOnly flag", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-delegate-only-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const agentManager = createRealAgentManager(storage);
+  const providerSnapshotManager = createProviderSnapshotManagerStub().manager;
+
+  try {
+    const parent = await createParentAgent(workdir, storage, agentManager);
+    const coordinator = {
+      runCoordinatorSpawn: async (
+        _input: unknown,
+        create: (decision: unknown) => Promise<unknown>,
+      ) =>
+        create({
+          labels: { "paseo.parent-agent-id": parent.id },
+          delegateOnly: true,
+        }),
+    };
+
+    const { snapshot: child } = await createAgentCommand(
+      {
+        agentManager,
+        agentStorage: storage,
+        logger,
+        providerSnapshotManager,
+        coordinator: coordinator as Parameters<typeof createAgentCommand>[0]["coordinator"],
+      },
+      {
+        kind: "mcp",
+        provider: "codex",
+        title: "investigator",
+        initialPrompt: "look, don't touch",
+        background: true,
+        notifyOnFinish: false,
+        callerAgentId: parent.id,
+        workspaceId: "ws-parent",
+      },
+    );
+
+    expect(child.config?.delegateOnly).toBe(true);
+    const stored = await storage.get(child.id);
+    expect(stored?.config?.delegateOnly).toBe(true);
+  } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});
+
+test("a gated mcp spawn defaults a branch-off worktree when the decision isolates it", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-isolation-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const agentManager = createRealAgentManager(storage);
+  const providerSnapshotManager = createProviderSnapshotManagerStub().manager;
+
+  try {
+    const parent = await createParentAgent(workdir, storage, agentManager);
+    const coordinator = {
+      runCoordinatorSpawn: async (
+        _input: unknown,
+        create: (decision: unknown) => Promise<unknown>,
+      ) =>
+        create({
+          labels: { "paseo.parent-agent-id": parent.id },
+          isolation: "worktree",
+        }),
+    };
+    const createPaseoWorktree = fakeWorktreeCreator({
+      repoRoot: workdir,
+      createdWorkspaceId: "ws-isolated-worktree",
+    });
+
+    const { snapshot: child } = await createAgentCommand(
+      {
+        agentManager,
+        agentStorage: storage,
+        logger,
+        providerSnapshotManager,
+        coordinator: coordinator as Parameters<typeof createAgentCommand>[0]["coordinator"],
+        createPaseoWorktree,
+      },
+      {
+        kind: "mcp",
+        provider: "codex",
+        title: "implementer",
+        initialPrompt: "build it",
+        background: true,
+        notifyOnFinish: false,
+        callerAgentId: parent.id,
+      },
+    );
+
+    expect(child.cwd).toBe(join(workdir, "worktree", "packages", "app"));
+    const stored = await storage.get(child.id);
+    expect(stored?.workspaceId).toBe("ws-isolated-worktree");
+  } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});
+
+test("a denied gated spawn mints no workspace and no worktree", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-denied-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const agentManager = createRealAgentManager(storage);
+  const providerSnapshotManager = createProviderSnapshotManagerStub().manager;
+
+  try {
+    const parent = await createParentAgent(workdir, storage, agentManager);
+    const coordinator = {
+      runCoordinatorSpawn: async () => {
+        throw new Error("Runaway guard: cap reached");
+      },
+    };
+    const ensureWorkspaceForCreate = vi.fn(async () => "ws-minted");
+    const createPaseoWorktree = vi.fn();
+
+    await expect(
+      createAgentCommand(
+        {
+          agentManager,
+          agentStorage: storage,
+          logger,
+          providerSnapshotManager,
+          coordinator: coordinator as Parameters<typeof createAgentCommand>[0]["coordinator"],
+          ensureWorkspaceForCreate,
+          createPaseoWorktree: createPaseoWorktree as unknown as Parameters<
+            typeof createAgentCommand
+          >[0]["createPaseoWorktree"],
+        },
+        {
+          kind: "mcp",
+          provider: "codex",
+          title: "denied",
+          initialPrompt: "nope",
+          background: true,
+          notifyOnFinish: false,
+          callerAgentId: parent.id,
+          cwd: join(workdir, "elsewhere"),
+          mintWorkspaceForCwd: true,
+        },
+      ),
+    ).rejects.toThrow(/cap reached/);
+
+    expect(ensureWorkspaceForCreate).not.toHaveBeenCalled();
+    expect(createPaseoWorktree).not.toHaveBeenCalled();
+    expect(agentManager.listAgents()).toHaveLength(1);
+  } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});
+
+test("a requested directory workspace mints inside the spawn gate", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-deferred-mint-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const agentManager = createRealAgentManager(storage);
+  const providerSnapshotManager = createProviderSnapshotManagerStub().manager;
+
+  try {
+    mkdirSync(join(workdir, "sub"));
+    const parent = await createParentAgent(workdir, storage, agentManager);
+    let insideGate = false;
+    const coordinator = {
+      runCoordinatorSpawn: async (
+        _input: unknown,
+        create: (decision: unknown) => Promise<unknown>,
+      ) => {
+        insideGate = true;
+        try {
+          return await create({ labels: { "paseo.parent-agent-id": parent.id } });
+        } finally {
+          insideGate = false;
+        }
+      },
+    };
+    const ensureWorkspaceForCreate = vi.fn(async (cwd: string) => {
+      expect(insideGate).toBe(true);
+      expect(cwd).toBe(join(workdir, "sub"));
+      return "ws-minted-inside-gate";
+    });
+
+    const { snapshot: child } = await createAgentCommand(
+      {
+        agentManager,
+        agentStorage: storage,
+        logger,
+        providerSnapshotManager,
+        coordinator: coordinator as Parameters<typeof createAgentCommand>[0]["coordinator"],
+        ensureWorkspaceForCreate,
+      },
+      {
+        kind: "mcp",
+        provider: "codex",
+        title: "fresh dir",
+        initialPrompt: "work",
+        background: true,
+        notifyOnFinish: false,
+        callerAgentId: parent.id,
+        cwd: join(workdir, "sub"),
+        mintWorkspaceForCwd: true,
+      },
+    );
+
+    expect(ensureWorkspaceForCreate).toHaveBeenCalledTimes(1);
+    const stored = await storage.get(child.id);
+    expect(stored?.workspaceId).toBe("ws-minted-inside-gate");
+    expect(child.cwd).toBe(join(workdir, "sub"));
+  } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});

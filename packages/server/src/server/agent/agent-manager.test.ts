@@ -17,7 +17,11 @@ import { AgentStorage } from "./agent-storage.js";
 import { InMemoryAgentTimelineStore } from "./agent-timeline-store.js";
 import { toAgentPayload } from "./agent-projections.js";
 import { projectTimelineRows } from "./timeline-projection.js";
-import { getOpenAgentTabLabel, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+import {
+  COORDINATOR_SUBAGENT_KIND_LABEL,
+  getOpenAgentTabLabel,
+  PARENT_AGENT_ID_LABEL,
+} from "@getpaseo/protocol/agent-labels";
 import { DelegateOnlyUnsupportedError } from "./provider-options.js";
 import { buildConfigOverrides } from "../persistence-hooks.js";
 import { formatSystemNotificationPrompt, startAgentRun } from "./agent-prompt.js";
@@ -8355,6 +8359,42 @@ test("archiveAgent detaches a cross-workspace child even when its tab is closed"
   expect(storedChild?.archivedAt).toBeUndefined();
   expect(storedChild?.workspaceId).toBe("workspace-b");
   expect(storedChild?.labels[PARENT_AGENT_ID_LABEL]).toBeUndefined();
+});
+
+test("archiveAgent cascades to a coordinator-stamped child instead of detaching it", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-cascade-coordinator-child-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+  });
+  const parent = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Coordinator" },
+    undefined,
+    { workspaceId: "workspace-a" },
+  );
+  // A cross-workspace child would normally detach on archive — coordinator
+  // stamps flip that: detaching would drop the lineage the spawn guard and
+  // ownership boundary read, so the child archives with the cascade.
+  const child = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Implementer" },
+    undefined,
+    {
+      workspaceId: "workspace-b",
+      labels: {
+        [PARENT_AGENT_ID_LABEL]: parent.id,
+        [COORDINATOR_SUBAGENT_KIND_LABEL]: "implementer",
+      },
+    },
+  );
+
+  await manager.archiveAgent(parent.id);
+
+  const storedChild = await storage.get(child.id);
+  expect(storedChild?.archivedAt).toBeDefined();
+  expect(storedChild?.labels[PARENT_AGENT_ID_LABEL]).toBe(parent.id);
+  expect(storedChild?.labels[COORDINATOR_SUBAGENT_KIND_LABEL]).toBe("implementer");
 });
 
 test("archiveAgent re-reads a child before deciding whether to cascade", async () => {

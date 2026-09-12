@@ -284,6 +284,52 @@ describe("agent lifecycle commands", () => {
     ]);
   });
 
+  test("drops daemon-managed labels but keeps caller labels and tab markers", async () => {
+    const storage = new FakeLifecycleAgentStorage();
+    storage.records.set("agent-1", storedAgent("agent-1"));
+    const manager = new FakeLifecycleAgentManager(storage);
+
+    await expect(
+      updateAgentCommand(
+        { agentManager: manager },
+        {
+          agentId: "agent-1",
+          labels: {
+            "paseo.role": "coordinator.project",
+            "paseo.coordinator.trust": "autopilot",
+            [PARENT_AGENT_ID_LABEL]: "spoofed-parent",
+            "paseo.schedule-id": "sched_1",
+            "paseo.open-agent-tab.client-1": "true",
+            team: "infra",
+          },
+        },
+      ),
+    ).resolves.toEqual({ accepted: true, error: null });
+
+    expect(manager.metadataUpdates).toEqual([
+      {
+        agentId: "agent-1",
+        updates: {
+          labels: {
+            "paseo.open-agent-tab.client-1": "true",
+            team: "infra",
+          },
+        },
+      },
+    ]);
+
+    // A patch containing only daemon-managed keys is no update at all.
+    await expect(
+      updateAgentCommand(
+        { agentManager: manager },
+        { agentId: "agent-1", labels: { "paseo.role": "coordinator.global" } },
+      ),
+    ).resolves.toEqual({
+      accepted: false,
+      error: "Nothing to update (provide name and/or labels)",
+    });
+  });
+
   test("detaches an agent by clearing only the parent relationship", async () => {
     const storage = new FakeLifecycleAgentStorage();
     storage.records.set("agent-1", {
