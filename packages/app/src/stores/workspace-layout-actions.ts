@@ -2390,6 +2390,99 @@ function addMissingEntityTabs(input: {
   return nextLayout;
 }
 
+/** Board tabs for any other project are stale once this workspace settles. */
+function closeStaleCoordinatorBoardTabs(
+  layout: WorkspaceLayout,
+  projectId: string | null,
+): WorkspaceLayout {
+  let nextLayout = layout;
+  for (const tab of collectAllTabs(nextLayout.root)) {
+    if (tab.target.kind === "coordinator_board" && tab.target.projectId !== projectId) {
+      nextLayout = closeTabInLayout({ layout: nextLayout, tabId: tab.tabId }) ?? nextLayout;
+    }
+  }
+  return nextLayout;
+}
+
+/**
+ * The home slot: the focused tab when it's a plain draft, else the first plain
+ * draft outside the explorer sidebar. A draft carrying a setup bundle is a
+ * form the user is filling in, not the ambient home — the board never
+ * consumes it.
+ */
+function findCoordinatorHomeTab(
+  layout: WorkspaceLayout,
+  explorerSidebarPaneId: string | null,
+): WorkspaceTab | null {
+  const allTabs = collectAllTabs(layout.root);
+  const isPlainDraft = (tab: WorkspaceTab) => tab.target.kind === "draft" && !tab.target.setup;
+  const focusedPane = findPaneById(layout.root, layout.focusedPaneId);
+  const focusedTabId =
+    focusedPane && focusedPane.hidden !== true && focusedPane.id !== explorerSidebarPaneId
+      ? focusedPane.focusedTabId
+      : null;
+  const focusedHomeTab = focusedTabId
+    ? (allTabs.find((tab) => tab.tabId === focusedTabId && isPlainDraft(tab)) ?? null)
+    : null;
+  if (focusedHomeTab) {
+    return focusedHomeTab;
+  }
+  const explorerTabIds = new Set(
+    explorerSidebarPaneId ? (findPaneById(layout.root, explorerSidebarPaneId)?.tabIds ?? []) : [],
+  );
+  return allTabs.find((tab) => isPlainDraft(tab) && !explorerTabIds.has(tab.tabId)) ?? null;
+}
+
+/**
+ * Keeps the home slot in step with the project's coordinator state on an
+ * already-open workspace.
+ *
+ * Enabled: the draft the user is looking at when the coordinator turns on is
+ * the slot the board takes over — the setup row lives on it, so the focused
+ * draft in the focused pane is the home. When something else is focused, any
+ * remaining plain draft still counts as the home and converts in place; while
+ * the coordinator is enabled the home slot belongs to the board, so a lone
+ * plain draft keeps claiming it.
+ *
+ * Disabled: the project's board tabs close; `seedHomeForEmptyWorkspace` then
+ * reseeds the draft home when nothing else remains.
+ *
+ * Until the first board payload the enabled state is a guess, so neither side
+ * moves while `boardsHydrated` is false.
+ */
+function reconcileCoordinatorHome(input: {
+  layout: WorkspaceLayout;
+  snapshot: WorkspaceTabSnapshot;
+  explorerSidebarPaneId: string | null;
+}): WorkspaceLayout {
+  const coordinator = input.snapshot.coordinator;
+  if (!coordinator || !coordinator.boardsHydrated) {
+    return input.layout;
+  }
+  const projectId = coordinator.projectId;
+  const nextLayout = closeStaleCoordinatorBoardTabs(input.layout, projectId);
+  if (!projectId) {
+    return nextLayout;
+  }
+  const boardOpen = collectAllTabs(nextLayout.root).some(
+    (tab) => tab.target.kind === "coordinator_board" && tab.target.projectId === projectId,
+  );
+  if (boardOpen) {
+    return nextLayout;
+  }
+  const homeTab = findCoordinatorHomeTab(nextLayout, input.explorerSidebarPaneId);
+  if (!homeTab) {
+    return nextLayout;
+  }
+  return (
+    retargetTabInLayout({
+      layout: nextLayout,
+      tabId: homeTab.tabId,
+      target: { kind: "coordinator_board", projectId },
+    })?.layout ?? nextLayout
+  );
+}
+
 function seedHomeForEmptyWorkspace(input: {
   layout: WorkspaceLayout;
   snapshot: WorkspaceTabSnapshot;
@@ -2541,6 +2634,12 @@ export function reconcileWorkspaceTabs(
     standaloneTerminalIds,
     hasActivePendingTerminalCreate: snapshot.hasActivePendingTerminalCreate ?? false,
     hasActivePendingDraftCreate: snapshot.hasActivePendingDraftCreate ?? false,
+    explorerSidebarPaneId: state.explorerSidebarPaneId,
+  });
+
+  nextLayout = reconcileCoordinatorHome({
+    layout: nextLayout,
+    snapshot,
     explorerSidebarPaneId: state.explorerSidebarPaneId,
   });
 

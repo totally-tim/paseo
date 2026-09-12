@@ -6,11 +6,7 @@ import { seedWorkspace, type SeededWorkspace } from "../support/helpers/seed-cli
 /**
  * The coordinator session runs the dev-only mock provider so its turns are
  * deterministic: `mockAssistantResponse` answers every turn, including the
- * first-contact prompt the daemon sends on enable. The daemon launches
- * coordinator sessions delegate-only, which today only Claude, Codex, and
- * OpenCode-derived providers satisfy — the coordinator service needs to
- * accept the mock provider for coordinator sessions before this spec can
- * run (e.g. a dev-only delegate allowance).
+ * first-contact prompt the daemon sends on enable.
  */
 const COORDINATOR_REPLY = "Watching the project; one session needs a decision.";
 const MOBILE_VIEWPORT = { width: 390, height: 844 };
@@ -74,6 +70,34 @@ test.describe("Coordinator board", () => {
       }
       await page.keyboard.press("Escape");
       await expect(sheet).toHaveCount(0, { timeout: 15_000 });
+    } finally {
+      await workspace.cleanup();
+    }
+  });
+
+  test("enabling while the workspace is open swaps the draft home for the board", async ({
+    page,
+  }) => {
+    const workspace = await seedWorkspace({ repoPrefix: "coordinator-enable-open-" });
+    try {
+      await gotoWorkspace(page, workspace.workspaceId);
+      await waitForDraftComposer(page);
+      await expect(
+        page.locator('[data-testid^="workspace-tab-draft_"]').filter({ visible: true }).first(),
+      ).toBeVisible();
+
+      await enableMockCoordinator(workspace);
+
+      // The draft home tab becomes the board in place — no navigation, no reopen.
+      const board = page.getByTestId("coordinator-board").filter({ visible: true });
+      await expect(board).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator('[data-testid^="workspace-tab-draft_"]')).toHaveCount(0);
+      const boardTab = page
+        .getByTestId(boardTabTestId(workspace.projectId))
+        .filter({ visible: true })
+        .first();
+      await expect(boardTab).toBeVisible();
+      await expect(boardTab).toHaveAttribute("aria-selected", "true");
     } finally {
       await workspace.cleanup();
     }

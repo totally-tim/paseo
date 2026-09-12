@@ -317,6 +317,7 @@ describe("selectSubagentsForParent", () => {
         subtitle: null,
         status: "running",
         turn: { phase: "idle", cancellationRequestId: null },
+        pendingPermissionCount: 0,
         requiresAttention: true,
         createdAt,
       },
@@ -326,6 +327,7 @@ describe("selectSubagentsForParent", () => {
       "description",
       "id",
       "kind",
+      "pendingPermissionCount",
       "provider",
       "requiresAttention",
       "status",
@@ -336,6 +338,31 @@ describe("selectSubagentsForParent", () => {
     expect(rows[0]).not.toHaveProperty("onOpen");
     expect(rows[0]).not.toHaveProperty("model");
     expect(rows[0]).not.toHaveProperty("cwd");
+  });
+
+  it("exposes the child's live pending permission count", () => {
+    setAgents([
+      makeAgent({ id: "parent" }),
+      makeAgent({
+        id: "child",
+        parentAgentId: "parent",
+        pendingPermissions: [
+          { id: "req-1", provider: "codex", name: "Bash", kind: "tool" },
+          { id: "req-2", provider: "codex", name: "Edit", kind: "tool" },
+        ],
+      }),
+    ]);
+
+    const rows = selectSubagentsForParent(
+      useSessionStore.getState(),
+      { serverId: SERVER_ID, parentAgentId: "parent" },
+      EMPTY_PENDING_ARCHIVE_IDS,
+    );
+
+    expect(rows).toHaveLength(1);
+    const child = rows[0];
+    expect(child?.kind).toBe("paseo");
+    expect(child?.kind === "paseo" ? child.pendingPermissionCount : null).toBe(2);
   });
 
   it("moves a child when parentAgentId changes", () => {

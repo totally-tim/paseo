@@ -24,6 +24,7 @@ function row(
       (overrides.status === "running"
         ? { phase: "open", turnId: null, startedAt: null, cancellationRequestId: null }
         : { phase: "idle", cancellationRequestId: null }),
+    pendingPermissionCount: overrides.pendingPermissionCount ?? 0,
     requiresAttention: overrides.requiresAttention ?? false,
     createdAt: overrides.createdAt ?? new Date("2026-04-20T00:00:00.000Z"),
   };
@@ -73,6 +74,23 @@ describe("buildSubagentPillPresentation", () => {
         { bucket: "running", text: "1 working" },
       ],
       accessibilityLabel: "2 failed, 1 working",
+    });
+  });
+
+  it("reports children waiting on input ahead of everything else", () => {
+    expect(
+      pill([
+        row({ id: "a", pendingPermissionCount: 1 }),
+        row({ id: "b", status: "running" }),
+        row({ id: "c", status: "idle", requiresAttention: true }),
+      ]),
+    ).toEqual({
+      segments: [
+        { bucket: "needs_input", text: "1 needs input" },
+        { bucket: "attention", text: "1 ready to review" },
+        { bucket: "running", text: "1 working" },
+      ],
+      accessibilityLabel: "1 needs input, 1 ready to review, 1 working",
     });
   });
 
@@ -198,11 +216,22 @@ describe("buildSubagentRowPresentationData", () => {
     );
   });
 
-  it("ignores requiresAttention on the source row when computing the bucket", () => {
+  it("marks a row needs_input while it holds pending permissions", () => {
+    expect(
+      buildSubagentRowPresentationData(row({ id: "a", pendingPermissionCount: 1 })).statusBucket,
+    ).toBe("needs_input");
+    expect(
+      buildSubagentRowPresentationData(
+        row({ id: "b", status: "running", pendingPermissionCount: 2 }),
+      ).statusBucket,
+    ).toBe("needs_input");
+  });
+
+  it("marks a finished child attention when it asks for review", () => {
     expect(
       buildSubagentRowPresentationData(row({ id: "a", status: "idle", requiresAttention: true }))
         .statusBucket,
-    ).toBe("done");
+    ).toBe("attention");
   });
 });
 

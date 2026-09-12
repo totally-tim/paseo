@@ -122,3 +122,134 @@ describe("coordinator agent tab survival", () => {
     expect(tabTargets(result)).not.toContainEqual({ kind: "agent", agentId: "coord-1" });
   });
 });
+
+describe("coordinator home transitions", () => {
+  function layoutWithDraftHome(target?: WorkspaceTab["target"]) {
+    return {
+      root: {
+        kind: "pane" as const,
+        pane: {
+          id: "main",
+          tabIds: ["draft_home"],
+          focusedTabId: "draft_home",
+          tabs: [
+            {
+              tabId: "draft_home",
+              target: target ?? { kind: "draft" as const, draftId: "draft_home" },
+              createdAt: 1,
+            },
+          ],
+        },
+      },
+      focusedPaneId: "main",
+    };
+  }
+
+  function layoutWithBoardTab() {
+    return {
+      root: {
+        kind: "pane" as const,
+        pane: {
+          id: "main",
+          tabIds: ["coordinator_board_proj-1"],
+          focusedTabId: "coordinator_board_proj-1",
+          tabs: [
+            {
+              tabId: "coordinator_board_proj-1",
+              target: { kind: "coordinator_board" as const, projectId: "proj-1" },
+              createdAt: 1,
+            },
+          ],
+        },
+      },
+      focusedPaneId: "main",
+    };
+  }
+
+  it("replaces the focused draft home with the board when the coordinator enables on an open workspace", () => {
+    const result = reconcileWorkspaceTabs(
+      makeState(layoutWithDraftHome()),
+      makeSnapshot({
+        coordinator: { projectId: "proj-1", boardsHydrated: true, agentIds: [] },
+      }),
+    );
+
+    const tabs = collectAllTabs(result.layout.root);
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0]?.target).toEqual({ kind: "coordinator_board", projectId: "proj-1" });
+    // The draft's slot becomes the board, so focus survives without a reopen.
+    expect(tabs[0]?.tabId).toBe("draft_home");
+    expect(result.layout.root.kind === "pane" ? result.layout.root.pane.focusedTabId : null).toBe(
+      "draft_home",
+    );
+  });
+
+  it("leaves the draft home alone until the first board payload lands", () => {
+    const result = reconcileWorkspaceTabs(
+      makeState(layoutWithDraftHome()),
+      makeSnapshot({
+        coordinator: { projectId: "proj-1", boardsHydrated: false, agentIds: [] },
+      }),
+    );
+
+    expect(tabTargets(result)).toContainEqual({ kind: "draft", draftId: "draft_home" });
+    expect(tabTargets(result)).not.toContainEqual(
+      expect.objectContaining({ kind: "coordinator_board" }),
+    );
+  });
+
+  it("does not open a second board when one is already present", () => {
+    const result = reconcileWorkspaceTabs(
+      makeState(layoutWithBoardTab()),
+      makeSnapshot({
+        coordinator: { projectId: "proj-1", boardsHydrated: true, agentIds: [] },
+      }),
+    );
+
+    expect(
+      tabTargets(result).filter(
+        (target) => target.kind === "coordinator_board" && target.projectId === "proj-1",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("does not consume a draft that carries a setup bundle", () => {
+    const setupDraft = {
+      kind: "draft" as const,
+      draftId: "draft_home",
+      setup: {
+        provider: "claude" as const,
+        cwd: "/repo",
+        modeId: null,
+        model: null,
+        thinkingOptionId: null,
+        featureValues: {},
+      },
+    };
+    const result = reconcileWorkspaceTabs(
+      makeState(layoutWithDraftHome(setupDraft)),
+      makeSnapshot({
+        coordinator: { projectId: "proj-1", boardsHydrated: true, agentIds: [] },
+      }),
+    );
+
+    expect(tabTargets(result)).toContainEqual(setupDraft);
+    expect(tabTargets(result)).not.toContainEqual(
+      expect.objectContaining({ kind: "coordinator_board" }),
+    );
+  });
+
+  it("closes the project's board tab and reseeds the draft home when the coordinator disables", () => {
+    const result = reconcileWorkspaceTabs(
+      makeState(layoutWithBoardTab()),
+      makeSnapshot({
+        coordinator: { projectId: null, boardsHydrated: true, agentIds: [] },
+      }),
+    );
+
+    expect(tabTargets(result)).not.toContainEqual(
+      expect.objectContaining({ kind: "coordinator_board" }),
+    );
+    expect(tabTargets(result)).toContainEqual(expect.objectContaining({ kind: "draft" }));
+  });
+});

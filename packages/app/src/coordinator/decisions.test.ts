@@ -4,9 +4,12 @@ import type { CoordinatorDecisionBoardRow } from "@getpaseo/protocol/messages";
 import type { PendingPermission } from "@/types/shared";
 import {
   buildBoardActionResponse,
+  buildComposerQuoteText,
   resolveBoardActions,
   resolveDecisionPermission,
 } from "./decisions";
+
+type WireAction = CoordinatorDecisionBoardRow["actions"][number];
 
 function makeRequest(input: {
   id: string;
@@ -37,8 +40,13 @@ function makePermission(input: {
 function makeRow(input: {
   agentId: string;
   requestId: string;
-  actions?: { id: string; label: string }[];
-}): Pick<CoordinatorDecisionBoardRow, "agentId" | "requestId" | "actions"> {
+  actions?: WireAction[];
+  requestKind?: string;
+  questionHeader?: string;
+}): Pick<
+  CoordinatorDecisionBoardRow,
+  "agentId" | "requestId" | "actions" | "requestKind" | "questionHeader"
+> {
   return {
     agentId: input.agentId,
     requestId: input.requestId,
@@ -46,6 +54,8 @@ function makeRow(input: {
       { id: "allow-once", label: "Allow" },
       { id: "deny", label: "Deny" },
     ],
+    ...(input.requestKind ? { requestKind: input.requestKind } : {}),
+    ...(input.questionHeader ? { questionHeader: input.questionHeader } : {}),
   };
 }
 
@@ -110,8 +120,22 @@ describe("resolveBoardActions", () => {
     const row = makeRow({ agentId: "agent-1", requestId: "req-1" });
 
     expect(resolveBoardActions(row, permission)).toEqual([
-      { id: "allow-once", label: "Allow", behavior: "allow", variant: "primary", primary: true },
-      { id: "deny", label: "Deny", behavior: "deny", variant: "danger", primary: false },
+      {
+        id: "allow-once",
+        label: "Allow",
+        behavior: "allow",
+        variant: "primary",
+        composerQuote: false,
+        primary: true,
+      },
+      {
+        id: "deny",
+        label: "Deny",
+        behavior: "deny",
+        variant: "danger",
+        composerQuote: false,
+        primary: false,
+      },
     ]);
   });
 
@@ -122,6 +146,60 @@ describe("resolveBoardActions", () => {
     expect(actions[0]?.primary).toBe(true);
     expect(actions[1]?.primary).toBe(false);
     expect(actions[0]?.behavior).toBe("allow");
+  });
+
+  it("keeps a wire deny a deny when the live request is absent", () => {
+    const row = makeRow({
+      agentId: "agent-1",
+      requestId: "req-1",
+      actions: [
+        { id: "allow-once", label: "Allow", behavior: "allow" },
+        { id: "deny", label: "Deny", behavior: "deny", variant: "danger" },
+      ],
+    });
+    const actions = resolveBoardActions(row, null);
+
+    expect(actions[1]?.behavior).toBe("deny");
+    expect(actions[1]?.variant).toBe("danger");
+  });
+
+  it("lets the live request override wire metadata but never silently allow a wire deny", () => {
+    const permission = makePermission({
+      key: "agent-1:req-1",
+      agentId: "agent-1",
+      requestId: "req-1",
+      actions: [{ id: "deny", label: "Deny", behavior: "deny", variant: "secondary" }],
+    });
+    const row = makeRow({
+      agentId: "agent-1",
+      requestId: "req-1",
+      actions: [
+        { id: "allow-once", label: "Allow", behavior: "deny" },
+        { id: "deny", label: "Deny", behavior: "deny", variant: "danger" },
+      ],
+    });
+    const actions = resolveBoardActions(row, permission);
+
+    // The live request lists only "deny", so the wire-only action keeps its own
+    // behavior — a wire deny stays a deny.
+    expect(actions[0]?.behavior).toBe("deny");
+    expect(actions[1]?.behavior).toBe("deny");
+    expect(actions[1]?.variant).toBe("secondary");
+  });
+
+  it("carries the wire composerQuote flag", () => {
+    const row = makeRow({
+      agentId: "agent-1",
+      requestId: "req-1",
+      actions: [
+        { id: "yes", label: "Yes" },
+        { id: "correct", label: "Correct it", composerQuote: true },
+      ],
+    });
+    const actions = resolveBoardActions(row, null);
+
+    expect(actions[0]?.composerQuote).toBe(false);
+    expect(actions[1]?.composerQuote).toBe(true);
   });
 
   it("keeps row order and passes through ids the request no longer lists", () => {
@@ -148,17 +226,74 @@ describe("resolveBoardActions", () => {
 
 describe("buildBoardActionResponse", () => {
   it("allows with the selected action id", () => {
-    expect(buildBoardActionResponse({ id: "allow-once", behavior: "allow" })).toEqual({
+    expect(
+      buildBoardActionResponse(makeRow({ agentId: "agent-1", requestId: "req-1" }), {
+        id: "allow-once",
+        label: "Allow",
+        behavior: "allow",
+      }),
+    ).toEqual({
       behavior: "allow",
       selectedActionId: "allow-once",
     });
   });
 
   it("denies with the selected action id and a message", () => {
-    expect(buildBoardActionResponse({ id: "deny", behavior: "deny" })).toEqual({
+    expect(
+      buildBoardActionResponse(makeRow({ agentId: "agent-1", requestId: "req-1" }), {
+        id: "deny",
+        label: "Deny",
+        behavior: "deny",
+      }),
+    ).toEqual({
       behavior: "deny",
       selectedActionId: "deny",
       message: "Denied by user",
     });
+  });
+
+  it("answers a question-kind row with the option label under the question header", () => {
+    const row = makeRow({
+      agentId: "agent-1",
+      requestId: "req-1",
+      requestKind: "question",
+      questionHeader: "Which scope?",
+    });
+
+    expect(
+      buildBoardActionResponse(row, { id: "opt-1", label: "Staging", behavior: "allow" }),
+    ).toEqual({
+      behavior: "allow",
+      updatedInput: { answers: { "Which scope?": "Staging" } },
+    });
+  });
+
+  it("still denies a question-kind row when the chosen action is a deny", () => {
+    const row = makeRow({
+      agentId: "agent-1",
+      requestId: "req-1",
+      requestKind: "question",
+      questionHeader: "Which scope?",
+    });
+
+    expect(
+      buildBoardActionResponse(row, { id: "dismiss", label: "Dismiss", behavior: "deny" }),
+    ).toEqual({
+      behavior: "deny",
+      selectedActionId: "dismiss",
+      message: "Denied by user",
+    });
+  });
+});
+
+describe("buildComposerQuoteText", () => {
+  it("quotes each line and leaves a blank line for the correction", () => {
+    expect(buildComposerQuoteText("Ship it?\nTo production?")).toBe(
+      "> Ship it?\n> To production?\n\n",
+    );
+  });
+
+  it("keeps blank lines as bare quote markers", () => {
+    expect(buildComposerQuoteText("First\n\nSecond")).toBe("> First\n>\n> Second\n\n");
   });
 });

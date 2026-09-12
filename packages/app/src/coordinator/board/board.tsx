@@ -38,6 +38,11 @@ export interface CoordinatorBoardHandlers {
   onOpenAgent: (agentId: string) => void;
   /** Opens a done row's file link inside the workspace. */
   onOpenFile: (request: WorkspaceFileOpenRequest) => void;
+  /**
+   * A resolved composerQuote action: the board composer takes the question as a
+   * quote and focuses for the free-text correction.
+   */
+  onComposerQuote: (question: string) => void;
 }
 
 function useNow(intervalMs = 30_000): number {
@@ -234,9 +239,12 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
         await client.respondToPermissionAndWait(
           row.agentId,
           row.requestId,
-          buildBoardActionResponse(action),
+          buildBoardActionResponse(row, action),
           RESPOND_TIMEOUT_MS,
         );
+        if (action.composerQuote) {
+          handlers.onComposerQuote(row.question);
+        }
         // The daemon's board change removes the row; the pending flag stays so
         // the buttons can't be pressed twice in the gap.
       } catch (error) {
@@ -249,7 +257,7 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
         }));
       }
     },
-    [client, decisionRows, t],
+    [client, decisionRows, handlers, t],
   );
 
   const peekRow = useMemo(
