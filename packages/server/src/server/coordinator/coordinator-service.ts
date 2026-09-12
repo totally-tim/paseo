@@ -194,7 +194,16 @@ function decisionRowActions(
       return row;
     });
   }
-  return (request.actions ?? []).map((action) => {
+  const actions = request.actions ?? [];
+  // Tool-kind requests often carry no actions; the ordinary permission card
+  // synthesizes Deny/Accept in that case, so the board does the same.
+  if (actions.length === 0) {
+    return [
+      { id: "reject", label: "Deny", behavior: "deny", variant: "danger" },
+      { id: "accept", label: "Accept", behavior: "allow", variant: "primary" },
+    ];
+  }
+  return actions.map((action) => {
     const row: CoordinatorDecisionBoardRow["actions"][number] = {
       id: action.id,
       label: action.label,
