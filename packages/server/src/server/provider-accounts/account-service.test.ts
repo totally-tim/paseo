@@ -654,6 +654,95 @@ it("follows the host CLI login when the user signs in as somebody else", async (
   });
 });
 
+it("drops a remembered rejection when the host login becomes a different identity", async () => {
+  const { service, store, backends } = await setup();
+  const host = store.get("default:codex");
+  const backend = new TestAccountBackend();
+  backend.identity = { key: "codex:first", email: "first@example.invalid" };
+  backends.set(host.id, backend);
+  await service.inspect(host.id);
+  await service.reportCapacity(host.id, undefined, "2099-01-01T00:00:00Z");
+  expect(store.get(host.id).capacityLimit).toMatchObject({
+    resetsAt: "2099-01-01T00:00:00Z",
+    identityKey: "codex:first",
+  });
+  backend.identity = { key: "codex:second", email: "second@example.invalid" };
+  await service.inspect(host.id);
+  // The rejection belongs to the subscription that reported it; a switched login must not
+  // wear the previous one's limit.
+  expect(store.get(host.id).capacityLimit).toBeNull();
+});
+
+it("ignores a remembered rejection that cannot be attributed to the current identity", async () => {
+  const { service, store, backends, add } = await setup();
+  const host = store.get("default:codex");
+  const backend = new TestAccountBackend();
+  backend.identity = { key: "codex:first", email: "first@example.invalid" };
+  backends.set(host.id, backend);
+  await service.inspect(host.id);
+  // Records written before the identity binding carry no key, and the host login may have
+  // changed since — neither shape may block an external account.
+  for (const capacityLimit of [
+    { observedAt: "2026-09-05T00:00:00Z", resetsAt: "2099-01-01T00:00:00Z" },
+    {
+      observedAt: "2026-09-05T00:00:00Z",
+      resetsAt: "2099-01-01T00:00:00Z",
+      identityKey: "codex:someone-else",
+    },
+  ]) {
+    await store.save({ ...store.get(host.id), capacityLimit });
+    const lease = await service.reserve({
+      provider: "codex",
+      selection: { kind: "fixed", accountId: host.id },
+      unattended: false,
+    });
+    lease?.release();
+  }
+  // A managed account's identity is directory-pinned, so a legacy record still gates it.
+  const managed = await add("managed");
+  await store.save({
+    ...store.get(managed.account.id),
+    capacityLimit: { observedAt: "2026-09-05T00:00:00Z", resetsAt: "2099-01-01T00:00:00Z" },
+  });
+  await expect(
+    service.reserve({
+      provider: "codex",
+      selection: { kind: "fixed", accountId: managed.account.id },
+      unattended: false,
+    }),
+  ).rejects.toThrow("2099-01-01");
+});
+
+it("keeps a remembered rejection while the same identity verifies again", async () => {
+  const { service, store, backends } = await setup();
+  const host = store.get("default:codex");
+  const backend = new TestAccountBackend();
+  backend.identity = { key: "codex:first", email: "first@example.invalid" };
+  backends.set(host.id, backend);
+  await service.inspect(host.id);
+  await service.reportCapacity(host.id, undefined, "2099-01-01T00:00:00Z");
+  await service.inspect(host.id);
+  expect(store.get(host.id).capacityLimit?.resetsAt).toBe("2099-01-01T00:00:00Z");
+});
+
+it("re-verifies a ready host login when its usage reading is due", async () => {
+  const { service, store, backends, advance } = await setup();
+  const host = store.get("default:codex");
+  const backend = new TestAccountBackend();
+  backend.identity = { key: "codex:first", email: "first@example.invalid" };
+  backends.set(host.id, backend);
+  await service.inspect(host.id);
+  service.refreshUsage();
+  await vi.waitFor(() => expect(service.usageSnapshot(host.id).stale).toBe(false));
+  backend.identity = { key: "codex:second", email: "second@example.invalid" };
+  advance(5 * 60_000);
+  // refreshUsage no-ops while a pass is in flight, so keep calling until the next pass lands.
+  await vi.waitFor(() => {
+    service.refreshUsage();
+    expect(store.get(host.id).identity?.key).toBe("codex:second");
+  });
+});
+
 it("keeps the account locked when a login helper will not shut down", async () => {
   const { service, store, add } = await setup();
   const { account, backend } = await add("stranded");

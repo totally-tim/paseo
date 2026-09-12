@@ -148,6 +148,9 @@ describe("account picker row", () => {
         capacityLimit: {
           observedAt: new Date(Date.now() - HOUR).toISOString(),
           resetsAt: new Date(Date.now() + 100 * HOUR).toISOString(),
+          // Rejections are bound to the verified identity that reported them; an
+          // unattributable record on an external account is ignored.
+          identityKey: "claude:host",
         },
       }),
       usage: usage([{ id: "seven_day", label: "Weekly", usedPct: 100 }]),

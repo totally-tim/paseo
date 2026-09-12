@@ -62,17 +62,19 @@ export function normalizeClaudeAccountUsage(label: string, raw: unknown): Provid
     // tell a session window from a weekly one without matching on ids again.
     const periodMinutes = id === "five_hour" ? FIVE_HOUR_MINUTES : SEVEN_DAY_MINUTES;
     const value = result.rate_limits[id];
-    // An explicit null is a window the provider has but could not read. Keep it as an
-    // unknown reading so it still blocks automatic admission; an absent key does not apply.
-    if (value === undefined) continue;
+    // The usage endpoint returns a null entry for every bucket the plan does not have — a
+    // subscription without an Opus bucket gets seven_day_opus: null. That is an absent
+    // window, not an unread one. Only a present object with null utilization is an unknown
+    // reading, and it must keep blocking automatic admission.
+    if (value == null) continue;
     windows.push(
       windowFromUsedPct({
         id,
         label: name,
-        utilizationPct: value?.utilization ?? null,
-        resetsAt: value?.resets_at ?? null,
+        utilizationPct: value.utilization,
+        resetsAt: value.resets_at,
         periodMinutes,
-        ...(value ? { tone: toneFromUsedPct(value.utilization) } : {}),
+        tone: toneFromUsedPct(value.utilization),
       }),
     );
   }
