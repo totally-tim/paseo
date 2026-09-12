@@ -2369,6 +2369,75 @@ describe("createGiteaService", () => {
     );
   });
 
+  it("posts a comment on the pull request and returns its html_url", async () => {
+    const { service, calls } = makeService((args) => {
+      if (args[0] === "api" && args.join(" ").includes("/comments")) {
+        return ok(
+          JSON.stringify({
+            id: 41,
+            html_url: "https://gitea.com/example-user/sample-repo/pulls/5#issuecomment-41",
+          }),
+        );
+      }
+      throw new Error(`unexpected call: ${args.join(" ")}`);
+    });
+
+    const result = await service.createPullRequestComment({
+      cwd: "/repo",
+      prNumber: 5,
+      body: "Review: cover the rename path",
+    });
+
+    expect(result).toEqual({
+      url: "https://gitea.com/example-user/sample-repo/pulls/5#issuecomment-41",
+    });
+    expect(calls[0]).toEqual([
+      "api",
+      "--method",
+      "POST",
+      "repos/example-user/sample-repo/issues/5/comments",
+      "-f",
+      "body=Review: cover the rename path",
+    ]);
+  });
+
+  it("deep-links through the pull request URL when the comment has no html_url", async () => {
+    const { service, calls } = makeService((args) => {
+      if (args[0] === "api" && args.join(" ").includes("/comments")) {
+        return ok(JSON.stringify({ id: 42 }));
+      }
+      if (args[0] === "pr" && args[1] === "5") {
+        return ok(
+          JSON.stringify({
+            index: 5,
+            url: "https://gitea.com/example-user/sample-repo/pulls/5",
+          }),
+        );
+      }
+      throw new Error(`unexpected call: ${args.join(" ")}`);
+    });
+
+    const result = await service.createPullRequestComment({
+      cwd: "/repo",
+      prNumber: 5,
+      body: "note",
+    });
+
+    expect(result).toEqual({
+      url: "https://gitea.com/example-user/sample-repo/pulls/5#issuecomment-42",
+    });
+    expect(calls[1]).toEqual(["pr", "5", "-o", "json"]);
+  });
+
+  it("reports check retry as unsupported on Gitea", () => {
+    const { service, calls } = makeService(() => ok(""));
+
+    expect(() => service.retryPullRequestChecks({ cwd: "/repo", prNumber: 5 })).toThrow(
+      "retryPullRequestChecks is not supported on Gitea yet",
+    );
+    expect(calls).toHaveLength(0);
+  });
+
   it("merges a mergeable pull request with the requested style", async () => {
     const { service, calls } = makeService(() => ok(""));
 

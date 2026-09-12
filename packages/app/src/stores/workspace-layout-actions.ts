@@ -255,6 +255,18 @@ export interface WorkspaceTabReconcileState {
   pendingAgentIds?: ReadonlySet<string> | null;
   hiddenAgentIds?: ReadonlySet<string> | null;
   explorerSidebarPaneId: string | null;
+  /**
+   * Draft tabs seeded as the ambient workspace home — the only drafts the
+   * coordinator board may claim, so a draft the user opened is never eaten
+   * when the coordinator turns on.
+   */
+  ambientHomeDraftTabIds?: ReadonlySet<string> | null;
+  /**
+   * Projects whose board tab the user closed while the coordinator stayed
+   * enabled. The ambient home stays a draft until the coordinator re-enables
+   * or the board is reopened explicitly.
+   */
+  closedCoordinatorBoardProjectIds?: ReadonlySet<string> | null;
 }
 
 export interface WorkspaceTabSnapshot {
@@ -267,7 +279,21 @@ export interface WorkspaceTabSnapshot {
   standaloneTerminalIds: Iterable<string>;
   hasActivePendingTerminalCreate?: boolean;
   hasActivePendingDraftCreate?: boolean;
+  coordinator?: {
+    /** This workspace's project has an enabled coordinator. */
+    projectId: string | null;
+    /** False until the host's board subscription delivers its first payload. */
+    boardsHydrated: boolean;
+    /**
+     * Coordinator sessions on this host. They never count toward workspace
+     * content and explicitly opened coordinator chat tabs are never collapsed
+     * when the coordinator agent leaves the session cache.
+     */
+    agentIds: Iterable<string>;
+  };
 }
+
+const EMPTY_SET: ReadonlySet<string> = new Set();
 
 export const DEFAULT_PANE_ID = "main";
 /** The pane id is persisted, so it keeps its pre-rename spelling. */
@@ -2284,11 +2310,20 @@ function collapseStaleEntityTabs(input: {
   snapshot: WorkspaceTabSnapshot;
   visibleAgentIds: Set<string>;
   knownTerminalIds: Set<string>;
+  coordinatorAgentIds: Set<string>;
 }): WorkspaceLayout {
-  const { snapshot, visibleAgentIds, knownTerminalIds } = input;
+  const { snapshot, visibleAgentIds, knownTerminalIds, coordinatorAgentIds } = input;
   let nextLayout = input.layout;
   for (const tab of collectAllTabs(nextLayout.root)) {
-    if (isAgentTab(tab) && snapshot.agentsHydrated && !visibleAgentIds.has(tab.target.agentId)) {
+    // Coordinator sessions are delegate-only daemons, not workspace entities:
+    // an explicitly opened coordinator chat tab survives the agent leaving the
+    // session cache, and reconcile never force-closes it.
+    if (
+      isAgentTab(tab) &&
+      snapshot.agentsHydrated &&
+      !visibleAgentIds.has(tab.target.agentId) &&
+      !coordinatorAgentIds.has(tab.target.agentId)
+    ) {
       nextLayout =
         closeTabInLayout({
           layout: nextLayout,
@@ -2369,13 +2404,131 @@ function addMissingEntityTabs(input: {
   return nextLayout;
 }
 
-function seedDraftForEmptyWorkspace(input: {
+/** Board tabs for any other project are stale once this workspace settles. */
+function closeStaleCoordinatorBoardTabs(
+  layout: WorkspaceLayout,
+  projectId: string | null,
+): WorkspaceLayout {
+  let nextLayout = layout;
+  for (const tab of collectAllTabs(nextLayout.root)) {
+    if (tab.target.kind === "coordinator_board" && tab.target.projectId !== projectId) {
+      nextLayout = closeTabInLayout({ layout: nextLayout, tabId: tab.tabId }) ?? nextLayout;
+    }
+  }
+  return nextLayout;
+}
+
+/**
+ * The home slot: an ambient draft the workspace seeded as its home, preferring
+ * the focused tab over any other ambient draft outside the explorer sidebar.
+ * Only seeded drafts qualify — a draft the user opened from the new-tab menu
+ * or anywhere else is never consumed by the board.
+ */
+function findCoordinatorHomeTab(
+  layout: WorkspaceLayout,
+  explorerSidebarPaneId: string | null,
+  ambientHomeDraftTabIds: ReadonlySet<string>,
+): WorkspaceTab | null {
+  if (ambientHomeDraftTabIds.size === 0) {
+    return null;
+  }
+  const allTabs = collectAllTabs(layout.root);
+  const isAmbientHomeDraft = (tab: WorkspaceTab) =>
+    tab.target.kind === "draft" && !tab.target.setup && ambientHomeDraftTabIds.has(tab.tabId);
+  const focusedPane = findPaneById(layout.root, layout.focusedPaneId);
+  const focusedTabId =
+    focusedPane && focusedPane.hidden !== true && focusedPane.id !== explorerSidebarPaneId
+      ? focusedPane.focusedTabId
+      : null;
+  const focusedHomeTab = focusedTabId
+    ? (allTabs.find((tab) => tab.tabId === focusedTabId && isAmbientHomeDraft(tab)) ?? null)
+    : null;
+  if (focusedHomeTab) {
+    return focusedHomeTab;
+  }
+  const explorerTabIds = new Set(
+    explorerSidebarPaneId ? (findPaneById(layout.root, explorerSidebarPaneId)?.tabIds ?? []) : [],
+  );
+  return allTabs.find((tab) => isAmbientHomeDraft(tab) && !explorerTabIds.has(tab.tabId)) ?? null;
+}
+
+/**
+ * Keeps the home slot in step with the project's coordinator state on an
+ * already-open workspace.
+ *
+ * Enabled: the ambient draft the workspace seeded as its home is the slot the
+ * board takes over, converting in place. A draft the user opened is never
+ * claimed, and once the user has closed the board the seeded draft stays a
+ * draft — the projectId sits in `closedCoordinatorBoardProjectIds` until the
+ * coordinator re-enables or the board is reopened from the header menu.
+ *
+ * Disabled: the project's board tabs close and every dismissal lifts, so the
+ * next enablement converts the ambient home again;
+ * `seedHomeForEmptyWorkspace` then reseeds the draft home when nothing else
+ * remains.
+ *
+ * Until the first board payload the enabled state is a guess, so neither side
+ * moves while `boardsHydrated` is false.
+ */
+function reconcileCoordinatorHome(input: {
+  layout: WorkspaceLayout;
+  snapshot: WorkspaceTabSnapshot;
+  explorerSidebarPaneId: string | null;
+  ambientHomeDraftTabIds: ReadonlySet<string>;
+  closedCoordinatorBoardProjectIds: ReadonlySet<string>;
+}): { layout: WorkspaceLayout; closedCoordinatorBoardProjectIds: ReadonlySet<string> } {
+  const coordinator = input.snapshot.coordinator;
+  if (!coordinator || !coordinator.boardsHydrated) {
+    return {
+      layout: input.layout,
+      closedCoordinatorBoardProjectIds: input.closedCoordinatorBoardProjectIds,
+    };
+  }
+  const projectId = coordinator.projectId;
+  const nextLayout = closeStaleCoordinatorBoardTabs(input.layout, projectId);
+  if (!projectId) {
+    return { layout: nextLayout, closedCoordinatorBoardProjectIds: new Set() };
+  }
+  // Dismissals only ever matter to the currently bound project.
+  const closedCoordinatorBoardProjectIds = new Set(
+    [...input.closedCoordinatorBoardProjectIds].filter((id) => id === projectId),
+  );
+  const boardOpen = collectAllTabs(nextLayout.root).some(
+    (tab) => tab.target.kind === "coordinator_board" && tab.target.projectId === projectId,
+  );
+  if (boardOpen) {
+    closedCoordinatorBoardProjectIds.delete(projectId);
+    return { layout: nextLayout, closedCoordinatorBoardProjectIds };
+  }
+  if (closedCoordinatorBoardProjectIds.has(projectId)) {
+    return { layout: nextLayout, closedCoordinatorBoardProjectIds };
+  }
+  const homeTab = findCoordinatorHomeTab(
+    nextLayout,
+    input.explorerSidebarPaneId,
+    input.ambientHomeDraftTabIds,
+  );
+  if (!homeTab) {
+    return { layout: nextLayout, closedCoordinatorBoardProjectIds };
+  }
+  return {
+    layout:
+      retargetTabInLayout({
+        layout: nextLayout,
+        tabId: homeTab.tabId,
+        target: { kind: "coordinator_board", projectId },
+      })?.layout ?? nextLayout,
+    closedCoordinatorBoardProjectIds,
+  };
+}
+
+function hasBlockingWorkspaceContent(input: {
   layout: WorkspaceLayout;
   snapshot: WorkspaceTabSnapshot;
   activeAgentIds: Set<string>;
   knownTerminalIds: Set<string>;
   explorerSidebarPaneId: string | null;
-}): WorkspaceLayout {
+}): boolean {
   const ready = input.snapshot.agentsHydrated && input.snapshot.terminalsHydrated;
   const creatingContent =
     input.snapshot.hasActivePendingDraftCreate === true ||
@@ -2389,69 +2542,90 @@ function seedDraftForEmptyWorkspace(input: {
   const hasContentTab = collectAllTabs(input.layout.root).some(
     (tab) => tab.target.kind !== "new_tab" && !explorerTabIds.has(tab.tabId),
   );
-  if (!ready || creatingContent || hasWorkspaceEntities || hasContentTab) {
-    return input.layout;
+  return !ready || creatingContent || hasWorkspaceEntities || hasContentTab;
+}
+
+function seedHomeForEmptyWorkspace(input: {
+  layout: WorkspaceLayout;
+  snapshot: WorkspaceTabSnapshot;
+  activeAgentIds: Set<string>;
+  knownTerminalIds: Set<string>;
+  explorerSidebarPaneId: string | null;
+  closedCoordinatorBoardProjectIds: ReadonlySet<string>;
+}): { layout: WorkspaceLayout; ambientDraftTabId: string | null } {
+  if (hasBlockingWorkspaceContent(input)) {
+    return { layout: input.layout, ambientDraftTabId: null };
   }
 
-  const draftId = generateDraftId();
-  return (
+  // Until the host's board subscription answers we cannot know whether this
+  // workspace's project has a coordinator, so hold the seed rather than flash
+  // a draft that the board then replaces.
+  const coordinator = input.snapshot.coordinator;
+  if (coordinator && !coordinator.boardsHydrated) {
+    return { layout: input.layout, ambientDraftTabId: null };
+  }
+
+  const projectId = coordinator?.projectId ?? null;
+  // A board the user closed stays closed — the reseeded home is a plain draft
+  // until the coordinator re-enables or the board is reopened explicitly.
+  const boardDismissed =
+    projectId !== null && input.closedCoordinatorBoardProjectIds.has(projectId);
+  const homeTarget: WorkspaceTabTarget =
+    projectId && !boardDismissed
+      ? { kind: "coordinator_board", projectId }
+      : { kind: "draft", draftId: generateDraftId() };
+  const homeTabId = buildDeterministicWorkspaceTabId(homeTarget);
+  const nextLayout =
     createTabInLayout({
       layout: input.layout,
-      target: { kind: "draft", draftId },
+      target: homeTarget,
       now: Date.now(),
       placement: FOCUSED_PANE_PLACEMENT,
       explorerSidebarPaneId: input.explorerSidebarPaneId,
-      createTabId: () => draftId,
-    })?.layout ?? input.layout
-  );
+      createTabId: () => homeTabId,
+    })?.layout ?? input.layout;
+  return {
+    layout: nextLayout,
+    ambientDraftTabId:
+      homeTarget.kind === "draft" && nextLayout !== input.layout ? homeTabId : null,
+  };
 }
 
-export function reconcileWorkspaceTabs(
-  state: WorkspaceTabReconcileState,
-  snapshot: WorkspaceTabSnapshot,
-): WorkspaceTabReconcileState {
-  let nextLayout = state.layout;
-  const originalFocusedTabId =
-    findPaneById(nextLayout.root, nextLayout.focusedPaneId)?.focusedTabId ?? null;
-  let reconciledFocusedTabId = originalFocusedTabId;
-  const pinnedAgentIds = new Set(state.pinnedAgentIds ?? []);
-  const pendingAgentIds = new Set(state.pendingAgentIds ?? []);
-  const hiddenAgentIds = new Set(state.hiddenAgentIds ?? []);
-  const activeAgentIds = normalizeStringSet(snapshot.activeAgentIds);
-  const autoOpenAgentIds = normalizeStringSet(snapshot.autoOpenAgentIds);
-  const knownAgentIds = normalizeStringSet(snapshot.knownAgentIds);
-  const standaloneTerminalIds = normalizeStringSet(snapshot.standaloneTerminalIds);
-  const knownTerminalIds = snapshot.knownTerminalIds
-    ? normalizeStringSet(snapshot.knownTerminalIds)
-    : standaloneTerminalIds;
-  const visibleAgentIds = applyPinnedAndHidden({
-    baseAgentIds: activeAgentIds,
-    pinnedAgentIds,
-    pendingAgentIds,
-    hiddenAgentIds,
-    knownAgentIds,
-  });
-  const autoOpenSet = applyPinnedAndHidden({
-    baseAgentIds: autoOpenAgentIds,
-    pinnedAgentIds,
-    pendingAgentIds,
-    hiddenAgentIds,
-    knownAgentIds,
-  });
+/**
+ * The ambient-home set tracks live tabs only: a seeded draft keeps its mark
+ * while it stays a plain draft, the board conversion and any close both drop
+ * it, and the freshly seeded draft joins it.
+ */
+function reconcileAmbientHomeDraftTabIds(input: {
+  layout: WorkspaceLayout;
+  previous: ReadonlySet<string>;
+  seededDraftTabId: string | null;
+}): Set<string> {
+  const next = new Set<string>();
+  for (const tab of collectAllTabs(input.layout.root)) {
+    if (tab.target.kind === "draft" && !tab.target.setup && input.previous.has(tab.tabId)) {
+      next.add(tab.tabId);
+    }
+  }
+  if (input.seededDraftTabId) {
+    next.add(input.seededDraftTabId);
+  }
+  return next;
+}
 
-  const initialTabs = collectAllTabs(nextLayout.root);
-  const representedAgentIds = new Set(
-    initialTabs.filter(isAgentTab).map((tab) => tab.target.agentId),
-  );
-
-  const entityGroups = buildEntityTabGroups(initialTabs);
-
-  for (const [canonicalTabId, group] of entityGroups) {
+function collapseDuplicateEntityTabs(input: {
+  layout: WorkspaceLayout;
+  entityGroups: ReturnType<typeof buildEntityTabGroups>;
+  originalFocusedTabId: string | null;
+}): { layout: WorkspaceLayout; focusedTabId: string | null } {
+  let nextLayout = input.layout;
+  let reconciledFocusedTabId = input.originalFocusedTabId;
+  for (const [canonicalTabId, group] of input.entityGroups) {
     const keeper = group.tabs.find((tab) => tab.tabId === canonicalTabId) ?? group.tabs[0] ?? null;
     if (!keeper) {
       continue;
     }
-    if (group.tabs.some((tab) => tab.tabId === originalFocusedTabId)) {
+    if (group.tabs.some((tab) => tab.tabId === input.originalFocusedTabId)) {
       reconciledFocusedTabId = keeper.tabId;
     }
     if (!workspaceTabTargetsEqual(keeper.target, group.target)) {
@@ -2476,12 +2650,63 @@ export function reconcileWorkspaceTabs(
         }) ?? nextLayout;
     }
   }
+  return { layout: nextLayout, focusedTabId: reconciledFocusedTabId };
+}
+
+export function reconcileWorkspaceTabs(
+  state: WorkspaceTabReconcileState,
+  snapshot: WorkspaceTabSnapshot,
+): WorkspaceTabReconcileState {
+  let nextLayout = state.layout;
+  const originalFocusedTabId =
+    findPaneById(nextLayout.root, nextLayout.focusedPaneId)?.focusedTabId ?? null;
+  const pinnedAgentIds = new Set(state.pinnedAgentIds ?? []);
+  const pendingAgentIds = new Set(state.pendingAgentIds ?? []);
+  const hiddenAgentIds = new Set(state.hiddenAgentIds ?? []);
+  const activeAgentIds = normalizeStringSet(snapshot.activeAgentIds);
+  const autoOpenAgentIds = normalizeStringSet(snapshot.autoOpenAgentIds);
+  const knownAgentIds = normalizeStringSet(snapshot.knownAgentIds);
+  const standaloneTerminalIds = normalizeStringSet(snapshot.standaloneTerminalIds);
+  const knownTerminalIds = snapshot.knownTerminalIds
+    ? normalizeStringSet(snapshot.knownTerminalIds)
+    : standaloneTerminalIds;
+  const coordinatorAgentIds = normalizeStringSet(snapshot.coordinator?.agentIds ?? []);
+  const visibleAgentIds = applyPinnedAndHidden({
+    baseAgentIds: activeAgentIds,
+    pinnedAgentIds,
+    pendingAgentIds,
+    hiddenAgentIds,
+    knownAgentIds,
+  });
+  const autoOpenSet = applyPinnedAndHidden({
+    baseAgentIds: autoOpenAgentIds,
+    pinnedAgentIds,
+    pendingAgentIds,
+    hiddenAgentIds,
+    knownAgentIds,
+  });
+
+  const initialTabs = collectAllTabs(nextLayout.root);
+  const representedAgentIds = new Set(
+    initialTabs.filter(isAgentTab).map((tab) => tab.target.agentId),
+  );
+
+  const entityGroups = buildEntityTabGroups(initialTabs);
+
+  const collapsed = collapseDuplicateEntityTabs({
+    layout: nextLayout,
+    entityGroups,
+    originalFocusedTabId,
+  });
+  nextLayout = collapsed.layout;
+  let reconciledFocusedTabId = collapsed.focusedTabId;
 
   nextLayout = collapseStaleEntityTabs({
     layout: nextLayout,
     snapshot,
     visibleAgentIds,
     knownTerminalIds,
+    coordinatorAgentIds,
   });
 
   nextLayout = addMissingEntityTabs({
@@ -2494,13 +2719,25 @@ export function reconcileWorkspaceTabs(
     explorerSidebarPaneId: state.explorerSidebarPaneId,
   });
 
-  nextLayout = seedDraftForEmptyWorkspace({
+  const coordinatorHome = reconcileCoordinatorHome({
+    layout: nextLayout,
+    snapshot,
+    explorerSidebarPaneId: state.explorerSidebarPaneId,
+    ambientHomeDraftTabIds: state.ambientHomeDraftTabIds ?? EMPTY_SET,
+    closedCoordinatorBoardProjectIds: state.closedCoordinatorBoardProjectIds ?? EMPTY_SET,
+  });
+  nextLayout = coordinatorHome.layout;
+  const closedCoordinatorBoardProjectIds = coordinatorHome.closedCoordinatorBoardProjectIds;
+
+  const seededHome = seedHomeForEmptyWorkspace({
     layout: nextLayout,
     snapshot,
     activeAgentIds,
     knownTerminalIds,
     explorerSidebarPaneId: state.explorerSidebarPaneId,
+    closedCoordinatorBoardProjectIds,
   });
+  nextLayout = seededHome.layout;
 
   if (reconciledFocusedTabId) {
     nextLayout =
@@ -2513,5 +2750,11 @@ export function reconcileWorkspaceTabs(
   return {
     ...state,
     layout: nextLayout,
+    ambientHomeDraftTabIds: reconcileAmbientHomeDraftTabIds({
+      layout: nextLayout,
+      previous: state.ambientHomeDraftTabIds ?? EMPTY_SET,
+      seededDraftTabId: seededHome.ambientDraftTabId,
+    }),
+    closedCoordinatorBoardProjectIds,
   };
 }

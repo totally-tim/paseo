@@ -66,6 +66,10 @@ function normalizeSimpleWorkspaceTabTarget(value: WorkspaceTabTarget): Workspace
       const workspaceId = trimNonEmpty(value.workspaceId);
       return workspaceId ? { kind: "setup", workspaceId } : null;
     }
+    case "coordinator_board": {
+      const projectId = trimNonEmpty(value.projectId);
+      return projectId ? { kind: "coordinator_board", projectId } : null;
+    }
     case "commit_diff": {
       const sha = trimNonEmpty(value.sha);
       return sha ? { kind: "commit_diff", sha } : null;
@@ -163,6 +167,9 @@ function secondaryWorkspaceTabTargetsEqual(
   if (left.kind === "commit_diff" && right.kind === "commit_diff") {
     return left.sha === right.sha;
   }
+  if (left.kind === "coordinator_board" && right.kind === "coordinator_board") {
+    return left.projectId === right.projectId;
+  }
   return false;
 }
 
@@ -225,6 +232,9 @@ export function buildDeterministicWorkspaceTabId(target: WorkspaceTabTarget): st
   }
   if (target.kind === "commit_diff") {
     return `commit_diff_${target.sha}`;
+  }
+  if (target.kind === "coordinator_board") {
+    return `coordinator_board_${target.projectId}`;
   }
   if (target.kind === "working_diff") {
     return "working_diff";

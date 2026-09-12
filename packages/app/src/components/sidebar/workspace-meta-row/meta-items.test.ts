@@ -35,6 +35,30 @@ function select(overrides: Partial<Parameters<typeof selectMetaRowItems>[0]> = {
 const kinds = (items: ReturnType<typeof selectMetaRowItems>) => items.map((item) => item.kind);
 
 describe("selectMetaRowItems", () => {
+  it("leads with the project's open coordinator decisions", () => {
+    const items = select({ coordinatorNeedsYou: 2 });
+    expect(items[0]).toEqual({ kind: "needsYou", count: 2 });
+    expect(kinds(items)).toEqual([
+      "needsYou",
+      "host",
+      "changeRequest",
+      "checks",
+      "services",
+      "labels",
+    ]);
+  });
+
+  it("draws no needs-you item while the project's board is quiet", () => {
+    expect(kinds(select({ coordinatorNeedsYou: 0 }))).toEqual([
+      "host",
+      "changeRequest",
+      "checks",
+      "services",
+      "labels",
+    ]);
+    expect(kinds(select())).toEqual(["host", "changeRequest", "checks", "services", "labels"]);
+  });
+
   it("puts the enabled branch and project badges first", () => {
     const visible = { ...DEFAULT_SIDEBAR_ROW_ITEMS, branch: true, project: true };
     expect(kinds(select({ visible }))).toEqual([

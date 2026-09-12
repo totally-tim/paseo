@@ -3,11 +3,18 @@ import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import { isDeepStrictEqual } from "node:util";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import { HANDOFF_FROM_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+import {
+  COORDINATOR_PROJECT_ID_LABEL,
+  COORDINATOR_SUBAGENT_KIND_LABEL,
+  HANDOFF_FROM_AGENT_ID_LABEL,
+  PARENT_AGENT_ID_LABEL,
+  PASEO_ROLE_LABEL,
+} from "@getpaseo/protocol/agent-labels";
 import type { AgentManager } from "./agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent-storage.js";
 import type { AgentSessionConfig } from "./agent-sdk-types.js";
 import type { ProviderSnapshotManager } from "./provider-snapshot-manager.js";
+import { spawnIsolationEnvForRecord } from "../coordinator/spawn-isolation.js";
 import { buildHandoffContext } from "./handoff-context.js";
 import { startCreatedAgentInitialPrompt } from "./agent-prompt.js";
 import { ensureAgentLoaded } from "./agent-loading.js";
@@ -123,6 +130,10 @@ async function resolveHandoffConfig(
     ...(execution?.preserveConfiguration ? preservedOptions(source) : {}),
     systemPrompt: source.config?.systemPrompt ?? undefined,
     mcpServers: source.config?.mcpServers ?? undefined,
+    // Launch-time restrictions belong to the agent, not the handoff input —
+    // a required-tools or delegate-only source keeps them on its successor.
+    paseoTools: source.config?.paseoTools ?? undefined,
+    delegateOnly: source.config?.delegateOnly ?? undefined,
   };
 }
 
@@ -197,6 +208,10 @@ async function performHandoff(
   const assertCurrent = execution.assertCurrent ?? (() => Promise.resolve());
   const source = await agentStorage.get(input.sourceAgentId);
   if (!source || source.internal) throw new Error("Source agent not found");
+  // Every successor-creation path funnels here; a role-labeled source must not
+  // produce an unlabelled successor that bypasses delegate-only tool policy.
+  if (source.labels[PASEO_ROLE_LABEL])
+    throw new Error("Coordinators are rotated by the coordinator service");
   await assertSourceRestored(source, execution, agentStorage);
   if (!source.workspaceId) throw new Error("Source agent has no workspace");
   if (source.owner) throw new Error("This agent is managed by an execution service");
@@ -213,33 +228,7 @@ async function performHandoff(
   await assertCurrent();
   let successor = await agentStorage.get(state.successorAgentId);
   if (!successor) {
-    if (state.phase === "started" || state.phase === "dispatching") {
-      throw new Error(
-        `Continuation ${state.successorAgentId} is missing. Its work will not be started again automatically.`,
-      );
-    }
-    // Capture the final drained stream, including tool outcomes during shutdown.
-    const context = buildHandoffContext({
-      source,
-      rows: await agentManager.readHandoffTimeline(source.id),
-      briefing: state.briefing,
-      contextPath: agentStorage.getHandoffContextPath(source.id),
-    });
-    state = { ...state, ...context };
-    await agentStorage.saveHandoff(state);
-    await assertCurrent();
-    const created = await agentManager.createAgent(state.config, state.successorAgentId, {
-      workspaceId: state.workspaceId,
-      unattended: execution.unattended,
-      initialTitle: state.title,
-      labels: { [HANDOFF_FROM_AGENT_ID_LABEL]: source.id },
-    });
-    state = {
-      ...state,
-      config: { ...state.config, accountId: created.config.accountId },
-      phase: "created",
-    };
-    await agentStorage.saveHandoff(state);
+    state = await createHandoffSuccessor(deps, source, state, execution, assertCurrent);
   }
 
   const linked = await agentStorage.get(state.successorAgentId);
@@ -290,6 +279,74 @@ async function performHandoff(
     );
   }
   return successor;
+}
+
+/**
+ * Mint the persisted successor record for a prepared handoff. Only a
+ * coordinator-stamped source keeps its lineage on the successor — the kind
+ * and project labels exist only on gated spawns, so their presence marks the
+ * source as governed. For those, the same parent/kind/project stamps carry
+ * over so the spawn cap, ownership boundary, and usage meter still see the
+ * continuation as delegated; the successor hangs under the source's own
+ * parent, not the source — a handoff continues the delegated work, it does
+ * not nest one level deeper. An ordinary subagent's successor stays
+ * independent, matching the legacy continuation contract.
+ */
+async function createHandoffSuccessor(
+  deps: HandoffDependencies,
+  source: StoredAgentRecord,
+  state: AgentHandoffState,
+  execution: HandoffExecution,
+  assertCurrent: () => Promise<void>,
+): Promise<AgentHandoffState> {
+  const { agentManager, agentStorage } = deps;
+  if (state.phase === "started" || state.phase === "dispatching") {
+    throw new Error(
+      `Continuation ${state.successorAgentId} is missing. Its work will not be started again automatically.`,
+    );
+  }
+  // Capture the final drained stream, including tool outcomes during shutdown.
+  const context = buildHandoffContext({
+    source,
+    rows: await agentManager.readHandoffTimeline(source.id),
+    briefing: state.briefing,
+    contextPath: agentStorage.getHandoffContextPath(source.id),
+  });
+  let next = { ...state, ...context };
+  await agentStorage.saveHandoff(next);
+  await assertCurrent();
+  const governed =
+    source.labels[COORDINATOR_SUBAGENT_KIND_LABEL] !== undefined ||
+    source.labels[COORDINATOR_PROJECT_ID_LABEL] !== undefined;
+  const delegationLabels: Record<string, string> = {};
+  for (const key of [
+    COORDINATOR_SUBAGENT_KIND_LABEL,
+    COORDINATOR_PROJECT_ID_LABEL,
+    ...(governed ? [PARENT_AGENT_ID_LABEL] : []),
+  ]) {
+    const value = source.labels[key];
+    if (value !== undefined) delegationLabels[key] = value;
+  }
+  const env = governed
+    ? await spawnIsolationEnvForRecord(
+        { agentManager, agentStorage },
+        { id: source.id, labels: source.labels },
+      )
+    : undefined;
+  const created = await agentManager.createAgent(next.config, next.successorAgentId, {
+    workspaceId: next.workspaceId,
+    unattended: execution.unattended,
+    initialTitle: next.title,
+    labels: { ...delegationLabels, [HANDOFF_FROM_AGENT_ID_LABEL]: source.id },
+    ...(env ? { env } : {}),
+  });
+  next = {
+    ...next,
+    config: { ...next.config, accountId: created.config.accountId },
+    phase: "created",
+  };
+  await agentStorage.saveHandoff(next);
+  return next;
 }
 
 async function assertSourceRestored(

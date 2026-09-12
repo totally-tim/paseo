@@ -1959,6 +1959,7 @@ export const ko: TranslationResources = {
       saveAccessibility: "리뷰 댓글 저장",
     },
   },
+  coordinator: en.coordinator,
   settings: {
     title: "설정",
     loading: "설정 불러오는 중...",

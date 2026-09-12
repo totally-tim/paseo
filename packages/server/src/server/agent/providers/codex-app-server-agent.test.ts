@@ -954,6 +954,71 @@ describe("Codex app-server provider", () => {
     expect(turnStart).not.toHaveProperty("config.mcp_servers.hub.tools.reply");
   });
 
+  test("delegateOnly forces read-only sandbox and never-approval over authored options", async () => {
+    const session = createSession({
+      modeId: undefined,
+      delegateOnly: true,
+      providerOptions: {
+        approval_policy: "on-request",
+        sandbox_mode: "danger-full-access",
+      },
+    });
+    const request = vi.fn(async (method: string) => {
+      if (method === "thread/loaded/list") return { data: ["test-thread"] };
+      if (method === "turn/start") return {};
+      throw new Error(`Unexpected request: ${method}`);
+    });
+    session.activeForegroundTurnId = null;
+    session.client = createStub<CodexClientLike>({ request });
+
+    await session.startTurn("delegate work");
+
+    const turnStart = request.mock.calls.find(([method]) => method === "turn/start")?.[1];
+    expect(turnStart).toMatchObject({
+      sandboxPolicy: { type: "readOnly" },
+      config: {
+        approval_policy: "never",
+        sandbox_mode: "read-only",
+      },
+    });
+    // The weaker authored approval policy must not reach the request params.
+    expect(turnStart).not.toHaveProperty("approvalPolicy");
+  });
+
+  test("delegateOnly writes the enforced sandbox and approval policy into thread/start", async () => {
+    const requests: Array<{ method: string; params: unknown }> = [];
+    const appServer = createFakeCodexAppServer({
+      "thread/start": (params) => {
+        requests.push({ method: "thread/start", params });
+        return { thread: { id: "thread-1" } };
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({
+        delegateOnly: true,
+        providerOptions: { sandbox_mode: "workspace-write" },
+      }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    try {
+      await session.connect();
+      await session.startTurn("delegate work");
+
+      const threadStart = requests.find((request) => request.method === "thread/start");
+      expect(threadStart?.params).toMatchObject({
+        config: {
+          approval_policy: "never",
+          sandbox_mode: "read-only",
+        },
+      });
+    } finally {
+      await session.close();
+    }
+  });
+
   test("passes ephemeral: true to thread/start when constructed as ephemeral", async () => {
     const requests: Array<{ method: string; params: unknown }> = [];
     const fakeClient: CodexClientLike = {

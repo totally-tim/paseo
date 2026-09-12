@@ -9136,6 +9136,10 @@ function createPrCheckoutGitHubService(params: { headRef: string }): ForgeServic
       githubFeaturesEnabled: true,
     }),
     createPullRequest: async () => ({ number: 1, url: "https://github.com/acme/repo/pull/1" }),
+    createPullRequestComment: async () => ({
+      url: "https://github.com/acme/repo/pull/1#issuecomment-1",
+    }),
+    retryPullRequestChecks: async () => ({ retried: [] }),
     mergePullRequest: async () => ({ success: true }),
     enablePullRequestAutoMerge: async () => ({ success: true }),
     disablePullRequestAutoMerge: async () => ({ success: true }),

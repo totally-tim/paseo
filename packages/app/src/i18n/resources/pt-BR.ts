@@ -1981,6 +1981,7 @@ export const ptBR: TranslationResources = {
       saveAccessibility: "Salvar comentário de revisão",
     },
   },
+  coordinator: en.coordinator,
   settings: {
     title: "Configurações",
     loading: "Carregando configurações...",

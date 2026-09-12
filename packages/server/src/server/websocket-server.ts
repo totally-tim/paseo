@@ -52,6 +52,7 @@ import type {
 import type { GitCommandRuntimeMetricsSnapshot } from "../utils/git-command-runtime-metrics.js";
 import { snapshotGitCommandRuntimeMetrics } from "../utils/run-git-command.js";
 import { createPluginClientId, isPluginClientId } from "./plugins/plugin-session-identity.js";
+import type { CoordinatorService } from "./coordinator/coordinator-service.js";
 import type { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { deriveProjectSlug } from "./workspace-git-metadata.js";
 import {
@@ -589,6 +590,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly directorySync = new DirectorySyncService();
   private readonly pluginRuntime: SessionOptions["pluginRuntime"];
   private readonly orchestrationSkills: SessionOptions["orchestrationSkills"];
+  private readonly coordinatorService: CoordinatorService | null;
 
   constructor(
     server: HTTPServer,
@@ -637,6 +639,7 @@ export class VoiceAssistantWebSocketServer {
     orchestrationSkills?: SessionOptions["orchestrationSkills"],
     workspaceLabelService?: WorkspaceLabelService,
     continuations?: AgentContinuationService,
+    coordinatorService?: CoordinatorService,
   ) {
     this.logger = logger.child({ module: "websocket-server" });
     this.workspaceSetupRuntime = workspaceSetupRuntime;
@@ -653,6 +656,7 @@ export class VoiceAssistantWebSocketServer {
     this.hubRelationships = hubRelationships ?? null;
     this.pluginRuntime = pluginRuntime;
     this.orchestrationSkills = orchestrationSkills;
+    this.coordinatorService = coordinatorService ?? null;
     this.agentManager = agentManager;
     this.agentStorage = agentStorage;
     this.agentRequests = new AgentRequests(join(paseoHome, "agent-requests"));
@@ -1449,6 +1453,7 @@ export class VoiceAssistantWebSocketServer {
       workspaceLabelService: this.workspaceLabelService ?? undefined,
       directorySync: this.directorySync,
       scheduleService: this.scheduleService,
+      coordinatorService: this.coordinatorService ?? undefined,
       checkoutDiffManager: this.checkoutDiffManager,
       github: this.github,
       workspaceGitService: this.workspaceGitService,
@@ -1824,6 +1829,8 @@ export class VoiceAssistantWebSocketServer {
         checkoutInspection: true,
         // COMPAT(scheduleList): added in v0.8.0, remove gate after 2027-03-11 once daemon floor >= v0.8.0.
         scheduleList: true,
+        // COMPAT(coordinator): added in v0.8.0, remove gate after 2027-03-11 once daemon floor >= v0.8.0.
+        ...(this.coordinatorService ? { coordinator: true } : {}),
       },
     };
   }

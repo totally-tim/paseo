@@ -116,6 +116,13 @@ import type {
   PaseoConfigRevision,
   WorkspaceCreateRequest,
   WorkspaceRecoveryState,
+  CoordinatorGuard,
+  CoordinatorProfileSelection,
+  CoordinatorProfiles,
+  CoordinatorScope,
+  CoordinatorTrustLevel,
+  CoordinatorUsageExpectation,
+  ProjectCoordinatorState,
   PluginListItem,
   PluginLogEntry,
   PluginSourceStatusItem,
@@ -561,6 +568,56 @@ type ScheduleUpdatePayload = Extract<
 >["payload"];
 export type FetchAgentTimelinePayload = FetchAgentTimelineResponseMessage["payload"];
 export type AgentForkContextPayload = AgentForkContextResponseMessage["payload"];
+
+export type CoordinatorBoardSubscribePayload = Extract<
+  SessionOutboundMessage,
+  { type: "coordinator.board.subscribe.response" }
+>["payload"];
+
+export interface EnableProjectCoordinatorOptions {
+  projectId: string;
+  /** Launch bundle for the coordinator session itself. */
+  profile: CoordinatorProfileSelection;
+  /** Named delegate launch selections (investigator, implementer, ...). */
+  profiles?: CoordinatorProfiles;
+  trustLevel?: CoordinatorTrustLevel;
+  scope?: CoordinatorScope;
+  requestId?: string;
+}
+
+export interface UpdateProjectCoordinatorOptions {
+  projectId: string;
+  profile?: CoordinatorProfileSelection;
+  profiles?: CoordinatorProfiles;
+  trustLevel?: CoordinatorTrustLevel;
+  scope?: CoordinatorScope;
+  /** Null clears the expectation. */
+  usageExpectation?: CoordinatorUsageExpectation | null;
+  /** Partial guard override; absent keys keep daemon defaults. */
+  guard?: CoordinatorGuard;
+  requestId?: string;
+}
+
+/**
+ * The `coordinator.project.*` response envelope. `coordinator` is null only on
+ * `get` for a project that was never configured; the mutations throw instead of
+ * resolving a missing record. `ciConfigured` rides alongside so the setup sheet
+ * can say the CI watch has nothing to poll — it is a fact about the repository,
+ * not the coordinator, so it does not live on the state record.
+ */
+export interface CoordinatorProjectResult {
+  coordinator: ProjectCoordinatorState | null;
+  /** False when the project repository has no CI config; absent on older daemons. */
+  ciConfigured?: boolean;
+}
+
+export interface ObserveCoordinatorBoardOptions {
+  /** Absent means every project on the daemon. */
+  projectId?: string;
+  signal?: AbortSignal;
+  requestId?: string;
+  timeout?: number;
+}
 
 export type FetchAgentTimelineDirection = FetchAgentTimelinePayload["direction"];
 export type FetchAgentTimelineProjection = FetchAgentTimelinePayload["projection"];
@@ -2112,13 +2169,20 @@ export class DaemonClient {
   private observe<T extends CorrelatedResponseType>(
     responseType: T,
     message: { type: SessionInboundMessage["type"] } & Record<string, unknown>,
-    options?: { requestId?: string; timeout?: number; signal?: AbortSignal },
+    options?: {
+      requestId?: string;
+      timeout?: number;
+      signal?: AbortSignal;
+      /** Checked when the (re)subscription request runs, after server_info arrives. */
+      requireFeature?: () => void;
+    },
   ): OwnedSubscription<CorrelatedResponsePayload<T>> {
     let resetSource = false;
     return this.owned.observe<CorrelatedResponsePayload<T>>(
       async (accept) => {
         resetSource = false;
         this.requireOwnedSubscriptions();
+        options?.requireFeature?.();
         const requestId = this.createRequestId(options?.requestId);
         const request = SessionInboundMessageSchema.parse({ ...message, requestId });
         try {
@@ -2906,6 +2970,123 @@ export class DaemonClient {
     if (!payload.accepted) {
       throw new Error(payload.error ?? "updateAgent rejected");
     }
+  }
+
+  // ============================================================================
+  // Coordinator
+  // ============================================================================
+
+  private requireCoordinatorSupport(): void {
+    if (this.lastServerInfoMessage?.features?.coordinator !== true) {
+      throw new Error("Update this host to use project coordinators.");
+    }
+  }
+
+  async enableProjectCoordinator(
+    options: EnableProjectCoordinatorOptions,
+  ): Promise<CoordinatorProjectResult> {
+    this.requireCoordinatorSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.project.enable.response">({
+        requestId: options.requestId,
+        message: {
+          type: "coordinator.project.enable.request",
+          projectId: options.projectId,
+          profile: options.profile,
+          ...(options.profiles ? { profiles: options.profiles } : {}),
+          ...(options.trustLevel ? { trustLevel: options.trustLevel } : {}),
+          ...(options.scope ? { scope: options.scope } : {}),
+        },
+      });
+    if (payload.error || !payload.coordinator) {
+      throw new Error(payload.error ?? "enableProjectCoordinator rejected");
+    }
+    return { coordinator: payload.coordinator, ciConfigured: payload.ciConfigured };
+  }
+
+  async disableProjectCoordinator(
+    projectId: string,
+    requestId?: string,
+  ): Promise<CoordinatorProjectResult> {
+    this.requireCoordinatorSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.project.disable.response">({
+        requestId,
+        message: { type: "coordinator.project.disable.request", projectId },
+      });
+    if (payload.error || !payload.coordinator) {
+      throw new Error(payload.error ?? "disableProjectCoordinator rejected");
+    }
+    return { coordinator: payload.coordinator, ciConfigured: payload.ciConfigured };
+  }
+
+  async updateProjectCoordinator(
+    options: UpdateProjectCoordinatorOptions,
+  ): Promise<CoordinatorProjectResult> {
+    this.requireCoordinatorSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.project.update.response">({
+        requestId: options.requestId,
+        message: {
+          type: "coordinator.project.update.request",
+          projectId: options.projectId,
+          ...(options.profile ? { profile: options.profile } : {}),
+          ...(options.profiles ? { profiles: options.profiles } : {}),
+          ...(options.trustLevel ? { trustLevel: options.trustLevel } : {}),
+          ...(options.scope ? { scope: options.scope } : {}),
+          ...(options.usageExpectation !== undefined
+            ? { usageExpectation: options.usageExpectation }
+            : {}),
+          ...(options.guard ? { guard: options.guard } : {}),
+        },
+      });
+    if (payload.error || !payload.coordinator) {
+      throw new Error(payload.error ?? "updateProjectCoordinator rejected");
+    }
+    return { coordinator: payload.coordinator, ciConfigured: payload.ciConfigured };
+  }
+
+  /**
+   * The project's coordinator state plus repository facts (CI presence), or a
+   * null coordinator when none is configured.
+   */
+  async getProjectCoordinator(
+    projectId: string,
+    requestId?: string,
+  ): Promise<CoordinatorProjectResult> {
+    this.requireCoordinatorSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.project.get.response">({
+        requestId,
+        message: { type: "coordinator.project.get.request", projectId },
+      });
+    if (payload.error) {
+      throw new Error(payload.error);
+    }
+    return { coordinator: payload.coordinator, ciConfigured: payload.ciConfigured };
+  }
+
+  /**
+   * Subscribes to coordinator board snapshots. Observers receive the response
+   * snapshot and every later `coordinator.board.changed` routed by subscriptionId;
+   * `client.on("coordinator.board.changed", handler)` sees the same messages raw.
+   */
+  observeCoordinatorBoard(
+    options: ObserveCoordinatorBoardOptions = {},
+  ): OwnedSubscription<CoordinatorBoardSubscribePayload> {
+    return this.observe(
+      "coordinator.board.subscribe.response",
+      {
+        type: "coordinator.board.subscribe.request",
+        ...(options.projectId !== undefined ? { projectId: options.projectId } : {}),
+      },
+      {
+        signal: options.signal,
+        requestId: options.requestId,
+        timeout: options.timeout,
+        requireFeature: () => this.requireCoordinatorSupport(),
+      },
+    );
   }
 
   async renameProject(

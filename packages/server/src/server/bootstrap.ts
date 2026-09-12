@@ -132,6 +132,7 @@ import { createWorkspaceLabelService } from "./workspace-labels/index.js";
 import { createGitHubService } from "../services/github-service.js";
 import { createPaseoWorktree as createRegisteredPaseoWorktree } from "./paseo-worktree-service.js";
 import { createWorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
+import { CoordinatorService } from "./coordinator/coordinator-service.js";
 import { createPaseoWorktreeWorkflow } from "./worktree-session.js";
 import { DownloadTokenStore } from "./file-download/token-store.js";
 import type { OpenAiSpeechProviderConfig } from "./speech/providers/openai/config.js";
@@ -140,6 +141,7 @@ import type { RequestedSpeechProviders } from "./speech/speech-types.js";
 import { createSpeechService } from "./speech/speech-runtime.js";
 import { AgentManager } from "./agent/agent-manager.js";
 import { AgentStorage } from "./agent/agent-storage.js";
+import { LifecycleBus } from "./agent/lifecycle-bus.js";
 import { attachAgentStoragePersistence } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
 import {
@@ -622,6 +624,9 @@ export async function createPaseoDaemon(
     managedSources: new ManagedPluginSources(config.paseoHome),
     settingsDirectory: path.join(config.paseoHome, "plugin-settings"),
   });
+  // In-process lifecycle fan-out: the same events pluginRuntime ships to plugin
+  // subprocesses, for daemon-internal subscribers (the coordinator service).
+  const lifecycleBus = new LifecycleBus(logger);
 
   const serverId = getOrCreateServerId(config.paseoHome, { logger });
   const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, logger);
@@ -892,13 +897,14 @@ export async function createPaseoDaemon(
   });
   workspaceRegistry.subscribeToMutations((mutation) => {
     if (mutation.kind === "archive" && mutation.workspace) {
-      pluginRuntime.emit("workspace.archived", {
-        workspace: describeHookWorkspace(mutation.workspace),
-      });
+      const hookWorkspace = describeHookWorkspace(mutation.workspace);
+      pluginRuntime.emit("workspace.archived", { workspace: hookWorkspace });
+      lifecycleBus.emit("workspace.archived", { workspace: hookWorkspace });
     }
   });
   const workspaceProvisioning = createWorkspaceProvisioningService({
     lifecycle: pluginRuntime,
+    lifecycleBus,
     serverId,
     projectRegistry,
     workspaceRegistry,
@@ -957,6 +963,7 @@ export async function createPaseoDaemon(
         providerSnapshotManager.createAccountClient.bind(providerSnapshotManager)
       )(provider, context),
     pluginLifecycle: pluginRuntime,
+    lifecycleBus,
     clients: initialAgentManagerState.clients,
     providerDefinitions: initialAgentManagerState.providerDefinitions,
     registry: agentStorage,
@@ -1024,6 +1031,21 @@ export async function createPaseoDaemon(
     getWorkspace: (id) => workspaceRegistry.get(id),
   });
   agentManager.continuations = continuations;
+
+  // Project coordinators are ordinary persisted agents with role labels; the
+  // service reconciles records, keeps them resident, and derives the board.
+  const coordinatorService = new CoordinatorService({
+    agentManager,
+    agentStorage,
+    projectRegistry,
+    workspaceRegistry,
+    createWorkspaceForDirectory: (cwd, title, projectId) =>
+      workspaceProvisioning.createWorkspaceForDirectory(cwd, title, projectId),
+    lifecycleBus,
+    workspaceGitService,
+    paseoHome: config.paseoHome,
+    logger,
+  });
   await continuations.initialize();
   const teardownArchivedWorkspaceRuntime = (workspaceId: string): void => {
     void continuations.cancelWorkspace(workspaceId).catch(() => {
@@ -1239,6 +1261,7 @@ export async function createPaseoDaemon(
     providerSnapshotManager,
     createPaseoWorktree: createPaseoWorktreeForTools,
     ensureWorkspaceForCreate: ensureWorkspaceForCreateAndBroadcastExternal,
+    coordinator: coordinatorService,
   };
   const createAgent = (input: Parameters<typeof createAgentCommand>[1]) =>
     createAgentCommand(createAgentCommandDependencies, input);
@@ -1484,6 +1507,7 @@ export async function createPaseoDaemon(
     paseoToolPolicy:
       runtime.paseoToolPolicy ??
       (runtime.callerAgentId ? agentManager.getPaseoToolPolicy(runtime.callerAgentId) : undefined),
+    coordinator: coordinatorService,
     paseoHome: config.paseoHome,
     worktreesRoot: config.worktreesRoot,
     callerAgentId: runtime.callerAgentId,
@@ -1669,21 +1693,42 @@ export async function createPaseoDaemon(
           const logAndResolve = async () => {
             boundListenTarget = resolveBoundListenTarget(listenTarget, httpServer);
             const mcpBaseUrl = createAgentMcpBaseUrl(boundListenTarget);
-            agentMcpBaseUrl =
-              !mcpEnabled || config.mcpInjectIntoAgents === false ? null : mcpBaseUrl;
+            // The agent MCP endpoint serves requests whenever mcp.enabled; the
+            // injectIntoAgents toggle only gates default per-agent injection.
+            // Agents with `paseoTools: "required"` still need the base URL, so
+            // the URL tracks mcpEnabled alone.
+            agentMcpBaseUrl = mcpEnabled ? mcpBaseUrl : null;
             agentManager.setMcpBaseUrl(agentMcpBaseUrl);
             agentManager.setPaseoToolsEnabled(mcpEnabled && config.mcpInjectIntoAgents !== false);
+            // A coordinator's required tools die when either flag goes off —
+            // the endpoint needs mcp.enabled, the injection needs injectIntoAgents.
+            const coordinatorToolsAvailable = () =>
+              mcpEnabled && daemonConfigStore.get().mcp.injectIntoAgents !== false;
             daemonConfigStore.onFieldChange("mcp.enabled", (value) => {
               mcpEnabled = value !== false;
               const inject = daemonConfigStore.get().mcp.injectIntoAgents !== false;
-              agentManager.setMcpBaseUrl(mcpEnabled && inject ? mcpBaseUrl : null);
+              agentManager.setMcpBaseUrl(mcpEnabled ? mcpBaseUrl : null);
               agentManager.setPaseoToolsEnabled(mcpEnabled && inject);
               setAgentProviderToolsEnabled(mcpEnabled && inject);
+              void coordinatorService.handleAgentMcpAvailability(
+                coordinatorToolsAvailable(),
+                "mcp.enabled",
+              );
             });
+            // Booting with the endpoint off strands resident coordinators'
+            // tools the same way a live toggle does; name whichever flag is off.
+            void coordinatorService.handleAgentMcpAvailability(
+              coordinatorToolsAvailable(),
+              mcpEnabled ? "mcp.injectIntoAgents" : "mcp.enabled",
+            );
             daemonConfigStore.onFieldChange("mcp.injectIntoAgents", (value) => {
-              agentManager.setMcpBaseUrl(mcpEnabled && value ? mcpBaseUrl : null);
+              agentManager.setMcpBaseUrl(mcpEnabled ? mcpBaseUrl : null);
               agentManager.setPaseoToolsEnabled(mcpEnabled && value !== false);
               setAgentProviderToolsEnabled(mcpEnabled && value !== false);
+              void coordinatorService.handleAgentMcpAvailability(
+                coordinatorToolsAvailable(),
+                "mcp.injectIntoAgents",
+              );
             });
             daemonConfigStore.onFieldChange("appendSystemPrompt", (value) => {
               agentManager.setAppendSystemPrompt(typeof value === "string" ? value : "");
@@ -1787,9 +1832,13 @@ export async function createPaseoDaemon(
               orchestrationSkills,
               workspaceLabelService,
               continuations,
+              coordinatorService,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
             await pluginRuntime.start();
+            // Coordinators load through ensureAgentLoaded before the first
+            // client connects, so they are resident ahead of the first wake.
+            await coordinatorService.start();
             wsServer.beginAcceptingConnections();
             relayRuntime = createRelayRuntime({
               config: {
@@ -1856,6 +1905,7 @@ export async function createPaseoDaemon(
     // Freeze both ingress and registration before taking the agent closure snapshot.
     wsServer?.prepareForShutdown();
     agentManager.prepareForShutdown();
+    await coordinatorService.stop().catch(() => undefined);
     await continuations.close();
     await providerAccounts.close();
     await closeAllAgents(logger, agentManager);

@@ -30,7 +30,32 @@ export function buildDraftStoreKey(input: {
   const serverId = input.serverId.trim();
   const explicitDraftId = input.draftId?.trim();
   if (explicitDraftId) {
-    return `draft:${serverId}:${explicitDraftId}`;
+    return buildWorkspaceDraftTabDraftKey({ serverId, draftId: explicitDraftId });
   }
   return `agent:${serverId}:${input.agentId.trim()}`;
+}
+
+/** A workspace draft tab's composer key — the draft id, not a session. */
+export function buildWorkspaceDraftTabDraftKey(input: {
+  serverId: string;
+  draftId: string;
+}): string {
+  return `draft:${input.serverId.trim()}:${input.draftId.trim()}`;
+}
+
+/**
+ * The board's composer rides on the coordinator session key so text typed on
+ * the board shows up in the chat tab and vice versa. While no session is
+ * running the draft is parked under a project-scoped key.
+ */
+export function buildCoordinatorBoardDraftKey(input: {
+  serverId: string;
+  projectId: string;
+  coordinatorAgentId?: string | null;
+}): string {
+  const coordinatorAgentId = input.coordinatorAgentId?.trim();
+  if (coordinatorAgentId) {
+    return buildDraftStoreKey({ serverId: input.serverId, agentId: coordinatorAgentId });
+  }
+  return `coordinator-board:${input.serverId.trim()}:${input.projectId.trim()}`;
 }

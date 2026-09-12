@@ -1,11 +1,18 @@
 import { describe, expect, test } from "vitest";
 import {
+  COORDINATOR_GLOBAL_ROLE,
+  COORDINATOR_PROJECT_ID_LABEL,
+  COORDINATOR_PROJECT_ROLE,
+  getCoordinatorProjectIdFromLabels,
+  getCoordinatorRole,
   getParentAgentIdFromLabels,
   getOpenAgentTabLabel,
   hasOpenAgentTab,
+  isCoordinatorAgent,
   isDelegatedAgent,
   isOpenAgentTabLabel,
   PARENT_AGENT_ID_LABEL,
+  PASEO_ROLE_LABEL,
 } from "./agent-labels.js";
 
 describe("agent label policy", () => {
@@ -35,5 +42,34 @@ describe("agent label policy", () => {
     expect(isOpenAgentTabLabel(getOpenAgentTabLabel("client-a"))).toBe(true);
     expect(isOpenAgentTabLabel("paseo.open-agent-tab")).toBe(false);
     expect(isOpenAgentTabLabel("custom.open-agent-tab.client-a")).toBe(false);
+  });
+
+  test("reads coordinator roles from the role label", () => {
+    expect(getCoordinatorRole({ [PASEO_ROLE_LABEL]: COORDINATOR_GLOBAL_ROLE })).toBe(
+      COORDINATOR_GLOBAL_ROLE,
+    );
+    expect(getCoordinatorRole({ [PASEO_ROLE_LABEL]: COORDINATOR_PROJECT_ROLE })).toBe(
+      COORDINATOR_PROJECT_ROLE,
+    );
+    expect(isCoordinatorAgent({ labels: { [PASEO_ROLE_LABEL]: COORDINATOR_PROJECT_ROLE } })).toBe(
+      true,
+    );
+  });
+
+  test("rejects missing, unknown, and non-string role labels", () => {
+    expect(getCoordinatorRole(undefined)).toBeNull();
+    expect(getCoordinatorRole({})).toBeNull();
+    expect(getCoordinatorRole({ [PASEO_ROLE_LABEL]: "coordinator" })).toBeNull();
+    expect(getCoordinatorRole({ [PASEO_ROLE_LABEL]: 7 })).toBeNull();
+    expect(isCoordinatorAgent({ labels: {} })).toBe(false);
+  });
+
+  test("reads the project id only from the coordinator project label", () => {
+    expect(
+      getCoordinatorProjectIdFromLabels({ [COORDINATOR_PROJECT_ID_LABEL]: " project-1 \n" }),
+    ).toBe("project-1");
+    expect(getCoordinatorProjectIdFromLabels({})).toBeNull();
+    expect(getCoordinatorProjectIdFromLabels({ [COORDINATOR_PROJECT_ID_LABEL]: "   " })).toBeNull();
+    expect(getCoordinatorProjectIdFromLabels({ [COORDINATOR_PROJECT_ID_LABEL]: 3 })).toBeNull();
   });
 });

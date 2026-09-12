@@ -6,6 +6,7 @@ import type { ProviderAccountContext } from "./provider-account-context.js";
 import { buildSerializableConfig } from "./agent-projections.js";
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import { describeHookAgent, publishAgentStream } from "../plugins/lifecycle/index.js";
+import type { LifecycleBus } from "./lifecycle-bus.js";
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { randomUUID } from "node:crypto";
 import { basename, resolve } from "node:path";
@@ -15,10 +16,13 @@ import {
   type AgentLifecycleStatus,
 } from "@getpaseo/protocol/agent-lifecycle";
 import {
+  getCoordinatorRole,
   getParentAgentIdFromLabels,
   hasOpenAgentTab,
   isDelegatedAgent,
   isOpenAgentTabLabel,
+  COORDINATOR_PROJECT_ID_LABEL,
+  COORDINATOR_SUBAGENT_KIND_LABEL,
   PARENT_AGENT_ID_LABEL,
   HANDOFF_TO_AGENT_ID_LABEL,
   HANDOFF_FROM_AGENT_ID_LABEL,
@@ -87,6 +91,10 @@ import { invokeRewindCapability, type RewindMode } from "./rewind/rewind.js";
 import { isSystemInjectedEnvelope } from "./agent-prompt.js";
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
 import { stripInternalPaseoMcpServer, withRuntimePaseoMcpServer } from "./runtime-mcp-config.js";
+import {
+  DELEGATE_ONLY_CAPABLE_PROVIDERS,
+  DelegateOnlyUnsupportedError,
+} from "./provider-options.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
 import type { PaseoToolCatalogFactory } from "./tools/types.js";
 import { isPaseoToolPolicyEnabled } from "./paseo-tool-policy.js";
@@ -194,6 +202,8 @@ function buildStoredAgentConfig(record: StoredAgentRecord): AgentSessionConfig {
     config.systemPrompt = record.config.systemPrompt;
   }
   if (record.config.mcpServers != null) config.mcpServers = record.config.mcpServers;
+  if (record.config.paseoTools != null) config.paseoTools = record.config.paseoTools;
+  if (record.config.delegateOnly != null) config.delegateOnly = record.config.delegateOnly;
   return stripInternalPaseoMcpServer(config);
 }
 
@@ -308,6 +318,12 @@ export interface AgentManagerOptions {
   accounts?: ProviderAccountService;
   createAccountClient?: (provider: string, context: ProviderAccountContext) => AgentClient;
   pluginLifecycle?: PluginLifecycle;
+  /**
+   * In-process lifecycle sink emitted beside every pluginLifecycle emit —
+   * same events, same payloads, for daemon-internal subscribers (the
+   * coordinator service) that are not plugin subprocesses.
+   */
+  lifecycleBus?: LifecycleBus;
   clients?: ProviderClientMap;
   providerDefinitions?: ProviderEnabledMap;
   idFactory?: () => string;
@@ -695,6 +711,17 @@ function shouldDetachFromArchivedParent(
   parent: StoredAgentRecord,
   child: StoredAgentRecord,
 ): boolean {
+  // Coordinator-tree members never detach: dropping the parent label would
+  // sever the lineage the spawn guard, ownership boundary, and usage meter
+  // all read — the child must archive with the cascade instead of surviving
+  // outside the boundary.
+  if (
+    getCoordinatorRole(child.labels) !== null ||
+    child.labels?.[COORDINATOR_SUBAGENT_KIND_LABEL] !== undefined ||
+    child.labels?.[COORDINATOR_PROJECT_ID_LABEL] !== undefined
+  ) {
+    return false;
+  }
   const isCrossWorkspace =
     parent.workspaceId !== undefined &&
     child.workspaceId !== undefined &&
@@ -728,6 +755,7 @@ export class AgentManager {
   private readonly accountLeases = new Map<string, AccountLease>();
 
   private readonly pluginLifecycle: PluginLifecycle | undefined;
+  private readonly lifecycleBus: LifecycleBus | undefined;
   private readonly clients = new Map<AgentProvider, AgentClient>();
   private readonly providerEnabled = new Map<AgentProvider, boolean>();
   private readonly providerDefinitions = new Map<AgentProvider, ProviderEnabledFlag>();
@@ -773,6 +801,7 @@ export class AgentManager {
     this.createAccountClient = options.createAccountClient;
 
     this.pluginLifecycle = options.pluginLifecycle;
+    this.lifecycleBus = options.lifecycleBus;
     this.idFactory = options?.idFactory ?? (() => randomUUID());
     this.registry = options?.registry;
     this.durableTimelineStore = options?.durableTimelineStore;
@@ -862,6 +891,15 @@ export class AgentManager {
 
   setMcpBaseUrl(url: string | null): void {
     this.mcpBaseUrl = url;
+  }
+
+  /**
+   * The agent MCP endpoint URL, or null while the daemon's `mcp.enabled` is
+   * off. `paseoTools: "required"` agents get zero tools without it — callers
+   * that launch such agents must check this and fail loudly instead.
+   */
+  getAgentMcpBaseUrl(): string | null {
+    return this.mcpBaseUrl;
   }
 
   prepareForShutdown(): void {
@@ -1456,6 +1494,10 @@ export class AgentManager {
       config: {
         ...request.config,
         internal: config.internal,
+        // The wire schema strips daemon-internal launch flags; re-apply them
+        // so a plugin cannot drop (or grant) a coordinator's restrictions.
+        paseoTools: config.paseoTools,
+        delegateOnly: config.delegateOnly,
         ...(config.accountId !== undefined ? { accountId: config.accountId } : {}),
         ...(config.accountSelectionReason !== undefined
           ? { accountSelectionReason: config.accountSelectionReason }
@@ -1595,9 +1637,9 @@ export class AgentManager {
       historyPrimed: true,
     });
     if (!agent.internal) {
-      this.pluginLifecycle?.emit("agent.created", {
-        agent: describeHookAgent({ ...agent, title: agent.config.title }),
-      });
+      const hookAgent = describeHookAgent({ ...agent, title: agent.config.title });
+      this.pluginLifecycle?.emit("agent.created", { agent: hookAgent });
+      this.lifecycleBus?.emit("agent.created", { agent: hookAgent });
     }
     return agent;
   }
@@ -1623,6 +1665,8 @@ export class AgentManager {
       labels?: Record<string, string>;
       workspaceId?: string;
       owner?: AgentOwner;
+      /** Rebuilt launch env (e.g. coordinator spawn isolation); env is not persisted. */
+      env?: Record<string, string>;
     },
     resumeOptions?: AgentResumeSessionOptions,
   ): Promise<ManagedAgent> {
@@ -1683,6 +1727,7 @@ export class AgentManager {
       labels?: Record<string, string>;
       workspaceId?: string;
       owner?: AgentOwner;
+      env?: Record<string, string>;
     },
     resumeOptions?: AgentResumeSessionOptions,
   ): Promise<ManagedAgent> {
@@ -1716,7 +1761,7 @@ export class AgentManager {
       client,
       storedConfig.cwd,
       paseoToolPolicy,
-      undefined,
+      options?.env,
       {
         reason: "resume",
         purpose: resumeOptions?.purpose ?? "interactive",
@@ -2275,8 +2320,13 @@ export class AgentManager {
     const archivedRecord = buildArchivedAgentRecord(record, options);
     await this.requireRegistry().upsert(archivedRecord);
     if (!record.archivedAt && !record.internal) {
+      const hookAgent = describeHookAgent(archivedRecord);
       this.pluginLifecycle?.emit("agent.archived", {
-        agent: describeHookAgent(archivedRecord),
+        agent: hookAgent,
+        archivedAt: archivedRecord.archivedAt,
+      });
+      this.lifecycleBus?.emit("agent.archived", {
+        agent: hookAgent,
         archivedAt: archivedRecord.archivedAt,
       });
     }
@@ -2493,6 +2543,34 @@ export class AgentManager {
     };
     await registry.upsert(nextRecord);
     return nextRecord;
+  }
+
+  /**
+   * Rewrites the session's system prompt: the live config so anything reading
+   * `agent.config` (and providers that honor it next turn) sees the update,
+   * and the stored record so a resume launches with it.
+   */
+  async setAgentSystemPrompt(agentId: string, systemPrompt: string): Promise<void> {
+    await this.runLifecycleMutation(agentId, async () => {
+      const liveAgent = this.agents.get(agentId);
+      if (liveAgent) {
+        liveAgent.config = { ...liveAgent.config, systemPrompt };
+        this.touchUpdatedAt(liveAgent);
+        await this.persistSnapshot(liveAgent);
+        this.emitState(liveAgent, { persist: false });
+        return;
+      }
+      const registry = this.requireRegistry();
+      const record = await registry.get(agentId);
+      if (!record) {
+        throw new Error(`Agent not found: ${agentId}`);
+      }
+      await registry.upsert({
+        ...record,
+        config: { ...record.config, systemPrompt },
+        updatedAt: this.nextStoredUpdatedAt(record),
+      });
+    });
   }
 
   async detachAgent(agentId: string): Promise<{
@@ -5542,13 +5620,15 @@ export class AgentManager {
       "agent.manager.dispatch_stream",
     );
     this.dispatch({ type: "agent_stream", agentId, event, ...metadata });
-    if (this.pluginLifecycle && agent && !agent.internal && event.type !== "timeline") {
-      publishAgentStream(
-        this.pluginLifecycle,
-        describeHookAgent({ ...agent, title: agent.config.title }),
-        event,
-        this.timelineStore.getItems(agentId),
-      );
+    if (agent && !agent.internal && event.type !== "timeline") {
+      const hookAgent = describeHookAgent({ ...agent, title: agent.config.title });
+      const timeline = this.timelineStore.getItems(agentId);
+      if (this.pluginLifecycle) {
+        publishAgentStream(this.pluginLifecycle, hookAgent, event, timeline);
+      }
+      if (this.lifecycleBus) {
+        publishAgentStream(this.lifecycleBus, hookAgent, event, timeline);
+      }
     }
   }
 
@@ -5644,6 +5724,15 @@ export class AgentManager {
 
   private applyProviderConfiguration(config: AgentSessionConfig): AgentSessionConfig {
     const definition = this.providerDefinitions.get(config.provider);
+    if (config.delegateOnly) {
+      // Delegate-only restrictions are enforced by the provider itself, so
+      // eligibility follows the provider that will actually run the session —
+      // the base provider for custom providers extending a built-in.
+      const effectiveProvider = definition?.derivedFromProviderId ?? config.provider;
+      if (!DELEGATE_ONLY_CAPABLE_PROVIDERS.has(effectiveProvider)) {
+        throw new DelegateOnlyUnsupportedError(config.provider);
+      }
+    }
     if (config.providerOptions !== undefined && !definition?.validateOptions) {
       throw new Error(`Provider '${config.provider}' does not accept providerOptions`);
     }
@@ -5698,7 +5787,11 @@ export class AgentManager {
     env?: Record<string, string>,
   ): Promise<PreparedSessionConfig> {
     const storedConfig = await this.normalizeConfig(stripInternalPaseoMcpServer(config), { env });
-    const paseoToolPolicy = this.paseoToolsEnabled
+    // `paseoTools: "required"` overrides the daemon-wide injection toggle for
+    // this agent (coordinators must always have the Paseo tools).
+    const paseoToolsRequired = storedConfig.paseoTools === "required";
+    const injectPaseoTools = this.paseoToolsEnabled || paseoToolsRequired;
+    const paseoToolPolicy = injectPaseoTools
       ? this.resolvePaseoToolPolicy(storedConfig.provider)
       : { enabled: false };
     const launchConfig = this.applyDaemonAppendSystemPrompt(
@@ -5706,9 +5799,7 @@ export class AgentManager {
         config: storedConfig,
         agentId,
         mcpBaseUrl:
-          this.paseoToolsEnabled && isPaseoToolPolicyEnabled(paseoToolPolicy)
-            ? this.mcpBaseUrl
-            : null,
+          injectPaseoTools && isPaseoToolPolicyEnabled(paseoToolPolicy) ? this.mcpBaseUrl : null,
         mcpAuthToken: this.mcpAuthToken,
       }),
     );
@@ -5761,8 +5852,12 @@ export class AgentManager {
         PASEO_AGENT_CWD: cwd,
       },
     };
+    // `paseoToolPolicy` is `{ enabled: false }` unless prepareSessionConfig
+    // decided this agent gets Paseo tools (daemon-wide injection or the
+    // per-agent `paseoTools: "required"` override), so it already encodes the
+    // daemon toggle — checking `this.paseoToolsEnabled` here would block
+    // required agents when the daemon-wide default is off.
     if (
-      this.paseoToolsEnabled &&
       isPaseoToolPolicyEnabled(paseoToolPolicy) &&
       client.capabilities.supportsNativePaseoTools &&
       this.paseoToolCatalogFactory

@@ -67,6 +67,7 @@ export function WorkspaceMetaRow({
   prHint,
   serviceSummary,
   labels = EMPTY_LABELS,
+  coordinatorNeedsYou = 0,
 }: {
   currentBranch: string | null;
   projectName: string | null;
@@ -74,9 +75,12 @@ export function WorkspaceMetaRow({
   prHint: PrHint | null;
   serviceSummary: WorkspaceServiceSummary | null;
   labels?: readonly WorkspaceLabelDefinition[];
+  /** Open decision rows on the workspace's project board; zero draws nothing. */
+  coordinatorNeedsYou?: number;
 }) {
   const { rowItems, checksDisplay } = useSidebarMetaPreferences();
   const items = selectMetaRowItems({
+    coordinatorNeedsYou,
     currentBranch,
     projectName,
     hasHostBadge: hostBadge !== null,
@@ -111,6 +115,9 @@ function MetaItemNode({
   /** First on the line, so this item's ink sets the rail the title above it already uses. */
   leading: boolean;
 }): ReactNode {
+  if (item.kind === "needsYou") {
+    return <NeedsYouItem count={item.count} />;
+  }
   if (item.kind === "branch") {
     return <IdentityItem kind="branch" name={item.name} />;
   }
@@ -130,6 +137,20 @@ function MetaItemNode({
     return <LabelsItem labels={item.labels} leading={leading} />;
   }
   return <ServiceItem summary={item.summary} />;
+}
+
+/**
+ * The project's open coordinator decisions, as bare text in the warning token —
+ * the spec gives the item no glyph because the row's status dot already says
+ * something wants you; the count is what the dot cannot say.
+ */
+function NeedsYouItem({ count }: { count: number }) {
+  const { t } = useTranslation();
+  return (
+    <Text style={styles.needsYouText} numberOfLines={1} testID="sidebar-workspace-needs-you">
+      {t("coordinator.needsYou", { count })}
+    </Text>
+  );
 }
 
 function IdentityItem({ kind, name }: { kind: "branch" | "project"; name: string }) {
@@ -390,6 +411,12 @@ const styles = StyleSheet.create((theme) => ({
   },
   prTextHovered: {
     color: theme.colors.foreground,
+    fontSize: theme.fontSize.sm,
+    lineHeight: 16,
+    flexShrink: 0,
+  },
+  needsYouText: {
+    color: theme.colors.statusWarning,
     fontSize: theme.fontSize.sm,
     lineHeight: 16,
     flexShrink: 0,

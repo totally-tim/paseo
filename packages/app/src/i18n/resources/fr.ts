@@ -2000,6 +2000,7 @@ export const fr: TranslationResources = {
       saveAccessibility: "Enregistrer le commentaire de l'avis",
     },
   },
+  coordinator: en.coordinator,
   settings: {
     title: "Paramètres",
     loading: "Chargement des paramètres...",

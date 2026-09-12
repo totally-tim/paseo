@@ -89,8 +89,13 @@ export function describeHookAgent(agent: {
   };
 }
 
+/**
+ * Translates one agent stream event into a lifecycle emit. The parameter is
+ * narrowed to `emit` so the plugin runtime and the in-process LifecycleBus are
+ * interchangeable sinks.
+ */
 export function publishAgentStream(
-  lifecycle: PluginLifecycle,
+  lifecycle: Pick<PluginLifecycle, "emit">,
   agent: PluginHookAgent,
   event: AgentStreamEvent,
   timeline: readonly AgentTimelineItem[],

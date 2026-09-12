@@ -42,6 +42,9 @@ export const CLIENT_CAPS = {
   pluginTimelineItems: "plugin_timeline_items",
   // COMPAT(workspaceSetupBlocked): added in v0.8.0, remove after 2027-03-07 once client floor >= v0.8.0.
   workspaceSetupBlocked: "workspace_setup_blocked",
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-11. The daemon pushes
+  // coordinator.board.* messages only to clients that decode them.
+  coordinator: "coordinator",
   browserHost: "browser_host",
 } as const;
 
