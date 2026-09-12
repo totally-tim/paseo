@@ -15,6 +15,7 @@ import { formatCompactTimeAgo, formatDuration } from "@/utils/time";
 import { openExternalUrl } from "@/utils/open-external-url";
 import {
   buildBoardActionResponse,
+  resolveComposerQuoteSource,
   resolveDecisionPermission,
   type BoardAction,
 } from "@/coordinator/decisions";
@@ -243,7 +244,7 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
           RESPOND_TIMEOUT_MS,
         );
         if (action.composerQuote) {
-          handlers.onComposerQuote(row.question);
+          handlers.onComposerQuote(resolveComposerQuoteSource(row));
         }
         // The daemon's board change removes the row; the pending flag stays so
         // the buttons can't be pressed twice in the gap.
@@ -289,6 +290,7 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
           compact={compact}
           onRespond={respondToDecision}
           onPeek={setPeekRowId}
+          onOpenAgent={handlers.onOpenAgent}
         />
       ))}
     </View>
@@ -416,6 +418,7 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
         now={now}
         onRespond={respondToPeekAction}
         onClose={closePeek}
+        onOpenAgent={handlers.onOpenAgent}
       />
     </View>
   );

@@ -20,7 +20,7 @@ import { definePanel, type PanelDescriptor } from "@/panels/panel-registry";
 import { useHostRuntimeClient } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import { useWorkspaceFields } from "@/stores/session-store-hooks";
-import { buildDraftStoreKey } from "@/stores/draft-keys";
+import { buildCoordinatorBoardDraftKey } from "@/stores/draft-keys";
 import type { PendingPermission } from "@/types/shared";
 import { buildWorkspaceTabPersistenceKey } from "@/workspace-tabs/model";
 import { openWorkspaceChanges } from "@/workspace-tabs/open-supporting-view";
@@ -101,9 +101,7 @@ function CoordinatorBoardPanel() {
   // The draft rides on the coordinator session key so text typed on the board
   // shows up in the chat tab and vice versa. While no session is running the
   // draft is parked under a project-scoped key.
-  const draftKey = coordinatorAgentId
-    ? buildDraftStoreKey({ serverId, agentId: coordinatorAgentId })
-    : `coordinator-board:${serverId}:${projectId}`;
+  const draftKey = buildCoordinatorBoardDraftKey({ serverId, projectId, coordinatorAgentId });
   const draftInput = useAgentInputDraft({ draftKey });
   // Bumping the composer focus key re-runs its web autofocus, so a Correct-it
   // answer lands the cursor on the quoted question.

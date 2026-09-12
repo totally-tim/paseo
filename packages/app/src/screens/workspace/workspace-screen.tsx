@@ -993,7 +993,9 @@ interface WorkspaceHeaderTitleBarProps {
   importAgentDisabled: boolean;
   copyPathDisabled: boolean;
   coordinatorAgentId: string | null;
+  coordinatorProjectId: string | null;
   onOpenCoordinatorChat: () => void;
+  onOpenCoordinatorBoard: () => void;
   onCreateDraftTab: () => void;
   onCreateTerminal: () => void;
   onCreateTerminalWithProfile: (profile: TerminalProfile) => void;
@@ -1024,7 +1026,9 @@ function WorkspaceHeaderTitleBar({
   importAgentDisabled,
   copyPathDisabled,
   coordinatorAgentId,
+  coordinatorProjectId,
   onOpenCoordinatorChat,
+  onOpenCoordinatorBoard,
   onCreateDraftTab,
   onCreateTerminal,
   onCreateTerminalWithProfile,
@@ -1064,7 +1068,9 @@ function WorkspaceHeaderTitleBar({
             importAgentDisabled={importAgentDisabled}
             copyPathDisabled={copyPathDisabled}
             coordinatorAgentId={coordinatorAgentId}
+            coordinatorProjectId={coordinatorProjectId}
             onOpenCoordinatorChat={onOpenCoordinatorChat}
+            onOpenCoordinatorBoard={onOpenCoordinatorBoard}
             onCreateDraftTab={onCreateDraftTab}
             onCreateTerminal={onCreateTerminal}
             onCreateTerminalWithProfile={onCreateTerminalWithProfile}
@@ -2264,6 +2270,21 @@ function WorkspaceScreenContent({
       navigateToTabId(tabId);
     }
   }, [coordinatorAgentId, navigateToTabId, openWorkspaceTabFocused, persistenceKey]);
+
+  // The board is reopenable on compact through the header menu; the store
+  // action lifts the close dismissal so reconcile does not retarget it back to
+  // the ambient draft.
+  const coordinatorProjectId = workspaceCoordinator.projectId;
+  const openCoordinatorBoard = useWorkspaceLayoutStore((state) => state.openCoordinatorBoard);
+  const handleOpenCoordinatorBoard = useCallback(() => {
+    if (!coordinatorProjectId || !persistenceKey) {
+      return;
+    }
+    const tabId = openCoordinatorBoard(persistenceKey, coordinatorProjectId);
+    if (tabId) {
+      navigateToTabId(tabId);
+    }
+  }, [coordinatorProjectId, navigateToTabId, openCoordinatorBoard, persistenceKey]);
 
   useEffect(() => {
     if (!isRouteFocused) {
@@ -4042,7 +4063,9 @@ function WorkspaceScreenContent({
                 importAgentDisabled={!canOpenImportSheet}
                 copyPathDisabled={!workspaceDirectory}
                 coordinatorAgentId={coordinatorAgentId}
+                coordinatorProjectId={coordinatorProjectId}
                 onOpenCoordinatorChat={handleOpenCoordinatorChat}
+                onOpenCoordinatorBoard={handleOpenCoordinatorBoard}
                 onCreateDraftTab={handleCreateDraftTab}
                 onCreateTerminal={handleCreateTerminal}
                 onCreateTerminalWithProfile={handleCreateTerminalWithProfile}
@@ -4063,6 +4086,7 @@ function WorkspaceScreenContent({
     [
       canOpenImportSheet,
       coordinatorAgentId,
+      coordinatorProjectId,
       createTerminalDisabled,
       currentBranchName,
       handleCopyBranchName,
@@ -4071,6 +4095,7 @@ function WorkspaceScreenContent({
       handleCreateDraftTab,
       handleCreateTerminal,
       handleCreateTerminalWithProfile,
+      handleOpenCoordinatorBoard,
       handleOpenCoordinatorChat,
       handleOpenSetupTab,
       handleOpenUrlInBrowserTab,

@@ -2058,6 +2058,8 @@ export const en = {
       doneWindow: "24h",
       chat: "Chat",
       openChat: "Open coordinator chat",
+      openBoard: "Open coordinator board",
+      answerInChat: "Answer in chat",
       composerPlaceholder: "Ask the coordinator…",
       waiting: "waiting {{duration}}",
       defaultIn: "default {{answer}} in {{duration}}",

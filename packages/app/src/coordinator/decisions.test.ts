@@ -5,7 +5,9 @@ import type { PendingPermission } from "@/types/shared";
 import {
   buildBoardActionResponse,
   buildComposerQuoteText,
+  isMultiQuestionRow,
   resolveBoardActions,
+  resolveComposerQuoteSource,
   resolveDecisionPermission,
 } from "./decisions";
 
@@ -43,9 +45,19 @@ function makeRow(input: {
   actions?: WireAction[];
   requestKind?: string;
   questionHeader?: string;
+  questionCount?: number;
+  question?: string;
+  quoteText?: string;
 }): Pick<
   CoordinatorDecisionBoardRow,
-  "agentId" | "requestId" | "actions" | "requestKind" | "questionHeader"
+  | "agentId"
+  | "requestId"
+  | "actions"
+  | "requestKind"
+  | "questionHeader"
+  | "questionCount"
+  | "question"
+  | "quoteText"
 > {
   return {
     agentId: input.agentId,
@@ -54,8 +66,11 @@ function makeRow(input: {
       { id: "allow-once", label: "Allow" },
       { id: "deny", label: "Deny" },
     ],
+    question: input.question ?? "Question?",
     ...(input.requestKind ? { requestKind: input.requestKind } : {}),
     ...(input.questionHeader ? { questionHeader: input.questionHeader } : {}),
+    ...(input.questionCount ? { questionCount: input.questionCount } : {}),
+    ...(input.quoteText ? { quoteText: input.quoteText } : {}),
   };
 }
 
@@ -283,6 +298,55 @@ describe("buildBoardActionResponse", () => {
       selectedActionId: "dismiss",
       message: "Denied by user",
     });
+  });
+
+  it("never builds an answers payload for a row with more than one question", () => {
+    const row = makeRow({
+      agentId: "agent-1",
+      requestId: "req-1",
+      requestKind: "question",
+      questionHeader: "Which scope?",
+      questionCount: 2,
+    });
+
+    expect(
+      buildBoardActionResponse(row, { id: "opt-1", label: "Staging", behavior: "allow" }),
+    ).toEqual({
+      behavior: "allow",
+      selectedActionId: "opt-1",
+    });
+  });
+});
+
+describe("isMultiQuestionRow", () => {
+  it("is true only when the request carries more than one question", () => {
+    expect(isMultiQuestionRow({})).toBe(false);
+    expect(isMultiQuestionRow({ questionCount: 1 })).toBe(false);
+    expect(isMultiQuestionRow({ questionCount: 2 })).toBe(true);
+    expect(isMultiQuestionRow({ questionCount: 5 })).toBe(true);
+  });
+});
+
+describe("resolveComposerQuoteSource", () => {
+  it("quotes the proposal body when the wire carries one", () => {
+    expect(
+      resolveComposerQuoteSource(
+        makeRow({
+          agentId: "agent-1",
+          requestId: "req-1",
+          question: "Correct this plan?",
+          quoteText: "Plan:\n1. Ship it\n2. Celebrate",
+        }),
+      ),
+    ).toBe("Plan:\n1. Ship it\n2. Celebrate");
+  });
+
+  it("falls back to the row's question when no quote text is carried", () => {
+    expect(
+      resolveComposerQuoteSource(
+        makeRow({ agentId: "agent-1", requestId: "req-1", question: "Correct this plan?" }),
+      ),
+    ).toBe("Correct this plan?");
   });
 });
 

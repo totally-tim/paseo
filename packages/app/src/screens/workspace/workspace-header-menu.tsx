@@ -7,6 +7,7 @@ import {
   Ellipsis,
   Globe,
   Import as ImportIcon,
+  Kanban,
   MessagesSquare,
   Settings,
   SquarePen,
@@ -42,6 +43,7 @@ const ThemedGlobe = withUnistyles(Globe);
 const ThemedImport = withUnistyles(ImportIcon);
 const ThemedSettings = withUnistyles(Settings);
 const ThemedMessagesSquare = withUnistyles(MessagesSquare);
+const ThemedKanban = withUnistyles(Kanban);
 
 const mutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
@@ -52,6 +54,7 @@ const MENU_IMPORT_ICON = <ThemedImport size={16} uniProps={mutedColorMapping} />
 const MENU_COPY_ICON = <ThemedCopy size={16} uniProps={mutedColorMapping} />;
 const MENU_SETTINGS_ICON = <ThemedSettings size={16} uniProps={mutedColorMapping} />;
 const MENU_COORDINATOR_CHAT_ICON = <ThemedMessagesSquare size={16} uniProps={mutedColorMapping} />;
+const MENU_COORDINATOR_BOARD_ICON = <ThemedKanban size={16} uniProps={mutedColorMapping} />;
 function WorkspaceHeaderMenuTriggerIcon() {
   return (
     <ThemedEllipsis
@@ -208,7 +211,10 @@ export interface WorkspaceHeaderMenuMobileProps extends WorkspaceHeaderWorkspace
   createTerminalDisabled: boolean;
   /** The project coordinator session, when one is running — unlocks the chat item. */
   coordinatorAgentId: string | null;
+  /** The workspace's project while its coordinator is enabled — unlocks the board item. */
+  coordinatorProjectId: string | null;
   onOpenCoordinatorChat: () => void;
+  onOpenCoordinatorBoard: () => void;
   onCreateDraftTab: () => void;
   onCreateTerminal: () => void;
   onCreateTerminalWithProfile: (profile: TerminalProfile) => void;
@@ -224,7 +230,9 @@ export function WorkspaceHeaderMenuMobile({
   showCreateBrowserTab,
   createTerminalDisabled,
   coordinatorAgentId,
+  coordinatorProjectId,
   onOpenCoordinatorChat,
+  onOpenCoordinatorBoard,
   onCreateDraftTab,
   onCreateTerminal,
   onCreateTerminalWithProfile,
@@ -274,6 +282,15 @@ export function WorkspaceHeaderMenuMobile({
             onSelect={onCreateBrowser}
           >
             {t("workspace.header.actions.newBrowser")}
+          </DropdownMenuItem>
+        ) : null}
+        {coordinatorProjectId ? (
+          <DropdownMenuItem
+            testID="workspace-header-open-coordinator-board"
+            leading={MENU_COORDINATOR_BOARD_ICON}
+            onSelect={onOpenCoordinatorBoard}
+          >
+            {t("coordinator.board.openBoard")}
           </DropdownMenuItem>
         ) : null}
         {coordinatorAgentId ? (
