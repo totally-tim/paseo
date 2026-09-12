@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import {
   COORDINATOR_PROJECT_ID_LABEL,
   COORDINATOR_PROJECT_ROLE,
+  COORDINATOR_SUBAGENT_KIND_LABEL,
   PARENT_AGENT_ID_LABEL,
   PASEO_ROLE_LABEL,
 } from "@getpaseo/protocol/agent-labels";
@@ -19,7 +20,11 @@ import { createTestLogger } from "../../test-utils/test-logger.js";
 import { createProviderSnapshotManagerStub } from "../test-utils/session-stubs.js";
 import { AgentManager } from "../agent/agent-manager.js";
 import { AgentStorage } from "../agent/agent-storage.js";
-import { createPaseoToolCatalog } from "../agent/tools/paseo-tools.js";
+import {
+  createPaseoToolCatalog,
+  type PaseoToolHostDependencies,
+} from "../agent/tools/paseo-tools.js";
+import type { ForgeService } from "../../services/forge-service.js";
 import type {
   AgentCapabilityFlags,
   AgentClient,
@@ -1214,5 +1219,393 @@ describe("observe gate at the catalog boundary", () => {
     // the call was not denied by the observe policy.
     const outcome = await catalog.executeTool("create_agent", {}).catch((error) => error);
     expect(outcome).not.toBeInstanceOf(CoordinatorToolDeniedError);
+  });
+});
+
+describe("change request tools", () => {
+  interface ForgeCall {
+    method: string;
+    input: unknown;
+  }
+
+  function createForgeStub() {
+    const calls: ForgeCall[] = [];
+    const service: ForgeService = {
+      listPullRequests: async () => [],
+      listIssues: async () => [],
+      getPullRequest: async ({ number }) => ({
+        number,
+        title: `PR ${number}`,
+        url: `https://github.com/acme/repo/pull/${number}`,
+        state: "OPEN",
+        body: null,
+        baseRefName: "main",
+        headRefName: "feature",
+        labels: [],
+      }),
+      getPullRequestHeadRef: async () => "feature",
+      getPullRequestCheckoutTarget: async () => {
+        throw new Error("unused in change-request tests");
+      },
+      getCurrentPullRequestStatus: async () => null,
+      getPullRequestTimeline: async () => {
+        throw new Error("unused in change-request tests");
+      },
+      getCheckDetails: async () => {
+        throw new Error("unused in change-request tests");
+      },
+      searchIssuesAndPrs: async () => ({
+        items: [],
+        featuresEnabled: true,
+        authState: "authenticated",
+      }),
+      createPullRequest: async (input) => {
+        calls.push({ method: "createPullRequest", input });
+        return { url: "https://github.com/acme/repo/pull/9", number: 9 };
+      },
+      createPullRequestComment: async (input) => {
+        calls.push({ method: "createPullRequestComment", input });
+        return { url: "https://github.com/acme/repo/pull/9#issuecomment-77" };
+      },
+      retryPullRequestChecks: async (input) => {
+        calls.push({ method: "retryPullRequestChecks", input });
+        return { retried: [{ id: 41, name: "CI" }] };
+      },
+      mergePullRequest: async () => ({ success: true }),
+      enablePullRequestAutoMerge: async () => ({ success: true }),
+      disablePullRequestAutoMerge: async () => ({ success: true }),
+      isAuthenticated: async () => true,
+      invalidate: () => {},
+    };
+    return { service, calls };
+  }
+
+  function forgeCatalog(input: {
+    callerAgentId?: string;
+    forge: ForgeService;
+    resolveForge?: "default" | "none";
+    assertReviewerGate?: (callerAgentId: string, reviewerAgentId: string) => Promise<void>;
+  }) {
+    const workspaceGitService: PaseoToolHostDependencies["workspaceGitService"] = {
+      getSnapshot: async () => {
+        throw new Error("getSnapshot is not used by change-request tools");
+      },
+      listWorktrees: async () => [],
+      resolveRepoRoot: async (cwd) => cwd,
+      resolveForge:
+        input.resolveForge === "none"
+          ? async () => null
+          : async () => ({ forge: "github", host: "github.com", service: input.forge }),
+      resolveDefaultBranch: async () => "main",
+    };
+    return createPaseoToolCatalog({
+      agentManager: harness.agentManager,
+      agentStorage: harness.agentStorage,
+      providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+      workspaceGitService,
+      workspaceRegistry: harness.workspaceRegistry,
+      callerAgentId: input.callerAgentId,
+      coordinator: {
+        remember: (rememberInput) => harness.service.remember(rememberInput),
+        assertReviewerGate: input.assertReviewerGate,
+      },
+      logger,
+    });
+  }
+
+  async function createReviewer(
+    coordinatorAgentId: string,
+    options?: { kind?: string; parentAgentId?: string },
+  ) {
+    return await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      {
+        workspaceId: harness.workspace.workspaceId,
+        labels: {
+          [PARENT_AGENT_ID_LABEL]: options?.parentAgentId ?? coordinatorAgentId,
+          ...(options?.kind === null || options?.kind === undefined
+            ? {}
+            : { [COORDINATOR_SUBAGENT_KIND_LABEL]: options.kind }),
+        },
+      },
+    );
+  }
+
+  const changeRequestInput = (reviewerAgentId?: string) => ({
+    cwd: harness.projectDir,
+    title: "Ship the slice",
+    head: "impl/feature",
+    ...(reviewerAgentId ? { reviewerAgentId } : {}),
+  });
+
+  test("a coordinator caller is denied without reviewerAgentId before any forge call", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    const { service, calls } = createForgeStub();
+    const catalog = forgeCatalog({ callerAgentId: state.agentId!, forge: service });
+    const tool = catalog.getTool("create_change_request")!;
+
+    await expect(tool.handler(changeRequestInput(), {})).rejects.toThrow(/reviewerAgentId/);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("denies a reviewer id that does not resolve to an agent", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    const { service, calls } = createForgeStub();
+    const catalog = forgeCatalog({ callerAgentId: state.agentId!, forge: service });
+    const tool = catalog.getTool("create_change_request")!;
+
+    await expect(tool.handler(changeRequestInput("agent_does_not_exist"), {})).rejects.toThrow(
+      /not found/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  test("denies a reviewer that is not the coordinator's own subagent", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    const stranger = await createReviewer(state.agentId!, {
+      kind: "reviewer",
+      parentAgentId: "some-other-coordinator",
+    });
+    const { service, calls } = createForgeStub();
+    const catalog = forgeCatalog({ callerAgentId: state.agentId!, forge: service });
+    const tool = catalog.getTool("create_change_request")!;
+
+    await expect(tool.handler(changeRequestInput(stranger.id), {})).rejects.toThrow(
+      /not a subagent of this coordinator/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  test("denies a child subagent that is not reviewer-kind", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    const implementer = await createReviewer(state.agentId!, { kind: "implementer" });
+    const { service, calls } = createForgeStub();
+    const catalog = forgeCatalog({ callerAgentId: state.agentId!, forge: service });
+    const tool = catalog.getTool("create_change_request")!;
+
+    await expect(tool.handler(changeRequestInput(implementer.id), {})).rejects.toThrow(
+      /not a reviewer-kind subagent/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  test("denies a reviewer-kind child that never ran a review turn", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    const reviewer = await createReviewer(state.agentId!, { kind: "reviewer" });
+    const { service, calls } = createForgeStub();
+    const catalog = forgeCatalog({ callerAgentId: state.agentId!, forge: service });
+    const tool = catalog.getTool("create_change_request")!;
+
+    await expect(tool.handler(changeRequestInput(reviewer.id), {})).rejects.toThrow(
+      /has not finished a review turn/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  test("denies a reviewer still running its review turn", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    const reviewer = await createReviewer(state.agentId!, { kind: "reviewer" });
+    const session = harness.client.sessions.at(-1)!;
+    session.holdTurn = true;
+    const stream = harness.agentManager.streamAgent(reviewer.id, "review the diff", {
+      clientMessageId: `msg-${randomUUID()}`,
+    });
+    for await (const event of stream) {
+      if (event.type === "turn_started") break;
+    }
+    expect(harness.agentManager.getAgent(reviewer.id)?.lifecycle).toBe("running");
+
+    const { service, calls } = createForgeStub();
+    const catalog = forgeCatalog({ callerAgentId: state.agentId!, forge: service });
+    const tool = catalog.getTool("create_change_request")!;
+
+    await expect(tool.handler(changeRequestInput(reviewer.id), {})).rejects.toThrow(
+      /has not finished a review turn/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  test("a finished reviewer-kind child opens the change request and triggers the bridge", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    const reviewer = await createReviewer(state.agentId!, { kind: "reviewer" });
+    await harness.agentManager.runAgent(reviewer.id, "review the diff", {
+      clientMessageId: `msg-${randomUUID()}`,
+    });
+    expect(harness.agentManager.getAgent(reviewer.id)?.lifecycle).toBe("idle");
+
+    const { service, calls } = createForgeStub();
+    const assertReviewerGate = vi.fn(async () => {});
+    const catalog = forgeCatalog({
+      callerAgentId: state.agentId!,
+      forge: service,
+      assertReviewerGate,
+    });
+    const tool = catalog.getTool("create_change_request")!;
+
+    const result = await tool.handler(changeRequestInput(reviewer.id), {});
+
+    expect(result.structuredContent).toEqual({
+      url: "https://github.com/acme/repo/pull/9",
+      number: 9,
+    });
+    expect(calls).toEqual([
+      {
+        method: "createPullRequest",
+        input: {
+          cwd: harness.projectDir,
+          title: "Ship the slice",
+          body: undefined,
+          head: "impl/feature",
+          base: "main",
+        },
+      },
+    ]);
+    expect(assertReviewerGate).toHaveBeenCalledWith(state.agentId!, reviewer.id);
+  });
+
+  test("a bridge denial still blocks the forge call after local checks pass", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    const reviewer = await createReviewer(state.agentId!, { kind: "reviewer" });
+    await harness.agentManager.runAgent(reviewer.id, "review the diff", {
+      clientMessageId: `msg-${randomUUID()}`,
+    });
+
+    const { service, calls } = createForgeStub();
+    const catalog = forgeCatalog({
+      callerAgentId: state.agentId!,
+      forge: service,
+      assertReviewerGate: async () => {
+        throw new Error("reviewer gate denied by the coordinator service");
+      },
+    });
+    const tool = catalog.getTool("create_change_request")!;
+
+    await expect(tool.handler(changeRequestInput(reviewer.id), {})).rejects.toThrow(
+      /coordinator service/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  test("a non-coordinator caller opens a change request without a reviewer", async () => {
+    const agent = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    const { service, calls } = createForgeStub();
+    const catalog = forgeCatalog({ callerAgentId: agent.id, forge: service });
+    const tool = catalog.getTool("create_change_request")!;
+
+    const result = await tool.handler(changeRequestInput(), {});
+
+    expect(result.structuredContent).toMatchObject({ number: 9 });
+    expect(calls).toHaveLength(1);
+  });
+
+  test("resolves the workspace checkout when workspaceId is passed", async () => {
+    const { service, calls } = createForgeStub();
+    const catalog = forgeCatalog({ forge: service });
+    const tool = catalog.getTool("create_change_request")!;
+
+    await tool.handler(
+      {
+        workspaceId: harness.workspace.workspaceId,
+        title: "Ship it",
+        head: "impl/feature",
+        base: "main",
+      },
+      {},
+    );
+
+    expect(calls[0]?.input).toMatchObject({ cwd: harness.workspace.cwd });
+  });
+
+  test("rejects passing both cwd and workspaceId", async () => {
+    const { service } = createForgeStub();
+    const catalog = forgeCatalog({ forge: service });
+    const tool = catalog.getTool("create_change_request")!;
+
+    await expect(
+      tool.handler(
+        {
+          cwd: harness.projectDir,
+          workspaceId: harness.workspace.workspaceId,
+          title: "Ship it",
+          head: "impl/feature",
+        },
+        {},
+      ),
+    ).rejects.toThrow(/either cwd or workspaceId/);
+  });
+
+  test("fails clearly when no forge remote resolves for the checkout", async () => {
+    const { service, calls } = createForgeStub();
+    const catalog = forgeCatalog({ forge: service, resolveForge: "none" });
+    const tool = catalog.getTool("create_change_request")!;
+
+    await expect(tool.handler(changeRequestInput(), {})).rejects.toThrow(
+      /No forge remote resolved/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  test("rejects a missing title at the schema boundary", async () => {
+    const { service } = createForgeStub();
+    const catalog = forgeCatalog({ forge: service });
+
+    await expect(
+      catalog.executeTool("create_change_request", {
+        cwd: harness.projectDir,
+        head: "impl/feature",
+      }),
+    ).rejects.toThrow();
+  });
+
+  test("comment_on_change_request posts through the resolved forge service", async () => {
+    const { service, calls } = createForgeStub();
+    const catalog = forgeCatalog({ forge: service });
+    const tool = catalog.getTool("comment_on_change_request")!;
+
+    const result = await tool.handler(
+      { cwd: harness.projectDir, prNumber: 9, body: "Review: rename path needs a test" },
+      {},
+    );
+
+    expect(result.structuredContent).toEqual({
+      url: "https://github.com/acme/repo/pull/9#issuecomment-77",
+    });
+    expect(calls).toEqual([
+      {
+        method: "createPullRequestComment",
+        input: { cwd: harness.projectDir, prNumber: 9, body: "Review: rename path needs a test" },
+      },
+    ]);
+  });
+
+  test("retry_change_request_checks reports the checks the forge re-ran", async () => {
+    const { service, calls } = createForgeStub();
+    const catalog = forgeCatalog({ forge: service });
+    const tool = catalog.getTool("retry_change_request_checks")!;
+
+    const result = await tool.handler({ cwd: harness.projectDir, prNumber: 9 }, {});
+
+    expect(result.structuredContent).toEqual({ retried: [{ id: 41, name: "CI" }] });
+    expect(calls).toEqual([
+      { method: "retryPullRequestChecks", input: { cwd: harness.projectDir, prNumber: 9 } },
+    ]);
+  });
+
+  test("an unsupported retry surfaces the forge error instead of claiming a retry", async () => {
+    const { service } = createForgeStub();
+    service.retryPullRequestChecks = async () => {
+      throw new Error("retryPullRequestChecks is not supported on Gitea yet");
+    };
+    const catalog = forgeCatalog({ forge: service });
+    const tool = catalog.getTool("retry_change_request_checks")!;
+
+    await expect(tool.handler({ cwd: harness.projectDir, prNumber: 9 }, {})).rejects.toThrow(
+      /not supported on Gitea/,
+    );
   });
 });

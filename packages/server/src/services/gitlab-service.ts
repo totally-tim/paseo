@@ -20,6 +20,7 @@ import {
 } from "./forge-service.js";
 import type {
   CheckDetails,
+  CreatePullRequestCommentOptions,
   CreatePullRequestOptions,
   CurrentPullRequestStatus,
   DisablePullRequestAutoMergeOptions,
@@ -41,6 +42,7 @@ import type {
   PullRequestCheck,
   PullRequestChecksStatus,
   PullRequestCheckoutTarget,
+  PullRequestCommentResult,
   PullRequestCreateResult,
   PullRequestMergeable,
   PullRequestMergeResult,
@@ -50,6 +52,9 @@ import type {
   PullRequestTimelineError,
   PullRequestTimelineErrorKind,
   PullRequestTimelineItem,
+  RetriedPullRequestCheck,
+  RetryPullRequestChecksOptions,
+  RetryPullRequestChecksResult,
   SearchIssuesAndPrsOptions,
   SearchResult,
 } from "./forge-service.js";
@@ -1205,6 +1210,53 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
         throw new Error(`GitLab merge request URL did not contain an iid: ${url}`);
       }
       return { url, number };
+    },
+
+    async createPullRequestComment(
+      input: CreatePullRequestCommentOptions,
+    ): Promise<PullRequestCommentResult> {
+      // View first so a bad iid fails before the note posts, and so the result
+      // can deep-link: GitLab notes carry no web_url of their own.
+      const mr = await viewMergeRequest(input.cwd, String(input.prNumber));
+      // The `:fullpath` placeholder resolves the project from the cwd's remote.
+      const note = await runJson(
+        [
+          "api",
+          "--method",
+          "POST",
+          `projects/:fullpath/merge_requests/${input.prNumber}/notes`,
+          "-f",
+          `body=${input.body}`,
+        ],
+        { cwd: input.cwd },
+        GitLabNoteSchema,
+      );
+      return { url: `${mr.web_url}#note_${note.id}` };
+    },
+
+    async retryPullRequestChecks(
+      input: RetryPullRequestChecksOptions,
+    ): Promise<RetryPullRequestChecksResult> {
+      const mr = await viewMergeRequest(input.cwd, String(input.prNumber));
+      const pipelineId = mr.head_pipeline?.id;
+      if (pipelineId === undefined) {
+        throw new Error(`GitLab merge request !${input.prNumber} has no head pipeline to retry`);
+      }
+      // List jobs before retrying so the result reports which jobs the pipeline
+      // retry actually re-ran — GitLab retries the failed and canceled jobs of
+      // the pipeline and leaves the rest untouched.
+      const jobs = await runJson(
+        ["api", `projects/:fullpath/pipelines/${pipelineId}/jobs?per_page=100`],
+        { cwd: input.cwd },
+        z.array(GitLabPipelineJobSchema),
+      );
+      const retried: RetriedPullRequestCheck[] = jobs
+        .filter((job) => job.status === "failed" || job.status === "canceled")
+        .map((job) => ({ id: job.id, name: job.name }));
+      await run(["api", "--method", "POST", `projects/:fullpath/pipelines/${pipelineId}/retry`], {
+        cwd: input.cwd,
+      });
+      return { retried };
     },
 
     async mergePullRequest(input: MergePullRequestOptions): Promise<PullRequestMergeResult> {
