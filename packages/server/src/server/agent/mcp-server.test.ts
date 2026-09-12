@@ -58,6 +58,8 @@ import type { BrowserToolsBroker, BrowserToolsExecuteInput } from "../browser-to
 import type { BrowserToolsResponsePayload } from "../browser-tools/errors.js";
 import { readPaseoWorktreeMetadata } from "../../utils/worktree-metadata.js";
 import { createWorkspaceProvisioningService } from "../session/workspace-provisioning/workspace-provisioning-service.js";
+import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
+import { ensureAgentLoaded } from "./agent-loading.js";
 
 const REPO_CWD = resolvePath("/tmp/repo");
 const TARGET_CWD = resolvePath("/tmp/target");
@@ -3417,93 +3419,126 @@ describe("create_agent MCP tool", () => {
     );
   });
 
-  it("mints a worktree for agent-scoped create_agent when PASEO_AGENT_SPAWN_ISOLATION=worktree", async () => {
-    const { agentManager, agentStorage, spies } = createTestDeps();
-    const tempDir = await mkdtemp(join(tmpdir(), "paseo-mcp-spawn-isolation-"));
-    const repoDir = join(tempDir, "repo");
-    const paseoHome = join(tempDir, ".paseo");
-    const broadcasts: string[] = [];
-    const createdWorkspaceIds: string[] = [];
-    vi.stubEnv("PASEO_AGENT_SPAWN_ISOLATION", "worktree");
+  it.each(["branch", "worktree", "detached"])(
+    "branches an isolated child from the caller's %s checkout",
+    async (checkout) => {
+      const { agentManager, agentStorage, spies } = createTestDeps();
+      const tempDir = await mkdtemp(join(tmpdir(), "paseo-mcp-spawn-isolation-"));
+      const repoDir = join(tempDir, "repo");
+      const paseoHome = join(tempDir, ".paseo");
+      const broadcasts: string[] = [];
+      const createdWorkspaceIds: string[] = [];
+      vi.stubEnv("PASEO_AGENT_SPAWN_ISOLATION", "worktree");
 
-    try {
-      execFileSync("git", ["init", repoDir], { stdio: "pipe" });
-      execFileSync("git", ["config", "user.email", "test@example.com"], {
-        cwd: repoDir,
-        stdio: "pipe",
-      });
-      execFileSync("git", ["config", "user.name", "Test"], { cwd: repoDir, stdio: "pipe" });
-      execFileSync("git", ["config", "commit.gpgsign", "false"], {
-        cwd: repoDir,
-        stdio: "pipe",
-      });
-      await writeFile(join(repoDir, "README.md"), "hello\n");
-      execFileSync("git", ["add", "README.md"], { cwd: repoDir, stdio: "pipe" });
-      execFileSync("git", ["commit", "-m", "init"], { cwd: repoDir, stdio: "pipe" });
-      execFileSync("git", ["branch", "-M", "main"], { cwd: repoDir, stdio: "pipe" });
+      try {
+        execFileSync("git", ["init", repoDir], { stdio: "pipe" });
+        execFileSync("git", ["config", "user.email", "test@example.com"], {
+          cwd: repoDir,
+          stdio: "pipe",
+        });
+        execFileSync("git", ["config", "user.name", "Test"], { cwd: repoDir, stdio: "pipe" });
+        execFileSync("git", ["config", "commit.gpgsign", "false"], {
+          cwd: repoDir,
+          stdio: "pipe",
+        });
+        await writeFile(join(repoDir, "README.md"), "hello\n");
+        execFileSync("git", ["add", "README.md"], { cwd: repoDir, stdio: "pipe" });
+        execFileSync("git", ["commit", "-m", "init"], { cwd: repoDir, stdio: "pipe" });
+        execFileSync("git", ["branch", "-M", "main"], { cwd: repoDir, stdio: "pipe" });
 
-      spies.agentManager.getAgent.mockReturnValue({
-        id: "parent-agent",
-        cwd: repoDir,
-        workspaceId: "wks_parent",
-        provider: "codex",
-        currentModeId: null,
-      } as ManagedAgent);
-      spies.agentManager.createAgent.mockImplementation(async (config: { cwd: string }) => ({
-        id: "isolated-child",
-        cwd: config.cwd,
-        lifecycle: "idle",
-        currentModeId: null,
-        availableModes: [],
-        config: { title: "Child" },
-      }));
+        execFileSync("git", ["checkout", "-b", "feature/parent"], { cwd: repoDir, stdio: "pipe" });
+        await writeFile(join(repoDir, "parent-feature.txt"), "parent feature\n");
+        execFileSync("git", ["add", "parent-feature.txt"], { cwd: repoDir, stdio: "pipe" });
+        execFileSync("git", ["commit", "-m", "parent feature"], { cwd: repoDir, stdio: "pipe" });
+        const parentHead = execFileSync("git", ["rev-parse", "HEAD"], {
+          cwd: repoDir,
+          stdio: "pipe",
+        })
+          .toString()
+          .trim();
+        let parentCwd = repoDir;
+        if (checkout === "worktree") {
+          execFileSync("git", ["checkout", "main"], { cwd: repoDir, stdio: "pipe" });
+          parentCwd = join(tempDir, "parent-worktree");
+          execFileSync("git", ["worktree", "add", parentCwd, "feature/parent"], {
+            cwd: repoDir,
+            stdio: "pipe",
+          });
+        } else if (checkout === "detached") {
+          execFileSync("git", ["checkout", "--detach", parentHead], {
+            cwd: repoDir,
+            stdio: "pipe",
+          });
+        }
 
-      const server = await createAgentMcpServer({
-        agentManager,
-        agentStorage,
-        providerSnapshotManager: createOpenCodeManager().manager,
-        callerAgentId: "parent-agent",
-        paseoHome,
-        createPaseoWorktree: createPaseoWorktreeForMcpTest({
+        spies.agentManager.getAgent.mockReturnValue({
+          id: "parent-agent",
+          cwd: parentCwd,
+          workspaceId: "wks_parent",
+          provider: "codex",
+          currentModeId: null,
+        } as ManagedAgent);
+        spies.agentManager.createAgent.mockImplementation(async (config: { cwd: string }) => ({
+          id: "isolated-child",
+          cwd: config.cwd,
+          lifecycle: "idle",
+          currentModeId: null,
+          availableModes: [],
+          config: { title: "Child" },
+        }));
+
+        const server = await createAgentMcpServer({
+          agentManager,
+          agentStorage,
+          providerSnapshotManager: createOpenCodeManager().manager,
+          callerAgentId: "parent-agent",
           paseoHome,
-          broadcasts,
-          createdWorkspaceIds,
-        }),
-        logger,
-      });
+          createPaseoWorktree: createPaseoWorktreeForMcpTest({
+            paseoHome,
+            broadcasts,
+            createdWorkspaceIds,
+          }),
+          logger,
+        });
 
-      await registeredTool(server, "create_agent").handler({
-        title: "Child",
-        provider: "codex/gpt-5.4",
-        initialPrompt: "Do work",
-      });
+        await registeredTool(server, "create_agent").handler({
+          title: "Child",
+          provider: "codex/gpt-5.4",
+          initialPrompt: "Do work",
+        });
 
-      expect(createdWorkspaceIds).toHaveLength(1);
-      const [configArg, , optionsArg] = spies.agentManager.createAgent.mock.calls[0];
-      expect(configArg.cwd).not.toBe(repoDir);
-      expect(optionsArg).toEqual({
-        unattended: true,
-        workspaceId: createdWorkspaceIds[0],
-        labels: { [PARENT_AGENT_ID_LABEL]: "parent-agent" },
-      });
-      const agentCwd = z.string().parse(configArg.cwd);
-      const worktreeList = execFileSync("git", ["worktree", "list", "--porcelain"], {
-        cwd: repoDir,
-        stdio: "pipe",
-      }).toString();
-      expect(worktreeList).toContain(`worktree ${agentCwd}`);
-      const branch = execFileSync("git", ["branch", "--show-current"], {
-        cwd: agentCwd,
-        stdio: "pipe",
-      })
-        .toString()
-        .trim();
-      expect(branch).not.toBe("main");
-    } finally {
-      vi.unstubAllEnvs();
-      await removeTempDir(tempDir);
-    }
-  });
+        expect(createdWorkspaceIds).toHaveLength(1);
+        const [configArg, , optionsArg] = spies.agentManager.createAgent.mock.calls[0];
+        expect(configArg.cwd).not.toBe(repoDir);
+        expect(optionsArg).toEqual({
+          unattended: true,
+          workspaceId: createdWorkspaceIds[0],
+          labels: { [PARENT_AGENT_ID_LABEL]: "parent-agent" },
+        });
+        const agentCwd = z.string().parse(configArg.cwd);
+        const worktreeList = execFileSync("git", ["worktree", "list", "--porcelain"], {
+          cwd: repoDir,
+          stdio: "pipe",
+        }).toString();
+        expect(worktreeList).toContain(`worktree ${agentCwd}`);
+        const branch = execFileSync("git", ["branch", "--show-current"], {
+          cwd: agentCwd,
+          stdio: "pipe",
+        })
+          .toString()
+          .trim();
+        expect(branch).not.toBe("main");
+        expect(
+          execFileSync("git", ["rev-parse", "HEAD"], { cwd: agentCwd, stdio: "pipe" })
+            .toString()
+            .trim(),
+        ).toBe(parentHead);
+      } finally {
+        vi.unstubAllEnvs();
+        await removeTempDir(tempDir);
+      }
+    },
+  );
 
   it("reads PASEO_AGENT_SPAWN_ISOLATION from the caller provider's configured env", async () => {
     const { agentManager, agentStorage, spies } = createTestDeps();
@@ -3580,6 +3615,155 @@ describe("create_agent MCP tool", () => {
       await removeTempDir(tempDir);
     }
   });
+
+  it.each([
+    { source: "creation", opening: "create", override: "worktree", inherited: "", isolated: true },
+    { source: "creation", opening: "create", override: "", inherited: "worktree", isolated: false },
+    {
+      source: "session hook",
+      opening: "create",
+      override: "worktree",
+      inherited: "",
+      isolated: true,
+    },
+    {
+      source: "session hook",
+      opening: "create",
+      override: "",
+      inherited: "worktree",
+      isolated: false,
+    },
+    {
+      source: "session hook",
+      opening: "resume",
+      override: "worktree",
+      inherited: "",
+      isolated: true,
+    },
+    {
+      source: "session hook",
+      opening: "resume",
+      override: "",
+      inherited: "worktree",
+      isolated: false,
+    },
+    {
+      source: "session hook",
+      opening: "refresh",
+      override: "worktree",
+      inherited: "",
+      isolated: true,
+    },
+    {
+      source: "session hook",
+      opening: "refresh",
+      override: "",
+      inherited: "worktree",
+      isolated: false,
+    },
+  ])(
+    "honors the $source launch override '$override' on $opening over provider and daemon defaults",
+    async ({ source, opening, override, inherited, isolated }) => {
+      const tempDir = await mkdtemp(join(tmpdir(), "paseo-mcp-launch-isolation-"));
+      const repoDir = join(tempDir, "repo");
+      const paseoHome = join(tempDir, ".paseo");
+      const storage = new AgentStorage(join(tempDir, "agents"), logger);
+      const clients = createTestAgentClients();
+      const createSession = vi.spyOn(clients.codex, "createSession");
+      const resumeSession = vi.spyOn(clients.codex, "resumeSession");
+      const pluginLifecycle: PluginLifecycle = {
+        emit() {},
+        async before(name, request) {
+          if (
+            source === "session hook" &&
+            name === "agent.session_open" &&
+            "reason" in request &&
+            request.reason === opening
+          ) {
+            return { ...request, env: { ...request.env, PASEO_AGENT_SPAWN_ISOLATION: override } };
+          }
+          return request;
+        },
+      };
+      const agentManager = new AgentManager({
+        clients,
+        registry: storage,
+        pluginLifecycle,
+        logger,
+      });
+      const providerSnapshot = createOpenCodeManager();
+      providerSnapshot.stub.getAccountRuntimeSettings.mockReturnValue({
+        env: { PASEO_AGENT_SPAWN_ISOLATION: inherited },
+      });
+      const createdWorkspaceIds: string[] = [];
+      const agentIds: string[] = [];
+      vi.stubEnv("PASEO_AGENT_SPAWN_ISOLATION", inherited);
+
+      try {
+        execFileSync("git", ["init", repoDir], { stdio: "pipe" });
+        execFileSync("git", ["config", "user.email", "test@example.com"], {
+          cwd: repoDir,
+          stdio: "pipe",
+        });
+        execFileSync("git", ["config", "user.name", "Test"], { cwd: repoDir, stdio: "pipe" });
+        execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: repoDir, stdio: "pipe" });
+        await writeFile(join(repoDir, "README.md"), "hello\n");
+        execFileSync("git", ["add", "README.md"], { cwd: repoDir, stdio: "pipe" });
+        execFileSync("git", ["commit", "-m", "init"], { cwd: repoDir, stdio: "pipe" });
+        execFileSync("git", ["branch", "-M", "main"], { cwd: repoDir, stdio: "pipe" });
+
+        const parent = await agentManager.createAgent(
+          { provider: "codex", cwd: repoDir },
+          undefined,
+          {
+            workspaceId: "wks_parent",
+            env: { PASEO_AGENT_SPAWN_ISOLATION: source === "creation" ? override : inherited },
+          },
+        );
+        agentIds.push(parent.id);
+        let launchContext = createSession.mock.calls[0][1];
+        if (opening === "resume") {
+          await agentManager.closeAgent(parent.id);
+          await ensureAgentLoaded(parent.id, { agentManager, agentStorage: storage, logger });
+          launchContext = resumeSession.mock.calls[0][2];
+        } else if (opening === "refresh") {
+          await agentManager.reloadAgentSession(parent.id);
+          launchContext = resumeSession.mock.calls[0][2];
+        }
+        expect(launchContext?.env?.PASEO_AGENT_SPAWN_ISOLATION).toBe(override);
+
+        const server = await createAgentMcpServer({
+          agentManager,
+          agentStorage: storage,
+          callerAgentId: parent.id,
+          providerSnapshotManager: providerSnapshot.manager,
+          paseoHome,
+          createPaseoWorktree: createPaseoWorktreeForMcpTest({
+            paseoHome,
+            broadcasts: [],
+            createdWorkspaceIds,
+          }),
+          logger,
+        });
+        const result = await registeredTool(server, "create_agent").handler({
+          title: "Child",
+          provider: "codex/gpt-5.4",
+          initialPrompt: "Do work",
+        });
+        const childId = z.object({ agentId: z.string() }).parse(result.structuredContent).agentId;
+        agentIds.push(childId);
+        expect(createdWorkspaceIds).toHaveLength(isolated ? 1 : 0);
+        const expectedWorkspaceId = isolated ? createdWorkspaceIds[0] : "wks_parent";
+        expect((await storage.get(childId))?.workspaceId).toBe(expectedWorkspaceId);
+        expect((await storage.get(childId))?.labels[PARENT_AGENT_ID_LABEL]).toBe(parent.id);
+      } finally {
+        for (const agentId of agentIds.toReversed()) await agentManager.closeAgent(agentId);
+        await agentManager.flush();
+        vi.unstubAllEnvs();
+        await removeTempDir(tempDir);
+      }
+    },
+  );
 
   it("lets an explicit workspaceId override the spawn isolation default", async () => {
     const { agentManager, agentStorage, spies } = createTestDeps();

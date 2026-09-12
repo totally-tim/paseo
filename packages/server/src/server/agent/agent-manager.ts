@@ -400,6 +400,8 @@ interface ManagedAgentBase {
   capabilities: AgentCapabilityFlags;
   config: AgentSessionConfig;
   runtimeInfo?: AgentRuntimeInfo;
+  // Runtime-only value after session-open hooks. Empty disables an inherited default.
+  spawnIsolationOverride?: string;
   createdAt: Date;
   updatedAt: Date;
   availableModes: AgentMode[];
@@ -1588,6 +1590,7 @@ export class AgentManager {
     }
     await this.requireExternalMcpSupport(session, storedConfig);
     const agent = await this.registerSession(session, storedConfig, resolvedAgentId, {
+      spawnIsolationOverride: launchContext.env?.PASEO_AGENT_SPAWN_ISOLATION,
       labels: options.labels,
       initialTitle: options.initialTitle,
       workspaceId: options.workspaceId,
@@ -1739,6 +1742,7 @@ export class AgentManager {
     await this.requireExternalMcpSupport(session, storedConfig);
     return this.registerSession(session, storedConfig, resolvedAgentId, {
       ...options,
+      spawnIsolationOverride: launchContext.env?.PASEO_AGENT_SPAWN_ISOLATION,
       persistence: handle,
     });
   }
@@ -1848,6 +1852,7 @@ export class AgentManager {
 
       handedToRegistration = true;
       const agent = await this.registerSession(imported.session, importedConfig, resolvedAgentId, {
+        spawnIsolationOverride: launchContext.env?.PASEO_AGENT_SPAWN_ISOLATION,
         labels: input.labels,
         workspaceId: input.workspaceId,
         timelineRows,
@@ -1992,6 +1997,7 @@ export class AgentManager {
       // Preserve existing labels and timeline during reload.
       handedToRegistration = true;
       return this.registerSession(session, storedConfig, agentId, {
+        spawnIsolationOverride: launchContext.env?.PASEO_AGENT_SPAWN_ISOLATION,
         labels: existing.labels,
         workspaceId: existing.workspaceId,
         owner: existing.owner,
@@ -3883,6 +3889,7 @@ export class AgentManager {
     config: AgentSessionConfig,
     agentId: string,
     options?: {
+      spawnIsolationOverride?: string;
       createdAt?: Date;
       updatedAt?: Date;
       lastUserMessageAt?: Date | null;
@@ -4040,6 +4047,7 @@ export class AgentManager {
     durableTimelineHasRows: boolean;
     options:
       | {
+          spawnIsolationOverride?: string;
           createdAt?: Date;
           updatedAt?: Date;
           lastUserMessageAt?: Date | null;
@@ -4065,6 +4073,7 @@ export class AgentManager {
       capabilities: session.capabilities,
       config,
       runtimeInfo: undefined,
+      spawnIsolationOverride: options?.spawnIsolationOverride,
       lifecycle: "initializing",
       createdAt: options?.createdAt ?? now,
       updatedAt: options?.updatedAt ?? now,

@@ -76,7 +76,7 @@ that can access the host through a shell.
 
 Workspaces decide where work happens; agent parentage decides who owns the work.
 
-- An agent that calls `create_agent` without a `workspaceId` gets a subagent in its own workspace, or in a fresh worktree when the daemon runs with `PASEO_AGENT_SPAWN_ISOLATION=worktree` (see [Running agents](/docs/cli#running-agents)).
+- An agent that calls `create_agent` without a `workspaceId` follows the [spawn isolation default](/docs/cli#running-agents).
 - Passing a `workspaceId` places that subagent in another workspace without detaching it from its parent.
 - A top-level MCP caller without a workspace gets a new local workspace.
 - Create a workspace first when you need a specific branch or a pull request checkout.

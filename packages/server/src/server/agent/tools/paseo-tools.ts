@@ -8,7 +8,7 @@ import { ensureValidJson } from "../../json-utils.js";
 import type { Logger } from "pino";
 
 import type { AgentMode, AgentProvider, AgentSessionConfig } from "../agent-sdk-types.js";
-import type { AgentManager } from "../agent-manager.js";
+import type { AgentManager, ManagedAgent } from "../agent-manager.js";
 import { AgentProfileSchema } from "@getpaseo/protocol/messages";
 import type { DaemonConfigStore } from "../../daemon-config-store.js";
 import {
@@ -101,6 +101,7 @@ import type {
 } from "./types.js";
 import type { ProviderPaseoToolsPolicy } from "@getpaseo/protocol/provider-config";
 import { isPaseoToolEnabled } from "../paseo-tool-policy.js";
+import { runGitCommand } from "../../../utils/run-git-command.js";
 
 export interface PaseoToolHostDependencies {
   agentManager: AgentManager;
@@ -1422,7 +1423,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     {
       title: "Create agent",
       description:
-        "Create an agent. Agent-scoped creation defaults to your workspace (a fresh worktree when the daemon sets PASEO_AGENT_SPAWN_ISOLATION=worktree) and creates your subagent. Top-level creation without workspaceId creates a new local workspace. Requires provider/model (for example codex/gpt-5.4) and an initial prompt. Do not guess; call list_providers and list_models first if uncertain.",
+        "Create an agent. Agent-scoped creation defaults to your workspace (a fresh worktree from your current commit when your environment sets PASEO_AGENT_SPAWN_ISOLATION=worktree) and creates your subagent. Top-level creation without workspaceId creates a new local workspace. Requires provider/model (for example codex/gpt-5.4) and an initial prompt. Do not guess; call list_providers and list_models first if uncertain.",
       inputSchema: createAgentInputSchema,
       outputSchema: {
         agentId: z.string(),
@@ -1652,15 +1653,14 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     ].some((key) => input[key] !== undefined);
   }
 
-  // PASEO_AGENT_SPAWN_ISOLATION in the calling agent's environment changes the
-  // default placement for agents it spawns, the same as for `paseo run`. The
-  // tool executes daemon-side, so the caller's env is reconstructed the way the
-  // provider launch builds it: the provider env overlay
-  // (agents.providers.<id>.env) on top of the daemon environment.
-  function resolveAgentSpawnIsolation(callerProvider: AgentProvider): "worktree" | undefined {
+  // Session launch overrides (including plugin hooks) take precedence over
+  // provider settings and the daemon environment, as they do for `paseo run`.
+  function resolveAgentSpawnIsolation(caller: ManagedAgent): "worktree" | undefined {
     const value = (
-      providerSnapshotManager.getAccountRuntimeSettings(callerProvider)?.env
-        ?.PASEO_AGENT_SPAWN_ISOLATION ?? process.env.PASEO_AGENT_SPAWN_ISOLATION
+      caller.spawnIsolationOverride ??
+      providerSnapshotManager.getAccountRuntimeSettings(caller.provider)?.env
+        ?.PASEO_AGENT_SPAWN_ISOLATION ??
+      process.env.PASEO_AGENT_SPAWN_ISOLATION
     )?.trim();
     if (!value) {
       return undefined;
@@ -1705,11 +1705,15 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     if (!caller?.workspaceId) {
       throw new Error(`Caller agent ${callerAgentId} has no current workspace`);
     }
-    if (resolveAgentSpawnIsolation(caller.provider) === "worktree") {
+    if (resolveAgentSpawnIsolation(caller) === "worktree") {
+      const cwd = resolveScopedCwd(undefined, { required: true });
+      // Worktree creation resolves the main repository, whose HEAD may differ
+      // from a caller in a linked worktree or detached checkout.
+      const { stdout } = await runGitCommand(["rev-parse", "--verify", "HEAD^{commit}"], { cwd });
       return {
-        cwd: resolveScopedCwd(undefined, { required: true }),
+        cwd,
         workspaceId: undefined,
-        worktree: { action: "branch-off" },
+        worktree: { action: "branch-off", baseBranch: stdout.trim() },
       };
     }
     return { cwd: undefined, workspaceId: caller.workspaceId, worktree: undefined };
