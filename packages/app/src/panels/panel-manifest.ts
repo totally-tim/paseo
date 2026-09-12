@@ -82,6 +82,11 @@ const manifests = {
     supportedHosts: ["main"],
     resourceKey: (target) => target.workspaceId,
   },
+  coordinator_board: {
+    kind: "coordinator_board",
+    supportedHosts: ["main"],
+    resourceKey: (target) => target.projectId,
+  },
   commit_diff: {
     kind: "commit_diff",
     supportedHosts: ["main", "explorer"],

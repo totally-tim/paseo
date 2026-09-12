@@ -15,6 +15,7 @@ function makeAgent(input: {
   archivedAt?: Date | null;
   createdAt?: Date;
   lastActivityAt?: Date;
+  labels?: Record<string, string>;
 }): Agent {
   const createdAt = input.createdAt ?? new Date("2026-03-04T00:00:00.000Z");
   const lastActivityAt = input.lastActivityAt ?? createdAt;
@@ -50,7 +51,7 @@ function makeAgent(input: {
     model: null,
     thinkingOptionId: null,
     parentAgentId: input.parentAgentId ?? null,
-    labels: {},
+    labels: input.labels ?? {},
     requiresAttention: false,
     attentionReason: null,
     attentionTimestamp: null,
@@ -319,11 +320,57 @@ describe("workspace agent visibility", () => {
     expect(result.knownAgentIds).toEqual(new Set<string>());
   });
 
+  it("keeps coordinator sessions out of every workspace set", () => {
+    const coordinator = makeAgent({
+      id: "coordinator-agent",
+      cwd: "/repo",
+      workspaceId: WORKSPACE_ID,
+      labels: { "paseo.role": "coordinator.project" },
+    });
+    const ordinary = makeAgent({
+      id: "ordinary-agent",
+      cwd: "/repo/worktree",
+      workspaceId: WORKSPACE_ID,
+    });
+
+    const result = deriveWorkspaceAgentVisibility({
+      sessionAgents: new Map<string, Agent>([
+        [coordinator.id, coordinator],
+        [ordinary.id, ordinary],
+      ]),
+      workspaceId: WORKSPACE_ID,
+    });
+
+    expect(result.coordinatorAgentIds).toEqual(new Set(["coordinator-agent"]));
+    expect(result.activeAgentIds).toEqual(new Set(["ordinary-agent"]));
+    expect(result.autoOpenAgentIds).toEqual(new Set(["ordinary-agent"]));
+    expect(result.knownAgentIds).toEqual(new Set(["ordinary-agent"]));
+  });
+
+  it("marks a coordinator known only through lazy details as a coordinator", () => {
+    const coordinator = makeAgent({
+      id: "coordinator-agent",
+      cwd: "/repo",
+      workspaceId: WORKSPACE_ID,
+      labels: { "paseo.role": "coordinator.project" },
+    });
+
+    const result = deriveWorkspaceAgentVisibility({
+      sessionAgents: undefined,
+      agentDetails: new Map([[coordinator.id, coordinator]]),
+      workspaceId: WORKSPACE_ID,
+    });
+
+    expect(result.coordinatorAgentIds).toEqual(new Set(["coordinator-agent"]));
+    expect(result.knownAgentIds).toEqual(new Set<string>());
+  });
+
   it("builds the tab reconciliation snapshot without callers unpacking agent visibility", () => {
     const agentVisibility = {
       activeAgentIds: new Set(["active-agent"]),
       autoOpenAgentIds: new Set(["root-agent"]),
       knownAgentIds: new Set(["active-agent", "archived-agent"]),
+      coordinatorAgentIds: new Set<string>(),
     };
 
     expect(
@@ -349,17 +396,64 @@ describe("workspace agent visibility", () => {
     });
   });
 
+  it("carries the coordinator block through to the tab snapshot", () => {
+    const agentVisibility = {
+      activeAgentIds: new Set<string>(),
+      autoOpenAgentIds: new Set<string>(),
+      knownAgentIds: new Set<string>(),
+      coordinatorAgentIds: new Set(["coord-1"]),
+    };
+
+    const snapshot = buildWorkspaceTabSnapshot({
+      agentVisibility,
+      agentsHydrated: true,
+      terminalsHydrated: true,
+      knownTerminalIds: [],
+      standaloneTerminalIds: [],
+      hasActivePendingTerminalCreate: false,
+      hasActivePendingDraftCreate: false,
+      coordinator: { projectId: "proj-1", boardsHydrated: true },
+    });
+
+    expect(snapshot.coordinator).toEqual({
+      projectId: "proj-1",
+      boardsHydrated: true,
+      agentIds: agentVisibility.coordinatorAgentIds,
+    });
+  });
+
+  it("omits the coordinator block on hosts that cannot serve boards", () => {
+    const snapshot = buildWorkspaceTabSnapshot({
+      agentVisibility: {
+        activeAgentIds: new Set<string>(),
+        autoOpenAgentIds: new Set<string>(),
+        knownAgentIds: new Set<string>(),
+        coordinatorAgentIds: new Set<string>(),
+      },
+      agentsHydrated: true,
+      terminalsHydrated: true,
+      knownTerminalIds: [],
+      standaloneTerminalIds: [],
+      hasActivePendingTerminalCreate: false,
+      hasActivePendingDraftCreate: false,
+    });
+
+    expect(snapshot.coordinator).toBeUndefined();
+  });
+
   describe("workspaceAgentVisibilityEqual", () => {
     it("returns true for identical sets", () => {
       const a = {
         activeAgentIds: new Set(["a", "b"]),
         autoOpenAgentIds: new Set(["a"]),
         knownAgentIds: new Set(["a", "b", "c"]),
+        coordinatorAgentIds: new Set<string>(),
       };
       const b = {
         activeAgentIds: new Set(["a", "b"]),
         autoOpenAgentIds: new Set(["a"]),
         knownAgentIds: new Set(["a", "b", "c"]),
+        coordinatorAgentIds: new Set<string>(),
       };
       expect(workspaceAgentVisibilityEqual(a, b)).toBe(true);
     });
@@ -369,11 +463,13 @@ describe("workspace agent visibility", () => {
         activeAgentIds: new Set(["a"]),
         autoOpenAgentIds: new Set(["a"]),
         knownAgentIds: new Set(["a"]),
+        coordinatorAgentIds: new Set<string>(),
       };
       const b = {
         activeAgentIds: new Set(["b"]),
         autoOpenAgentIds: new Set(["a"]),
         knownAgentIds: new Set(["a"]),
+        coordinatorAgentIds: new Set<string>(),
       };
       expect(workspaceAgentVisibilityEqual(a, b)).toBe(false);
     });
@@ -383,11 +479,13 @@ describe("workspace agent visibility", () => {
         activeAgentIds: new Set(["a", "b"]),
         autoOpenAgentIds: new Set(["a"]),
         knownAgentIds: new Set(["a", "b"]),
+        coordinatorAgentIds: new Set<string>(),
       };
       const b = {
         activeAgentIds: new Set(["a", "b"]),
         autoOpenAgentIds: new Set(["b"]),
         knownAgentIds: new Set(["a", "b"]),
+        coordinatorAgentIds: new Set<string>(),
       };
       expect(workspaceAgentVisibilityEqual(a, b)).toBe(false);
     });
@@ -397,11 +495,29 @@ describe("workspace agent visibility", () => {
         activeAgentIds: new Set(["a"]),
         autoOpenAgentIds: new Set(["a"]),
         knownAgentIds: new Set(["a"]),
+        coordinatorAgentIds: new Set<string>(),
       };
       const b = {
         activeAgentIds: new Set(["a"]),
         autoOpenAgentIds: new Set(["a"]),
         knownAgentIds: new Set(["a", "b"]),
+        coordinatorAgentIds: new Set<string>(),
+      };
+      expect(workspaceAgentVisibilityEqual(a, b)).toBe(false);
+    });
+
+    it("returns false when coordinatorAgentIds differ", () => {
+      const a = {
+        activeAgentIds: new Set<string>(),
+        autoOpenAgentIds: new Set<string>(),
+        knownAgentIds: new Set<string>(),
+        coordinatorAgentIds: new Set(["coord-a"]),
+      };
+      const b = {
+        activeAgentIds: new Set<string>(),
+        autoOpenAgentIds: new Set<string>(),
+        knownAgentIds: new Set<string>(),
+        coordinatorAgentIds: new Set(["coord-b"]),
       };
       expect(workspaceAgentVisibilityEqual(a, b)).toBe(false);
     });
@@ -411,11 +527,13 @@ describe("workspace agent visibility", () => {
         activeAgentIds: new Set<string>(),
         autoOpenAgentIds: new Set<string>(),
         knownAgentIds: new Set<string>(),
+        coordinatorAgentIds: new Set<string>(),
       };
       const b = {
         activeAgentIds: new Set<string>(),
         autoOpenAgentIds: new Set<string>(),
         knownAgentIds: new Set<string>(),
+        coordinatorAgentIds: new Set<string>(),
       };
       expect(workspaceAgentVisibilityEqual(a, b)).toBe(true);
     });
