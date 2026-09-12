@@ -3,7 +3,7 @@ import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
 import { isDeepStrictEqual } from "node:util";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
-import { HANDOFF_FROM_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+import { HANDOFF_FROM_AGENT_ID_LABEL, PASEO_ROLE_LABEL } from "@getpaseo/protocol/agent-labels";
 import type { AgentManager } from "./agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent-storage.js";
 import type { AgentSessionConfig } from "./agent-sdk-types.js";
@@ -123,9 +123,8 @@ async function resolveHandoffConfig(
     ...(execution?.preserveConfiguration ? preservedOptions(source) : {}),
     systemPrompt: source.config?.systemPrompt ?? undefined,
     mcpServers: source.config?.mcpServers ?? undefined,
-    // A coordinator's successor is still the coordinator — the delegate-only
-    // restriction and required Paseo tools ride along regardless of which
-    // settings the handoff tweaks.
+    // Launch-time restrictions belong to the agent, not the handoff input —
+    // a required-tools or delegate-only source keeps them on its successor.
     paseoTools: source.config?.paseoTools ?? undefined,
     delegateOnly: source.config?.delegateOnly ?? undefined,
   };
@@ -202,6 +201,10 @@ async function performHandoff(
   const assertCurrent = execution.assertCurrent ?? (() => Promise.resolve());
   const source = await agentStorage.get(input.sourceAgentId);
   if (!source || source.internal) throw new Error("Source agent not found");
+  // Every successor-creation path funnels here; a role-labeled source must not
+  // produce an unlabelled successor that bypasses delegate-only tool policy.
+  if (source.labels[PASEO_ROLE_LABEL])
+    throw new Error("Coordinators are rotated by the coordinator service");
   await assertSourceRestored(source, execution, agentStorage);
   if (!source.workspaceId) throw new Error("Source agent has no workspace");
   if (source.owner) throw new Error("This agent is managed by an execution service");

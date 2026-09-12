@@ -3341,7 +3341,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       inputSchema: {
         scope: z
           .enum(["team", "personal", "personal-project"])
-          .default("team")
+          .default("personal")
           .describe("Memory layer; only 'team' is supported in this milestone."),
         content: z
           .string()

@@ -1,4 +1,4 @@
-import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+import { PARENT_AGENT_ID_LABEL, PASEO_ROLE_LABEL } from "@getpaseo/protocol/agent-labels";
 import type { StoredAgentRecord } from "../agent/agent-storage.js";
 import type { AgentManager } from "../agent/agent-manager.js";
 import { projectTimelineRows } from "../agent/timeline-projection.js";
@@ -10,6 +10,7 @@ export function isOrdinaryAgent(record: StoredAgentRecord): boolean {
     !record.archivedAt &&
     Boolean(record.workspaceId) &&
     !record.labels[PARENT_AGENT_ID_LABEL] &&
+    !record.labels[PASEO_ROLE_LABEL] &&
     !record.labels["paseo.schedule-id"] &&
     (record.provider === "claude" || record.provider === "codex")
   );

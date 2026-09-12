@@ -135,6 +135,76 @@ function decisionQuestionText(request: AgentPermissionRequest): string {
   return text.trim().length > 0 ? text : "Decision needed";
 }
 
+// The spec's free-text correction path: tapping still resolves the request,
+// and the client also quotes the row into the composer for a correction.
+const COMPOSER_QUOTE_OPTION_LABEL = /correct it|^edit\b/i;
+
+interface DecisionQuestionOption {
+  label: string;
+}
+
+interface DecisionQuestion {
+  header?: string;
+  options: DecisionQuestionOption[];
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function nonEmptyValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+/**
+ * Question-kind requests carry `input.questions[]` instead of actions. M1
+ * answers the first question single-select, so only its options become row
+ * actions.
+ */
+function firstDecisionQuestion(request: AgentPermissionRequest): DecisionQuestion | null {
+  const questions = request.input?.questions;
+  if (!Array.isArray(questions)) return null;
+  const first = questions.find(isRecordValue);
+  if (!first) return null;
+  const options = Array.isArray(first.options)
+    ? first.options.flatMap((option): DecisionQuestionOption[] => {
+        if (typeof option === "string") {
+          return nonEmptyValue(option) ? [{ label: option.trim() }] : [];
+        }
+        if (!isRecordValue(option)) return [];
+        const label = nonEmptyValue(option.label);
+        return label ? [{ label }] : [];
+      })
+    : [];
+  const header = nonEmptyValue(first.header);
+  return { ...(header ? { header } : {}), options };
+}
+
+function decisionRowActions(
+  request: AgentPermissionRequest,
+  question: DecisionQuestion | null,
+): CoordinatorDecisionBoardRow["actions"] {
+  if (question && question.options.length > 0) {
+    return question.options.map((option, index) => {
+      const row: CoordinatorDecisionBoardRow["actions"][number] = {
+        id: `q0:opt:${index}`,
+        label: option.label,
+      };
+      if (COMPOSER_QUOTE_OPTION_LABEL.test(option.label)) row.composerQuote = true;
+      return row;
+    });
+  }
+  return (request.actions ?? []).map((action) => {
+    const row: CoordinatorDecisionBoardRow["actions"][number] = {
+      id: action.id,
+      label: action.label,
+      behavior: action.behavior,
+    };
+    if (action.variant) row.variant = action.variant;
+    return row;
+  });
+}
+
 function firstLine(text: string, maxLength = 140): string {
   const line = text.split("\n").find((candidate) => candidate.trim().length > 0) ?? "";
   const trimmed = line.trim();
@@ -170,6 +240,7 @@ export class CoordinatorService {
   private readonly listeners = new Set<(snapshot: CoordinatorBoardSnapshot) => void>();
   private readonly emittedSnapshotKeys = new Map<string, string>();
   private readonly projectOps = new Map<string, Promise<void>>();
+  private readonly boardOps = new Map<string, Promise<void>>();
   private readonly agentCoverage = new Map<string, CoordinatorCoverageEntry>();
   private readonly knownDecisionQuestions = new Map<string, string>();
   private readonly dirtyBoards = new Set<string>();
@@ -260,23 +331,8 @@ export class CoordinatorService {
         records,
         "Retired a duplicate coordinator session",
       );
-      let agentId = keeper?.id ?? null;
-      if (keeper && keeper.provider !== input.profile.provider) {
-        await this.agentManager
-          .archiveSnapshot(keeper.id, now)
-          .catch((error) =>
-            this.logger.warn(
-              { err: error, agentId: keeper.id },
-              "Failed to archive coordinator before provider switch",
-            ),
-          );
-        await this.appendDoneRow(
-          input.projectId,
-          `Retired the ${keeper.provider} coordinator to switch providers`,
-          { agentId: keeper.id },
-        );
-        agentId = null;
-      }
+      const agentId = keeper?.id ?? null;
+      const replacingProvider = keeper !== null && keeper.provider !== input.profile.provider;
 
       state = {
         ...state,
@@ -289,27 +345,12 @@ export class CoordinatorService {
         updatedAt: now,
       };
 
-      if (!agentId) {
+      if (!agentId || replacingProvider) {
         const workspace = await this.resolveRootWorkspace(project);
-        const config: AgentSessionConfig = {
-          provider: input.profile.provider,
-          cwd: workspace.cwd,
-          systemPrompt: buildProjectCoordinatorSystemPrompt(
-            project.customName ?? project.displayName,
-          ),
-          delegateOnly: true,
-          paseoTools: "required",
-          title: COORDINATOR_TITLE,
-          ...(input.profile.model ? { model: input.profile.model } : {}),
-          ...(input.profile.modeId ? { modeId: input.profile.modeId } : {}),
-          ...(input.profile.thinkingOptionId
-            ? { thinkingOptionId: input.profile.thinkingOptionId }
-            : {}),
-          ...(input.profile.featureValues ? { featureValues: input.profile.featureValues } : {}),
-          ...(input.profile.accountSelection
-            ? { accountSelection: input.profile.accountSelection }
-            : {}),
-        };
+        const config = this.coordinatorSessionConfig(project, input, workspace);
+        this.assertAgentMcpEndpoint(config.paseoTools);
+        // The replacement exists before the old coordinator retires: a failed
+        // creation leaves the previous session untouched.
         const agent = await this.agentManager.createAgent(config, undefined, {
           workspaceId: workspace.workspaceId,
           unattended: true,
@@ -319,6 +360,9 @@ export class CoordinatorService {
             [COORDINATOR_PROJECT_ID_LABEL]: input.projectId,
           },
         });
+        if (replacingProvider && keeper) {
+          await this.retireProviderSwitch(input.projectId, keeper, now);
+        }
         state.agentId = agent.id;
         await this.appendWakeRow(
           input.projectId,
@@ -347,6 +391,10 @@ export class CoordinatorService {
           this.logger.warn({ err: error, agentId: agent.id }, "coordinator first contact failed");
         }
       } else {
+        // Re-enable resumes the persisted session — it keeps its required-tools
+        // launch flag, so the same MCP endpoint gate applies as on creation.
+        const record = await this.agentStorage.get(agentId);
+        this.assertAgentMcpEndpoint(record?.config?.paseoTools);
         await ensureUnarchivedAgentLoaded(agentId, {
           agentManager: this.agentManager,
           agentStorage: this.agentStorage,
@@ -435,7 +483,7 @@ export class CoordinatorService {
   async remember(input: CoordinatorRememberInput): Promise<CoordinatorRememberResult> {
     if (input.scope !== "team") {
       throw new CoordinatorRequestError(
-        `Memory scope "${input.scope}" is not supported yet; only team memory writes to .paseo/memory/`,
+        `Memory scope "${input.scope}" is not supported yet; only 'team' is supported`,
       );
     }
     const caller = this.agentManager.getAgent(input.callerAgentId);
@@ -532,8 +580,8 @@ export class CoordinatorService {
         .filter((workspace) => workspace.projectId === projectId && !workspace.archivedAt)
         .map((workspace) => workspace.workspaceId),
     );
-    const covered = this.agentManager
-      .listAgents()
+    const agents = this.agentManager.listAgents();
+    const covered = agents
       .filter(
         (agent) =>
           agent.workspaceId !== undefined &&
@@ -543,7 +591,21 @@ export class CoordinatorService {
       )
       .filter((agent) => scope === "everything" || isDelegatedAgent(agent));
 
-    const needsYou = this.buildNeedsYouRows(projectId, covered);
+    // The coordinator's own pending permissions are board decisions — the
+    // first-contact "here's what I think this project is" question is a
+    // question-kind request on the coordinator itself. Needs you covers them
+    // at any scope; Working keeps excluding the coordinator.
+    const needsYouAgents = [
+      ...covered,
+      ...agents.filter(
+        (agent) =>
+          isCoordinatorAgent(agent) &&
+          getCoordinatorProjectIdFromLabels(agent.labels) === projectId &&
+          agent.lifecycle !== "closed",
+      ),
+    ];
+
+    const needsYou = this.buildNeedsYouRows(projectId, needsYouAgents);
     const working = await this.buildWorkingRows(projectId, covered);
     const done = this.pruneDoneRows(board.done).slice(0, DONE_SNAPSHOT_LIMIT);
     return {
@@ -576,6 +638,7 @@ export class CoordinatorService {
           this.decisionKey(agent.id, request.id),
           decisionQuestionText(request),
         );
+        const question = request.kind === "question" ? firstDecisionQuestion(request) : null;
         needsYou.push({
           kind: "decision",
           id: `decision:${agent.id}:${request.id}`,
@@ -584,10 +647,9 @@ export class CoordinatorService {
           requestId: request.id,
           question: decisionQuestionText(request),
           askedAt,
-          actions: (request.actions ?? []).map((action) => ({
-            id: action.id,
-            label: action.label,
-          })),
+          ...(request.kind === "question" ? { requestKind: "question" } : {}),
+          ...(question?.header ? { questionHeader: question.header } : {}),
+          actions: decisionRowActions(request, question),
           waitingMs: Math.max(0, now - Date.parse(askedAt)),
         });
       }
@@ -729,8 +791,12 @@ export class CoordinatorService {
   private async onAgentStream(agentId: string, event: AgentStreamEvent): Promise<void> {
     if (event.type === "permission_requested") {
       const agent = this.agentManager.getAgent(agentId);
-      if (!agent || isCoordinatorAgent(agent)) return;
-      const projectId = await this.projectIdForAgent(agent);
+      if (!agent) return;
+      // A coordinator's own request (its decision question) refreshes its
+      // project board like any covered agent's; the label is authoritative
+      // over workspace lookup.
+      const projectId =
+        getCoordinatorProjectIdFromLabels(agent.labels) ?? (await this.projectIdForAgent(agent));
       if (!projectId) return;
       this.knownDecisionQuestions.set(
         this.decisionKey(agentId, event.request.id),
@@ -748,7 +814,7 @@ export class CoordinatorService {
         coverage.projectId,
         `Answered ${question ?? "a pending decision"}`,
         { agentId },
-        `done:answered:${event.requestId}`,
+        `done:answered:${agentId}:${event.requestId}`,
       );
       this.queueBoardRefresh(coverage.projectId);
       return;
@@ -962,6 +1028,62 @@ export class CoordinatorService {
     return keeper;
   }
 
+  private coordinatorSessionConfig(
+    project: PersistedProjectRecord,
+    input: EnableProjectCoordinatorInput,
+    workspace: PersistedWorkspaceRecord,
+  ): AgentSessionConfig {
+    return {
+      provider: input.profile.provider,
+      cwd: workspace.cwd,
+      systemPrompt: buildProjectCoordinatorSystemPrompt(project.customName ?? project.displayName),
+      delegateOnly: true,
+      paseoTools: "required",
+      title: COORDINATOR_TITLE,
+      ...(input.profile.model ? { model: input.profile.model } : {}),
+      ...(input.profile.modeId ? { modeId: input.profile.modeId } : {}),
+      ...(input.profile.thinkingOptionId
+        ? { thinkingOptionId: input.profile.thinkingOptionId }
+        : {}),
+      ...(input.profile.featureValues ? { featureValues: input.profile.featureValues } : {}),
+      ...(input.profile.accountSelection
+        ? { accountSelection: input.profile.accountSelection }
+        : {}),
+    };
+  }
+
+  private async retireProviderSwitch(
+    projectId: string,
+    keeper: StoredAgentRecord,
+    now: string,
+  ): Promise<void> {
+    await this.agentManager
+      .archiveSnapshot(keeper.id, now)
+      .catch((error) =>
+        this.logger.warn(
+          { err: error, agentId: keeper.id },
+          "Failed to archive coordinator after provider switch",
+        ),
+      );
+    // archiveSnapshot only marks the record — a live coordinator session keeps
+    // running without this close, which would break the one-session rule.
+    if (this.agentManager.getAgent(keeper.id)?.lifecycle !== "closed") {
+      await this.agentManager
+        .closeAgent(keeper.id)
+        .catch((error) =>
+          this.logger.warn(
+            { err: error, agentId: keeper.id },
+            "Failed to close coordinator session after provider switch",
+          ),
+        );
+    }
+    await this.appendDoneRow(
+      projectId,
+      `Retired the ${keeper.provider} coordinator to switch providers`,
+      { agentId: keeper.id },
+    );
+  }
+
   private async archiveAllCoordinatorRecords(
     projectId: string,
     records: StoredAgentRecord[],
@@ -1034,34 +1156,40 @@ export class CoordinatorService {
     link?: { url?: string; agentId?: string; filePath?: string },
     deterministicId?: string,
   ): Promise<void> {
-    const board = await this.getBoard(projectId);
-    const id = deterministicId ?? `done:${randomUUID()}`;
-    if (board.done.some((row) => row.id === id)) return;
-    const row = {
-      kind: "done" as const,
-      id,
-      projectId,
-      text,
-      at: new Date().toISOString(),
-      ...(link ? { link } : {}),
-    };
-    const done = [row, ...this.pruneDoneRows(board.done)];
-    await this.saveBoard(projectId, { ...board, done });
+    // Serialized per project: concurrent appends each read-modify-write the
+    // persisted done list, so without the lock the last write wins.
+    await this.withBoardLock(projectId, async () => {
+      const board = await this.getBoard(projectId);
+      const id = deterministicId ?? `done:${randomUUID()}`;
+      if (board.done.some((row) => row.id === id)) return;
+      const row = {
+        kind: "done" as const,
+        id,
+        projectId,
+        text,
+        at: new Date().toISOString(),
+        ...(link ? { link } : {}),
+      };
+      const done = [row, ...this.pruneDoneRows(board.done)];
+      await this.saveBoard(projectId, { ...board, done });
+    });
     this.queueBoardRefresh(projectId);
   }
 
   private async appendWakeRow(projectId: string, text: string): Promise<void> {
-    const board = await this.getBoard(projectId);
-    await this.saveBoard(projectId, {
-      ...board,
-      wake: {
-        kind: "wake",
-        id: `wake:${randomUUID()}`,
-        projectId,
-        text,
-        level: "observe",
-        at: new Date().toISOString(),
-      },
+    await this.withBoardLock(projectId, async () => {
+      const board = await this.getBoard(projectId);
+      await this.saveBoard(projectId, {
+        ...board,
+        wake: {
+          kind: "wake",
+          id: `wake:${randomUUID()}`,
+          projectId,
+          text,
+          level: "observe",
+          at: new Date().toISOString(),
+        },
+      });
     });
     this.queueBoardRefresh(projectId);
   }
@@ -1099,6 +1227,19 @@ export class CoordinatorService {
   // Helpers
   // -------------------------------------------------------------------------
 
+  /**
+   * `paseoTools: "required"` launches still need the daemon's agent MCP
+   * endpoint to serve the tool catalog. Enabling without it would leave a
+   * coordinator running with zero Paseo tools, so fail before creating it.
+   */
+  private assertAgentMcpEndpoint(paseoTools: AgentSessionConfig["paseoTools"]): void {
+    if (paseoTools !== "required") return;
+    if (this.agentManager.getAgentMcpBaseUrl() !== null) return;
+    throw new CoordinatorRequestError(
+      "The coordinator requires Paseo tools, but the daemon's agent MCP endpoint is disabled. Set mcp.enabled in the daemon config to run a coordinator.",
+    );
+  }
+
   private assertObserveTrust(trustLevel: CoordinatorTrustLevel | undefined): void {
     if (trustLevel !== undefined && trustLevel !== "observe") {
       throw new CoordinatorRequestError(
@@ -1108,15 +1249,27 @@ export class CoordinatorService {
   }
 
   private async withProjectLock<T>(projectId: string, run: () => Promise<T>): Promise<T> {
-    const previous = this.projectOps.get(projectId) ?? Promise.resolve();
+    return this.serialize(this.projectOps, projectId, run);
+  }
+
+  private async withBoardLock<T>(projectId: string, run: () => Promise<T>): Promise<T> {
+    return this.serialize(this.boardOps, projectId, run);
+  }
+
+  private serialize<T>(
+    ops: Map<string, Promise<void>>,
+    key: string,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const previous = ops.get(key) ?? Promise.resolve();
     const next = previous.then(run, run);
     const tracked = next.then(
       () => undefined,
       () => undefined,
     );
-    this.projectOps.set(projectId, tracked);
+    ops.set(key, tracked);
     void tracked.finally(() => {
-      if (this.projectOps.get(projectId) === tracked) this.projectOps.delete(projectId);
+      if (ops.get(key) === tracked) ops.delete(key);
     });
     return next;
   }

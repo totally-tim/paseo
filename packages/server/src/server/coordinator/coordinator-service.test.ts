@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -10,7 +10,10 @@ import {
   PARENT_AGENT_ID_LABEL,
   PASEO_ROLE_LABEL,
 } from "@getpaseo/protocol/agent-labels";
-import type { CoordinatorProfileSelection } from "@getpaseo/protocol/messages";
+import type {
+  CoordinatorBoardSnapshot,
+  CoordinatorProfileSelection,
+} from "@getpaseo/protocol/messages";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { createProviderSnapshotManagerStub } from "../test-utils/session-stubs.js";
@@ -293,6 +296,7 @@ function makeHarness(): Harness {
     clients: { codex: client },
     registry: agentStorage,
     logger,
+    mcpBaseUrl: "http://127.0.0.1:6767/mcp/agents",
   });
 
   const service = new CoordinatorService({
@@ -339,10 +343,16 @@ afterEach(async () => {
   rmSync(harness.root, { recursive: true, force: true });
 });
 
-/** Waits for the service's setImmediate board flush to run. */
+/** Waits for queued event handling and the service's setImmediate board flush. */
 async function flushBoard(): Promise<void> {
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
+  for (let i = 0; i < 10; i++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+async function boardDoneIds(projectId: string): Promise<string[]> {
+  const snapshot = await harness.service.getBoardSnapshot(projectId);
+  return snapshot.done.map((row) => row.id);
 }
 
 function enableInput(
@@ -411,6 +421,73 @@ describe("enableProjectCoordinator", () => {
     await expect(
       harness.service.enableProjectCoordinator(enableInput({ trustLevel: "propose" })),
     ).rejects.toThrow(/Trust level "propose"/);
+  });
+
+  test("fails loudly when the daemon cannot serve Paseo tools", async () => {
+    harness.agentManager.setMcpBaseUrl(null);
+
+    const pending = harness.service.enableProjectCoordinator(enableInput());
+    await expect(pending).rejects.toBeInstanceOf(CoordinatorRequestError);
+    await expect(pending).rejects.toThrow(/mcp\.enabled/);
+
+    // Nothing was created or persisted.
+    const labeled = (await harness.agentStorage.list()).filter(
+      (record) => record.labels?.[PASEO_ROLE_LABEL] === COORDINATOR_PROJECT_ROLE,
+    );
+    expect(labeled).toHaveLength(0);
+    expect(await harness.service.getProjectCoordinator(PROJECT_ID)).toBeNull();
+  });
+
+  test("re-enable with the endpoint gone fails instead of resuming a tool-less coordinator", async () => {
+    const first = await harness.service.enableProjectCoordinator(enableInput());
+    harness.agentManager.setMcpBaseUrl(null);
+
+    await expect(harness.service.enableProjectCoordinator(enableInput())).rejects.toThrow(
+      /mcp\.enabled/,
+    );
+
+    // The live coordinator stays enabled and untouched.
+    const state = await harness.service.getProjectCoordinator(PROJECT_ID);
+    expect(state?.enabled).toBe(true);
+    expect(state?.agentId).toBe(first.agentId);
+  });
+
+  test("switching providers retires the old coordinator only after the replacement exists", async () => {
+    const first = await harness.service.enableProjectCoordinator(enableInput());
+    harness.agentManager.registerClient("claude", new StubAgentClient("claude"));
+
+    const second = await harness.service.enableProjectCoordinator(
+      enableInput({ profile: { provider: "claude" } }),
+    );
+
+    expect(second.agentId).not.toBeNull();
+    expect(second.agentId).not.toBe(first.agentId);
+    const oldRecord = await harness.agentStorage.get(first.agentId!);
+    expect(oldRecord?.archivedAt).toBeTruthy();
+    const oldLive = harness.agentManager.getAgent(first.agentId!);
+    expect(oldLive == null || oldLive.lifecycle === "closed").toBe(true);
+    const snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    expect(
+      snapshot.done.some((row) => row.text === "Retired the codex coordinator to switch providers"),
+    ).toBe(true);
+  });
+
+  test("a failed provider switch leaves the old coordinator intact", async () => {
+    const first = await harness.service.enableProjectCoordinator(enableInput());
+    const failing = new StubAgentClient("claude");
+    vi.spyOn(failing, "createSession").mockRejectedValue(new Error("claude unavailable"));
+    harness.agentManager.registerClient("claude", failing);
+
+    await expect(
+      harness.service.enableProjectCoordinator(enableInput({ profile: { provider: "claude" } })),
+    ).rejects.toThrow("claude unavailable");
+
+    const state = await harness.service.getProjectCoordinator(PROJECT_ID);
+    expect(state?.enabled).toBe(true);
+    expect(state?.agentId).toBe(first.agentId);
+    const record = await harness.agentStorage.get(first.agentId!);
+    expect(record?.archivedAt ?? null).toBeNull();
+    expect(harness.agentManager.getAgent(first.agentId!)?.lifecycle).not.toBe("closed");
   });
 
   test("creates the root workspace when none exists", async () => {
@@ -619,8 +696,8 @@ describe("board derivation", () => {
       kind: "tool",
       title: "Run npm test?",
       actions: [
-        { id: "allow", label: "Allow" },
-        { id: "deny", label: "Deny" },
+        { id: "allow", label: "Allow", behavior: "allow", variant: "primary" },
+        { id: "deny", label: "Deny", behavior: "deny", variant: "danger" },
       ],
     };
     session.push({ type: "permission_requested", provider: "codex", request });
@@ -629,7 +706,10 @@ describe("board derivation", () => {
     let snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
     expect(snapshot.needsYou).toHaveLength(1);
     expect(snapshot.needsYou[0].question).toBe("Run npm test?");
-    expect(snapshot.needsYou[0].actions.map((a) => a.label)).toEqual(["Allow", "Deny"]);
+    expect(snapshot.needsYou[0].actions).toEqual([
+      { id: "allow", label: "Allow", behavior: "allow", variant: "primary" },
+      { id: "deny", label: "Deny", behavior: "deny", variant: "danger" },
+    ]);
 
     session.push({
       type: "permission_resolved",
@@ -642,6 +722,110 @@ describe("board derivation", () => {
     snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
     expect(snapshot.needsYou).toHaveLength(0);
     expect(snapshot.done.some((row) => row.text === "Answered Run npm test?")).toBe(true);
+  });
+
+  test("the coordinator's own question request lands in Needs you with option-derived actions", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    await harness.service.start();
+
+    const emitted: CoordinatorBoardSnapshot[] = [];
+    harness.service.subscribeBoard((snapshot) => {
+      if (snapshot.projectId === PROJECT_ID) emitted.push(snapshot);
+    });
+
+    // The coordinator session is the only one created so far.
+    const session = harness.client.sessions.at(-1)!;
+    const request: AgentPermissionRequest = {
+      id: "q-1",
+      provider: "codex",
+      name: "question",
+      kind: "question",
+      title: "Here's what I think this project is",
+      input: {
+        questions: [
+          {
+            question: "Does this summary look right?",
+            header: "Project",
+            multiSelect: false,
+            options: [
+              { label: "Looks right", description: "Approve the summary" },
+              { label: "Correct it", description: "Edit the summary" },
+            ],
+          },
+        ],
+      },
+    };
+    session.push({ type: "permission_requested", provider: "codex", request });
+    await flushBoard();
+
+    const snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
+    const row = snapshot.needsYou.find((candidate) => candidate.agentId === state.agentId);
+    expect(row).toBeDefined();
+    expect(row!.requestKind).toBe("question");
+    expect(row!.questionHeader).toBe("Project");
+    expect(row!.actions).toEqual([
+      { id: "q0:opt:0", label: "Looks right" },
+      { id: "q0:opt:1", label: "Correct it", composerQuote: true },
+    ]);
+    // The coordinator still never appears in Working.
+    expect(snapshot.working.some((candidate) => candidate.agentId === state.agentId)).toBe(false);
+    // The coordinator-originated request emitted a board change.
+    const emittedRequestIds = emitted
+      .flatMap((board) => board.needsYou)
+      .map((entry) => entry.requestId);
+    expect(emittedRequestIds).toContain("q-1");
+  });
+
+  test("answered decisions write distinct Done rows per agent", async () => {
+    await harness.service.enableProjectCoordinator(enableInput());
+    await harness.service.start();
+
+    const agentA = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir, title: "Session A" },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    const agentB = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir, title: "Session B" },
+      undefined,
+      { workspaceId: harness.workspace.workspaceId },
+    );
+    await flushBoard();
+    const sessionA = harness.client.sessions.at(-2)!;
+    const sessionB = harness.client.sessions.at(-1)!;
+
+    for (const session of [sessionA, sessionB]) {
+      session.push({
+        type: "permission_requested",
+        provider: "codex",
+        request: {
+          id: "perm-1",
+          provider: "codex",
+          name: "Bash",
+          kind: "tool",
+          title: "Run it?",
+          actions: [{ id: "allow", label: "Allow", behavior: "allow" }],
+        },
+      });
+    }
+    await flushBoard();
+
+    for (const session of [sessionA, sessionB]) {
+      session.push({
+        type: "permission_resolved",
+        provider: "codex",
+        requestId: "perm-1",
+        resolution: { behavior: "allow" },
+      });
+    }
+
+    // Each Done append is a serialized file write behind the per-project
+    // board lock — poll the snapshot until both land.
+    await vi.waitFor(async () => {
+      const ids = await boardDoneIds(PROJECT_ID);
+      expect(ids).toContain(`done:answered:${agentA.id}:perm-1`);
+      expect(ids).toContain(`done:answered:${agentB.id}:perm-1`);
+    });
   });
 
   test("working rows mark your sessions and exclude idle delegated agents", async () => {
@@ -767,6 +951,24 @@ describe("remember", () => {
         content: "nope",
       }),
     ).rejects.toThrow(/not supported yet/);
+  });
+
+  test("the tool schema defaults scope to personal, which the service still rejects", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    const catalog = createPaseoToolCatalog({
+      agentManager: harness.agentManager,
+      agentStorage: harness.agentStorage,
+      providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+      callerAgentId: state.agentId!,
+      coordinator: harness.service,
+      logger,
+    });
+
+    // No scope passed: the schema fills "personal" and the service rejects it.
+    // A "team" default would have written the file instead.
+    await expect(catalog.executeTool("remember", { content: "note" })).rejects.toThrow(
+      /only 'team' is supported/,
+    );
   });
 
   test("replace mode rewrites the file; append adds dated sections", async () => {

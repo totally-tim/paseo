@@ -870,6 +870,15 @@ export class AgentManager {
     this.mcpBaseUrl = url;
   }
 
+  /**
+   * The agent MCP endpoint URL, or null while the daemon's `mcp.enabled` is
+   * off. `paseoTools: "required"` agents get zero tools without it — callers
+   * that launch such agents must check this and fail loudly instead.
+   */
+  getAgentMcpBaseUrl(): string | null {
+    return this.mcpBaseUrl;
+  }
+
   prepareForShutdown(): void {
     this.acceptingAgentRegistrations = false;
   }

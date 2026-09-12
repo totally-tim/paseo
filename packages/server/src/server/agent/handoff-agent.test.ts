@@ -3,9 +3,11 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  COORDINATOR_PROJECT_ROLE,
   HANDOFF_FROM_AGENT_ID_LABEL,
   HANDOFF_TO_AGENT_ID_LABEL,
   PARENT_AGENT_ID_LABEL,
+  PASEO_ROLE_LABEL,
 } from "@getpaseo/protocol/agent-labels";
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
@@ -96,6 +98,21 @@ test("concurrent requests create one independent successor and preserve source h
   expect(targetCreate).toHaveBeenCalledTimes(1);
   await archiveAgentCommand(deps, source.id);
   expect((await agentStorage.get(target.id))?.archivedAt).toBeFalsy();
+});
+
+test("a role-labeled source is rejected instead of producing an unlabelled successor", async () => {
+  const { deps, source, clients } = await setup();
+  await deps.agentManager.setLabels(source.id, {
+    [PASEO_ROLE_LABEL]: COORDINATOR_PROJECT_ROLE,
+  });
+  const create = vi.spyOn(clients.codex!, "createSession");
+  await expect(handoffAgent(deps, { sourceAgentId: source.id, provider: "codex" })).rejects.toThrow(
+    "Coordinators are rotated by the coordinator service",
+  );
+  expect(create).not.toHaveBeenCalled();
+  expect(
+    (await deps.agentStorage.get(source.id))?.labels[HANDOFF_TO_AGENT_ID_LABEL],
+  ).toBeUndefined();
 });
 
 test("a failed shutdown never starts the successor and can be retried", async () => {
