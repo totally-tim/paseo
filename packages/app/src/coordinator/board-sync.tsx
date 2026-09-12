@@ -7,6 +7,7 @@ import type { OwnedSubscription } from "@getpaseo/client";
 import { useHostFeature } from "@/runtime/host-features";
 import { useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useCoordinatorBoardStore } from "./board-store";
+import { useCoordinatorProjectStore } from "./project-store";
 
 /**
  * Bounded backoff for a failed board subscribe. A dead observation releases
@@ -36,6 +37,7 @@ export function CoordinatorBoardSync({
   useEffect(() => {
     if (!supported || !connected) {
       useCoordinatorBoardStore.getState().clearHost(serverId);
+      useCoordinatorProjectStore.getState().clearHost(serverId);
       return;
     }
     let disposed = false;
@@ -107,9 +109,16 @@ export function CoordinatorBoardSync({
       }
       releaseObservation();
       useCoordinatorBoardStore.getState().clearHost(serverId);
+      useCoordinatorProjectStore.getState().clearHost(serverId);
     };
   }, [client, connected, serverId, supported]);
 
-  useEffect(() => () => useCoordinatorBoardStore.getState().clearHost(serverId), [serverId]);
+  useEffect(
+    () => () => {
+      useCoordinatorBoardStore.getState().clearHost(serverId);
+      useCoordinatorProjectStore.getState().clearHost(serverId);
+    },
+    [serverId],
+  );
   return null;
 }

@@ -33,6 +33,7 @@ function workspace(overrides: Partial<SidebarWorkspaceEntry> = {}): SidebarWorks
     hasRunningScripts: false,
     statusEnteredAt: null,
     ...overrides,
+    projectId: overrides.projectId ?? "project-1",
     archivingAt: overrides.archivingAt ?? null,
   };
 }
