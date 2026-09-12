@@ -24,6 +24,7 @@ import type {
   ProjectCoordinatorState,
 } from "@getpaseo/protocol/messages";
 import { ensureUnarchivedAgentLoaded } from "../agent/agent-loading.js";
+import { sendPromptToAgent } from "../agent/agent-prompt.js";
 import type { AgentManager, AgentManagerEvent, ManagedAgent } from "../agent/agent-manager.js";
 import type {
   AgentPermissionRequest,
@@ -317,19 +318,34 @@ export class CoordinatorService {
             [PASEO_ROLE_LABEL]: COORDINATOR_PROJECT_ROLE,
             [COORDINATOR_PROJECT_ID_LABEL]: input.projectId,
           },
-          initialPrompt: buildProjectCoordinatorFirstContactPrompt({
-            projectId: input.projectId,
-            projectName: project.customName ?? project.displayName,
-            rootPath: project.rootPath,
-            scope,
-            trustLevel: "observe",
-          }),
         });
         state.agentId = agent.id;
         await this.appendWakeRow(
           input.projectId,
           `Woke: coordinator enabled · ${capitalizeTrust("observe")}`,
         );
+        // CreateAgentOptions.initialPrompt only feeds title derivation — the
+        // first-contact prompt must be dispatched as a real turn.
+        try {
+          await sendPromptToAgent({
+            agentManager: this.agentManager,
+            agentStorage: this.agentStorage,
+            agentId: agent.id,
+            prompt: buildProjectCoordinatorFirstContactPrompt({
+              projectId: input.projectId,
+              projectName: project.customName ?? project.displayName,
+              rootPath: project.rootPath,
+              scope,
+              trustLevel: "observe",
+            }),
+            logger: this.logger,
+          });
+        } catch (error) {
+          // The coordinator exists and stays resident; a failed first contact
+          // surfaces as an empty reply area until the next steer, not as a
+          // half-enabled project.
+          this.logger.warn({ err: error, agentId: agent.id }, "coordinator first contact failed");
+        }
       } else {
         await ensureUnarchivedAgentLoaded(agentId, {
           agentManager: this.agentManager,

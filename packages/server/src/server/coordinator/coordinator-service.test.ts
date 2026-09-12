@@ -68,7 +68,10 @@ class StubAgentSession implements AgentSession {
     return { sessionId: this.id, finalText: "", timeline: [] };
   }
 
-  async startTurn(_prompt: AgentPromptInput): Promise<{ turnId: string }> {
+  readonly prompts: AgentPromptInput[] = [];
+
+  async startTurn(prompt: AgentPromptInput): Promise<{ turnId: string }> {
+    this.prompts.push(prompt);
     const turnId = `turn-${randomUUID()}`;
     setTimeout(() => {
       this.push({ type: "turn_started", provider: this.provider, turnId });
@@ -366,6 +369,18 @@ describe("enableProjectCoordinator", () => {
     expect(agent!.labels[COORDINATOR_PROJECT_ID_LABEL]).toBe(PROJECT_ID);
     expect(agent!.workspaceId).toBe(harness.workspace.workspaceId);
     expect(agent!.cwd).toBe(harness.projectDir);
+  });
+
+  test("dispatches the first-contact prompt as a real turn on enable", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+
+    const session = harness.client.sessions.find((s) => s.config.cwd === harness.projectDir);
+    expect(session).toBeDefined();
+    const firstPrompt = session!.prompts[0];
+    expect(typeof firstPrompt).toBe("string");
+    expect(firstPrompt as string).toContain(PROJECT_ID);
+    expect(firstPrompt as string).toContain("project");
+    expect(state.agentId).not.toBeNull();
   });
 
   test("reuses the live coordinator on a second enable", async () => {
