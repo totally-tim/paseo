@@ -109,7 +109,6 @@ interface WorkspaceLayoutStore {
   splitSizesByWorkspace: Record<string, Record<string, number[]>>;
   explorerSidebarWidthByWorkspace: Record<string, number>;
   pinnedAgentIdsByWorkspace: Record<string, Set<string>>;
-  pendingAgentIdsByWorkspace: Record<string, Set<string>>;
   continuationPendingIdsByWorkspace: Record<string, Set<string>>;
   hiddenAgentIdsByWorkspace: Record<string, Set<string>>;
   focusRestorationByWorkspace: Record<string, WorkspaceFocusRestorationState>;
@@ -139,7 +138,6 @@ interface WorkspaceLayoutStore {
   setTabState: (workspaceKey: string, tabId: string, state: JsonValue | undefined) => void;
   convertDraftToAgent: (workspaceKey: string, tabId: string, agentId: string) => string | null;
   reconcileTabs: (workspaceKey: string, snapshot: WorkspaceTabSnapshot) => void;
-  resolvePendingAgent: (workspaceKey: string, agentId: string) => void;
   reorderTabs: (workspaceKey: string, tabIds: string[]) => void;
   getWorkspaceTabs: (workspaceKey: string) => WorkspaceTab[];
   splitPane: (
@@ -281,6 +279,7 @@ const WorkspaceLayoutStorageSchema: z.ZodType<WorkspaceLayout> = z.strictObject(
   parentTabIdByTabId: z.record(z.string(), z.string()).optional(),
 });
 const WorkspaceLayoutPersistedStateSchema = z.strictObject({
+  pinnedAgentIdsByWorkspace: z.record(z.string(), z.array(z.string())).optional(),
   layoutByWorkspace: z.record(z.string(), WorkspaceLayoutStorageSchema),
   splitSizesByWorkspace: z.record(z.string(), z.record(z.string(), z.array(z.number()))).optional(),
   explorerSidebarWidthByWorkspace: z.record(z.string(), z.number()).optional(),
@@ -775,7 +774,6 @@ export function createWorkspaceLayoutStore(
         splitSizesByWorkspace: {},
         explorerSidebarWidthByWorkspace: {},
         pinnedAgentIdsByWorkspace: {},
-        pendingAgentIdsByWorkspace: {},
         continuationPendingIdsByWorkspace: {},
         hiddenAgentIdsByWorkspace: {},
         focusRestorationByWorkspace: {},
@@ -842,13 +840,6 @@ export function createWorkspaceLayoutStore(
                   normalizedTarget.agentId,
                 )
               : state.pinnedAgentIdsByWorkspace,
-            pendingAgentIdsByWorkspace: shouldPinAgent
-              ? addAgentIdToWorkspaceSet(
-                  state.pendingAgentIdsByWorkspace,
-                  normalizedWorkspaceKey,
-                  normalizedTarget.agentId,
-                )
-              : state.pendingAgentIdsByWorkspace,
             layoutByWorkspace: {
               ...state.layoutByWorkspace,
               [normalizedWorkspaceKey]: input.parentTabId
@@ -1267,10 +1258,6 @@ export function createWorkspaceLayoutStore(
                   ...(state.pinnedAgentIdsByWorkspace[normalizedWorkspaceKey] ?? []),
                   ...(state.continuationPendingIdsByWorkspace[normalizedWorkspaceKey] ?? []),
                 ]),
-                pendingAgentIds: new Set([
-                  ...(state.pendingAgentIdsByWorkspace[normalizedWorkspaceKey] ?? []),
-                  ...(state.continuationPendingIdsByWorkspace[normalizedWorkspaceKey] ?? []),
-                ]),
                 hiddenAgentIds: state.hiddenAgentIdsByWorkspace[normalizedWorkspaceKey] ?? null,
                 explorerSidebarPaneId,
               },
@@ -1281,13 +1268,23 @@ export function createWorkspaceLayoutStore(
               explorerSidebarPaneId,
               currentLayout.focusedPaneId,
             );
+            let pinnedAgentIdsByWorkspace = state.pinnedAgentIdsByWorkspace;
+            for (const agentId of state.pinnedAgentIdsByWorkspace[normalizedWorkspaceKey] ?? []) {
+              if (!nextState.pinnedAgentIds?.has(agentId)) {
+                pinnedAgentIdsByWorkspace = removeAgentIdFromWorkspaceSet(
+                  pinnedAgentIdsByWorkspace,
+                  normalizedWorkspaceKey,
+                  agentId,
+                );
+              }
+            }
             let continuationPendingIdsByWorkspace = state.continuationPendingIdsByWorkspace;
             // Protection ends when the successor arrives, and also when it is archived or
             // deleted elsewhere; otherwise its tab stays pinned to a workspace forever.
             const protectedIds =
               state.continuationPendingIdsByWorkspace[normalizedWorkspaceKey] ?? [];
             const active = new Set(snapshot.activeAgentIds);
-            const known = new Set([...active, ...snapshot.knownAgentIds]);
+            const known = new Set([...active, ...(snapshot.knownAgentIds ?? [])]);
             for (const id of protectedIds) {
               if (active.has(id) || (snapshot.agentsHydrated && !known.has(id)))
                 continuationPendingIdsByWorkspace = removeAgentIdFromWorkspaceSet(
@@ -1298,37 +1295,20 @@ export function createWorkspaceLayoutStore(
             }
             if (
               nextLayout === rawLayout &&
+              pinnedAgentIdsByWorkspace === state.pinnedAgentIdsByWorkspace &&
               continuationPendingIdsByWorkspace === state.continuationPendingIdsByWorkspace
             ) {
               return state;
             }
 
             return {
+              pinnedAgentIdsByWorkspace,
               continuationPendingIdsByWorkspace,
               layoutByWorkspace: {
                 ...state.layoutByWorkspace,
                 [normalizedWorkspaceKey]: nextLayout,
               },
             };
-          });
-        },
-        resolvePendingAgent: (workspaceKey, agentId) => {
-          const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);
-          const normalizedAgentId = trimNonEmpty(agentId);
-          if (!normalizedWorkspaceKey || !normalizedAgentId) {
-            return;
-          }
-
-          set((state) => {
-            const pendingAgentIdsByWorkspace = removeAgentIdFromWorkspaceSet(
-              state.pendingAgentIdsByWorkspace,
-              normalizedWorkspaceKey,
-              normalizedAgentId,
-            );
-            if (pendingAgentIdsByWorkspace === state.pendingAgentIdsByWorkspace) {
-              return state;
-            }
-            return { pendingAgentIdsByWorkspace };
           });
         },
         reorderTabs: (workspaceKey, tabIds) => {
@@ -1753,11 +1733,6 @@ export function createWorkspaceLayoutStore(
               delete nextPinnedAgentIdsByWorkspace[normalizedWorkspaceKey];
               return {
                 pinnedAgentIdsByWorkspace: nextPinnedAgentIdsByWorkspace,
-                pendingAgentIdsByWorkspace: removeAgentIdFromWorkspaceSet(
-                  state.pendingAgentIdsByWorkspace,
-                  normalizedWorkspaceKey,
-                  normalizedAgentId,
-                ),
               };
             }
 
@@ -1769,11 +1744,6 @@ export function createWorkspaceLayoutStore(
                 ...state.pinnedAgentIdsByWorkspace,
                 [normalizedWorkspaceKey]: nextPinnedAgentIds,
               },
-              pendingAgentIdsByWorkspace: removeAgentIdFromWorkspaceSet(
-                state.pendingAgentIdsByWorkspace,
-                normalizedWorkspaceKey,
-                normalizedAgentId,
-              ),
             };
           });
         },
@@ -1833,7 +1803,6 @@ export function createWorkspaceLayoutStore(
               normalizedWorkspaceKey in state.splitSizesByWorkspace ||
               normalizedWorkspaceKey in state.explorerSidebarWidthByWorkspace ||
               normalizedWorkspaceKey in state.pinnedAgentIdsByWorkspace ||
-              normalizedWorkspaceKey in state.pendingAgentIdsByWorkspace ||
               normalizedWorkspaceKey in state.hiddenAgentIdsByWorkspace ||
               normalizedWorkspaceKey in state.focusRestorationByWorkspace ||
               normalizedWorkspaceKey in state.explorerSidebarPaneIdByWorkspace ||
@@ -1851,8 +1820,6 @@ export function createWorkspaceLayoutStore(
             } = state.explorerSidebarWidthByWorkspace;
             const { [normalizedWorkspaceKey]: _pinned, ...pinnedAgentIdsByWorkspace } =
               state.pinnedAgentIdsByWorkspace;
-            const { [normalizedWorkspaceKey]: _pending, ...pendingAgentIdsByWorkspace } =
-              state.pendingAgentIdsByWorkspace;
             const { [normalizedWorkspaceKey]: _hidden, ...hiddenAgentIdsByWorkspace } =
               state.hiddenAgentIdsByWorkspace;
             const { [normalizedWorkspaceKey]: _restoration, ...focusRestorationByWorkspace } =
@@ -1868,7 +1835,6 @@ export function createWorkspaceLayoutStore(
               splitSizesByWorkspace,
               explorerSidebarWidthByWorkspace,
               pinnedAgentIdsByWorkspace,
-              pendingAgentIdsByWorkspace,
               hiddenAgentIdsByWorkspace,
               focusRestorationByWorkspace,
               explorerSidebarPaneIdByWorkspace,
@@ -1894,6 +1860,12 @@ export function createWorkspaceLayoutStore(
           }
           return {
             layoutByWorkspace,
+            pinnedAgentIdsByWorkspace: Object.fromEntries(
+              Object.entries(state.pinnedAgentIdsByWorkspace).map(([key, agentIds]) => [
+                key,
+                Array.from(agentIds),
+              ]),
+            ),
             splitSizesByWorkspace: state.splitSizesByWorkspace,
             explorerSidebarWidthByWorkspace: state.explorerSidebarWidthByWorkspace,
             explorerPaneIdByWorkspace: state.explorerSidebarPaneIdByWorkspace,
@@ -1932,6 +1904,12 @@ export function createWorkspaceLayoutStore(
           return {
             ...currentState,
             layoutByWorkspace,
+            pinnedAgentIdsByWorkspace: Object.fromEntries(
+              Object.entries(result.data.pinnedAgentIdsByWorkspace ?? {}).map(([key, agentIds]) => [
+                key,
+                new Set(agentIds),
+              ]),
+            ),
             splitSizesByWorkspace: result.data.splitSizesByWorkspace ?? {},
             explorerSidebarWidthByWorkspace:
               result.data.explorerSidebarWidthByWorkspace ??
