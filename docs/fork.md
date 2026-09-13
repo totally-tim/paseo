@@ -170,13 +170,16 @@ is downloadable by anyone who finds it.
 scripts/fork/build-desktop.sh 1.0.1
 ```
 
-The artifacts land in `packages/desktop/release/`. To install, quit Paseo first and wait for port
-6767 to go quiet. The desktop settings ship `daemon.keepRunningAfterQuit: false`, so quitting
-stops the daemon and kills every agent it manages. Remove the existing `/Applications/Paseo.app`
-before copying the new one in, because of the shared settings profile below.
+The artifacts land in `packages/desktop/release/`. Back up the application settings and daemon
+state before installation. Quit the desktop before replacing `/Applications/Paseo.app` as a whole;
+do not merge app bundle contents. With the default `daemon.keepRunningAfterQuit: false`, quitting
+stops a daemon the desktop started and interrupts its agents. A preexisting CLI or launchd daemon
+continues running. Upgrade that daemon separately after permission to interrupt its agents.
 
-Confirm the swap took: `paseo daemon status` reports the fork version for both `CLI` and
-`Daemon Version`. The CLI shim at `~/.local/bin/paseo` resolves into the installed app bundle.
+Confirm the swap took: `paseo daemon status` reports the approved fork version for both `CLI` and
+`Daemon Version`. A desktop-managed installation uses the bundled CLI shim. A launchd installation
+uses its approved versioned launcher; invoking the desktop's **Install CLI** action replaces that
+link with the bundled shim, so recheck command resolution afterward.
 
 A locally built app carries no quarantine flag and launches even though `spctl` rejects it as
 "Unnotarized Developer ID". A teammate who downloads a DMG in a browser gets the quarantine flag
