@@ -450,7 +450,7 @@ describe("workspace-layout-store version 2 migration", () => {
     });
   });
 
-  it("writes version 2 with the persisted Explorer key accepted by released v0.6", async () => {
+  it("writes version 2 preserving the existing Explorer key", async () => {
     await persistVersionOneLayout("v0.6");
     const restored = createWorkspaceLayoutStore(createDeterministicWorkspaceLayoutIds());
 
@@ -463,6 +463,7 @@ describe("workspace-layout-store version 2 migration", () => {
         "explorerPaneIdByWorkspace",
         "explorerSidebarWidthByWorkspace",
         "layoutByWorkspace",
+        "pinnedAgentIdsByWorkspace",
         "sidePaneIdByWorkspace",
         "splitSizesByWorkspace",
       ]);
@@ -1518,7 +1519,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: [],
       autoOpenAgentIds: [],
-      knownAgentIds: [],
       knownTerminalIds: ["terminal-1"],
       standaloneTerminalIds: ["terminal-1"],
       hasActivePendingTerminalCreate: true,
@@ -1532,7 +1532,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: [],
       autoOpenAgentIds: [],
-      knownAgentIds: [],
       knownTerminalIds: ["terminal-1"],
       standaloneTerminalIds: ["terminal-1"],
     });
@@ -1615,7 +1614,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: ["agent-1", "agent-2"],
       autoOpenAgentIds: ["agent-1", "agent-2"],
-      knownAgentIds: ["agent-1", "agent-2"],
       standaloneTerminalIds: [],
     });
 
@@ -2978,6 +2976,7 @@ describe("workspace-layout-store actions", () => {
 
     expect(persisted).toEqual({
       layoutByWorkspace: { [workspaceKey]: layout },
+      pinnedAgentIdsByWorkspace: {},
       splitSizesByWorkspace: currentState.splitSizesByWorkspace,
       explorerSidebarWidthByWorkspace: currentState.explorerSidebarWidthByWorkspace,
       explorerPaneIdByWorkspace: {},
@@ -3127,7 +3126,7 @@ describe("workspace-layout-store actions", () => {
     expect(findPaneById(layout.root, "explorer")?.hidden).toBe(true);
   });
 
-  it("keeps explicitly opened pinned agents in memory per workspace without persisting them", () => {
+  it("persists explicit agent opens per workspace", () => {
     const workspaceKey = createWorkspaceKey();
     const otherWorkspaceKey = buildWorkspaceTabPersistenceKey({
       serverId: SERVER_ID,
@@ -3166,7 +3165,9 @@ describe("workspace-layout-store actions", () => {
 
     const partialize = workspaceLayoutStore.persist.getOptions().partialize;
     expect(partialize).toBeTypeOf("function");
-    expect(partialize?.(state)).not.toHaveProperty("pinnedAgentIdsByWorkspace");
+    expect(partialize?.(state)).toHaveProperty("pinnedAgentIdsByWorkspace", {
+      [otherWorkspaceKey as string]: ["agent-2"],
+    });
   });
 
   it("keeps hidden agent intents in memory per workspace without persisting them", () => {
@@ -3201,6 +3202,7 @@ describe("workspace-layout-store actions", () => {
     expect(partialize).toBeTypeOf("function");
     expect(partialize?.(state)).toEqual({
       layoutByWorkspace: {},
+      pinnedAgentIdsByWorkspace: {},
       splitSizesByWorkspace: {},
       explorerSidebarWidthByWorkspace: {},
       explorerPaneIdByWorkspace: {},
@@ -3293,7 +3295,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: ["agent-1"],
       autoOpenAgentIds: ["agent-1"],
-      knownAgentIds: ["agent-1", "agent-2"],
       standaloneTerminalIds: ["term-1"],
       hasActivePendingDraftCreate: false,
     });
@@ -3349,7 +3350,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: ["agent-1"],
       autoOpenAgentIds: ["agent-1"],
-      knownAgentIds: ["agent-1"],
       standaloneTerminalIds: [],
       hasActivePendingDraftCreate: false,
     });
@@ -3381,7 +3381,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: ["agent-1"],
       autoOpenAgentIds: ["agent-1"],
-      knownAgentIds: ["agent-1"],
       standaloneTerminalIds: [],
       hasActivePendingDraftCreate: false,
     });
@@ -3397,7 +3396,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: ["agent-1"],
       autoOpenAgentIds: ["agent-1"],
-      knownAgentIds: ["agent-1"],
       standaloneTerminalIds: [],
       hasActivePendingDraftCreate: false,
     });
@@ -3415,7 +3413,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: [],
       autoOpenAgentIds: [],
-      knownAgentIds: [],
       knownTerminalIds: [],
       standaloneTerminalIds: [],
       hasActivePendingDraftCreate: false,
@@ -3479,7 +3476,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: false,
       activeAgentIds: [],
       autoOpenAgentIds: [],
-      knownAgentIds: [],
       knownTerminalIds: [],
       standaloneTerminalIds: [],
     });
@@ -3502,7 +3498,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: [],
       autoOpenAgentIds: [],
-      knownAgentIds: [],
       knownTerminalIds: [],
       standaloneTerminalIds: [],
       hasActivePendingDraftCreate: false,
@@ -3530,7 +3525,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: ["parent-agent", "child-agent"],
       autoOpenAgentIds: ["parent-agent"],
-      knownAgentIds: ["parent-agent", "child-agent"],
       standaloneTerminalIds: [],
       hasActivePendingDraftCreate: false,
     });
@@ -3557,7 +3551,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: ["parent-agent", "child-agent"],
       autoOpenAgentIds: ["parent-agent"],
-      knownAgentIds: ["parent-agent", "child-agent"],
       standaloneTerminalIds: [],
       hasActivePendingDraftCreate: false,
     });
@@ -3584,7 +3577,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: ["parent-agent"],
       autoOpenAgentIds: ["parent-agent"],
-      knownAgentIds: ["parent-agent", "child-agent"],
       standaloneTerminalIds: [],
       hasActivePendingDraftCreate: false,
     });
@@ -3606,7 +3598,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: ["child-agent"],
       autoOpenAgentIds: [],
-      knownAgentIds: ["child-agent"],
       standaloneTerminalIds: [],
       hasActivePendingDraftCreate: false,
     });
@@ -3644,7 +3635,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: [],
       autoOpenAgentIds: [],
-      knownAgentIds: [],
       knownTerminalIds: ["term-script", "term-manual"],
       standaloneTerminalIds: ["term-manual"],
       hasActivePendingDraftCreate: false,
@@ -3664,7 +3654,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: [],
       autoOpenAgentIds: [],
-      knownAgentIds: [],
       knownTerminalIds: ["term-script"],
       standaloneTerminalIds: [],
       hasActivePendingDraftCreate: false,
@@ -3710,7 +3699,7 @@ describe("workspace-layout-store actions", () => {
     expect(Array.from(state.pinnedAgentIdsByWorkspace[workspaceKey] ?? [])).toEqual(["agent-1"]);
   });
 
-  it("keeps an explicitly pinned archived agent before its detail is hydrated", () => {
+  it("keeps an explicitly opened agent when its detail leaves client memory", () => {
     const workspaceKey = createWorkspaceKey();
     const store = workspaceLayoutStore.getState();
 
@@ -3725,7 +3714,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: [],
       autoOpenAgentIds: [],
-      knownAgentIds: [],
       standaloneTerminalIds: [],
     });
 
@@ -3741,7 +3729,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: [],
       autoOpenAgentIds: [],
-      knownAgentIds: [],
       standaloneTerminalIds: [],
     });
 
@@ -3752,13 +3739,11 @@ describe("workspace-layout-store actions", () => {
         .map((tab) => tab.tabId),
     ).toEqual(["agent_archived-agent"]);
 
-    store.resolvePendingAgent(workspaceKey, "archived-agent");
     store.reconcileTabs(workspaceKey, {
       agentsHydrated: true,
       terminalsHydrated: true,
       activeAgentIds: [],
       autoOpenAgentIds: [],
-      knownAgentIds: [],
       standaloneTerminalIds: [],
     });
 
@@ -3767,7 +3752,7 @@ describe("workspace-layout-store actions", () => {
         .getWorkspaceTabs(workspaceKey)
         .filter((tab) => tab.target.kind === "agent")
         .map((tab) => tab.tabId),
-    ).toEqual([]);
+    ).toEqual(["agent_archived-agent"]);
 
     store.openTab({
       workspaceKey: workspaceKey,
@@ -3780,7 +3765,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: [],
       autoOpenAgentIds: [],
-      knownAgentIds: [],
       standaloneTerminalIds: [],
     });
 
@@ -3790,6 +3774,57 @@ describe("workspace-layout-store actions", () => {
         .filter((tab) => tab.target.kind === "agent")
         .map((tab) => tab.tabId),
     ).toEqual(["agent_archived-agent"]);
+  });
+
+  it("restores the selected historical agent before any server data or cache is available", async () => {
+    const workspaceKey = createWorkspaceKey();
+    workspaceLayoutStore.getState().openTab({
+      workspaceKey,
+      target: { kind: "agent", agentId: "archived-agent" },
+      intent: "reveal",
+      pin: true,
+    });
+    const restored = createWorkspaceLayoutStore(createDeterministicWorkspaceLayoutIds());
+    await restored.persist.rehydrate();
+    restored.getState().reconcileTabs(workspaceKey, {
+      agentsHydrated: true,
+      terminalsHydrated: true,
+      activeAgentIds: [],
+      autoOpenAgentIds: [],
+      standaloneTerminalIds: [],
+    });
+    const layout = restored.getState().layoutByWorkspace[workspaceKey];
+    expect(findPaneById(layout.root, layout.focusedPaneId)?.focusedTabId).toBe(
+      "agent_archived-agent",
+    );
+  });
+
+  it("follows server archive after an explicitly opened agent becomes active", () => {
+    const workspaceKey = createWorkspaceKey();
+    const store = workspaceLayoutStore.getState();
+    store.openTab({
+      workspaceKey,
+      target: { kind: "agent", agentId: "agent-1" },
+      intent: "reveal",
+      pin: true,
+    });
+    store.reconcileTabs(workspaceKey, {
+      agentsHydrated: true,
+      terminalsHydrated: true,
+      activeAgentIds: ["agent-1"],
+      autoOpenAgentIds: ["agent-1"],
+      standaloneTerminalIds: [],
+    });
+    store.reconcileTabs(workspaceKey, {
+      agentsHydrated: true,
+      terminalsHydrated: true,
+      activeAgentIds: [],
+      autoOpenAgentIds: [],
+      standaloneTerminalIds: [],
+    });
+    expect(store.getWorkspaceTabs(workspaceKey).some((tab) => tab.target.kind === "agent")).toBe(
+      false,
+    );
   });
 
   it("atomically reveals, focuses, and pins an archived agent against reconciliation", () => {
@@ -3818,7 +3853,6 @@ describe("workspace-layout-store actions", () => {
       terminalsHydrated: true,
       activeAgentIds: ["first-agent", "second-agent"],
       autoOpenAgentIds: ["first-agent", "second-agent"],
-      knownAgentIds: ["first-agent", "second-agent"],
       standaloneTerminalIds: [],
     });
 
