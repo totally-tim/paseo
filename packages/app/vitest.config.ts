@@ -33,6 +33,7 @@ export default defineConfig({
           name: "browser",
           fileParallelism: false,
           include: ["src/**/*.browser.{test,spec}.{ts,tsx}"],
+          exclude: ["src/coordinator/board/board-tracks.browser.test.tsx"],
           browser: {
             enabled: true,
             provider: playwright(),
@@ -42,6 +43,34 @@ export default defineConfig({
             screenshotDirectory: ".vitest-screenshots",
           },
           globalSetup: path.resolve(__dirname, "src/runtime/websocket-test-global-setup.ts"),
+        },
+      },
+      {
+        extends: true,
+        // The coordinator fixture mocks settings and host runtime. Scanning those modules
+        // still walks their native Expo graph before Vitest installs the mocks.
+        optimizeDeps: {
+          noDiscovery: true,
+          include: [
+            "react",
+            "react/jsx-runtime",
+            "react-dom",
+            "react-dom/client",
+            "react-native",
+            "i18next",
+            "react-i18next",
+            "zustand",
+          ],
+        },
+        test: {
+          name: "coordinator-browser",
+          include: ["src/coordinator/board/board-tracks.browser.test.tsx"],
+          browser: {
+            enabled: true,
+            provider: playwright(),
+            headless: true,
+            instances: [{ browser: "chromium" }],
+          },
         },
       },
     ],

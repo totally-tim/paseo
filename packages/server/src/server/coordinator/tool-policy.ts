@@ -104,7 +104,12 @@ const ALLOWED_TOOLS_BY_LEVEL: Record<CoordinatorTrustLevel, ReadonlySet<string>>
   observe: OBSERVE_ALLOWED_TOOLS,
   propose: new Set([...OBSERVE_ALLOWED_TOOLS, ...PROPOSE_ADDED_TOOLS]),
   ship: new Set([...OBSERVE_ALLOWED_TOOLS, ...PROPOSE_ADDED_TOOLS, ...SHIP_ADDED_TOOLS]),
-  autopilot: new Set([...OBSERVE_ALLOWED_TOOLS, ...PROPOSE_ADDED_TOOLS, ...SHIP_ADDED_TOOLS]),
+  autopilot: new Set([
+    ...OBSERVE_ALLOWED_TOOLS,
+    ...PROPOSE_ADDED_TOOLS,
+    ...SHIP_ADDED_TOOLS,
+    "coordinator_merge",
+  ]),
 };
 
 const TRUST_LEVEL_ORDER: Record<CoordinatorTrustLevel, number> = {

@@ -66,6 +66,10 @@ const PersistedCoordinatorBoardSchema = z.object({
   version: z.literal(1),
   /** Verb-first outcome rows, newest first. Expired rows are pruned on write. */
   done: z.array(CoordinatorDoneBoardRowSchema).default([]),
+  /** Durable daemon-owned issues; projected into Needs you once the owner exists. */
+  attention: z
+    .array(z.object({ id: z.string(), question: z.string(), askedAt: z.string() }))
+    .default([]),
   /** The latest wake line; only one is ever shown. */
   wake: CoordinatorWakeBoardRowSchema.nullable().default(null),
 });
@@ -75,6 +79,7 @@ export type PersistedCoordinatorBoard = z.infer<typeof PersistedCoordinatorBoard
 export const EMPTY_COORDINATOR_BOARD: PersistedCoordinatorBoard = {
   version: 1,
   done: [],
+  attention: [],
   wake: null,
 };
 

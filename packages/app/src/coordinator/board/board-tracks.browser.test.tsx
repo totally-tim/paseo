@@ -33,6 +33,10 @@ vi.mock("@/runtime/host-runtime", () => ({
   }),
 }));
 
+// Settings has its own integration coverage; these tests exercise trust/scope pills and usage.
+// Keep its provider/Expo graph outside this browser fixture.
+vi.mock("@/coordinator/settings-sheet", () => ({ CoordinatorSettingsSheet: () => null }));
+
 /**
  * The menu surface's `entering` keyframe runs through reanimated's JS fallback, whose
  * `animationstart` listener races these tests' synchronous teardown — it fires on a node

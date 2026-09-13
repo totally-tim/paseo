@@ -171,7 +171,10 @@ test("approved cron goal keeps its missed window across restart and executes onc
   expect(h.calls).toHaveLength(1);
   expect(h.done).toHaveLength(1);
   expect((await h.automation.goals.get("project", goal.id))?.firedCount).toBe(1);
-  expect((await h.schedules.inspect(goal.scheduleId!)).nextRunAt).toBe("2026-09-18T08:00:00.000Z");
+  // Done is delivered before the scheduler persists its completed run.
+  await expect
+    .poll(async () => (await h.schedules.inspect(goal.scheduleId!)).nextRunAt)
+    .toBe("2026-09-18T08:00:00.000Z");
 });
 
 test("repeated concurrent polls and restart deliver one event with its saved context", async () => {

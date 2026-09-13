@@ -2118,6 +2118,8 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
     },
 
     async mergePullRequest(input: MergePullRequestOptions): Promise<PullRequestMergeResult> {
+      if (input.expectedHeadSha !== undefined)
+        throw new Error("This forge does not support head-guarded merging");
       assertGiteaDirectMergeReady(input);
       const args = ["pr", "merge", String(input.prNumber), "--style", input.mergeMethod];
       await run(args, { cwd: input.cwd });

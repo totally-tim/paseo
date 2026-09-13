@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { readGitHubAutopilotFacts } from "./github-autopilot.js";
 import {
   isGitHubHost,
   parseGitHubRemoteUrl,
@@ -2608,7 +2609,51 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       return { retried };
     },
 
+    async getPullRequestMergeFacts(input) {
+      const repo = await deps.resolveRepoSlug(input.cwd);
+      if (!repo) throw new Error("The GitHub repository could not be resolved");
+      return readGitHubAutopilotFacts(
+        {
+          get: async (endpoint, paginate) => {
+            const args = ["api", endpoint];
+            if (paginate) args.push("--paginate", "--slurp");
+            return JSON.parse(await run(args, { cwd: input.cwd }));
+          },
+        },
+        repo,
+        input.prNumber,
+      );
+    },
+
     async mergePullRequest(input) {
+      if (input.expectedHeadSha !== undefined) {
+        if (!/^[a-f0-9]{40,64}$/i.test(input.expectedHeadSha))
+          throw new Error("A valid expected head commit is required");
+        const repo = await deps.resolveRepoSlug(input.cwd);
+        if (!repo) throw new Error("The GitHub repository could not be resolved");
+        // The REST endpoint never silently enables auto-merge or joins a merge queue.
+        const result = z
+          .object({ merged: z.boolean() })
+          .parse(
+            JSON.parse(
+              await run(
+                [
+                  "api",
+                  "--method",
+                  "PUT",
+                  `repos/${repo}/pulls/${input.prNumber}/merge`,
+                  "-f",
+                  `sha=${input.expectedHeadSha}`,
+                  "-f",
+                  `merge_method=${input.mergeMethod}`,
+                ],
+                { cwd: input.cwd, envOverlay: { GH_PROMPT_DISABLED: "1" } },
+              ),
+            ),
+          );
+        if (!result.merged) throw new Error("GitHub did not confirm an immediate merge");
+        return { success: true, merged: true };
+      }
       assertDirectPullRequestMergeReady(input);
       await run(["pr", "merge", String(input.prNumber), `--${input.mergeMethod}`], {
         cwd: input.cwd,

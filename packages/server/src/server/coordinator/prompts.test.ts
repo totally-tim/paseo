@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import {
+  appendCoordinatorReviewerSystemPrompt,
   buildProjectCoordinatorFirstContactPrompt,
   buildProjectCoordinatorSystemPrompt,
 } from "./prompts.js";
@@ -88,4 +89,19 @@ describe("buildProjectCoordinatorFirstContactPrompt", () => {
     expect(at("ship")).toContain("own worktrees");
     expect(at("autopilot")).toContain("merge automation");
   });
+});
+
+test("reviewer prompt requires an explicit independent verdict for the exact head", () => {
+  const prompt = appendCoordinatorReviewerSystemPrompt("Existing provider guidance", "reviewer")!;
+  expect(prompt).toContain("Existing provider guidance");
+  expect(prompt).toContain("coordinator_review_result");
+  expect(prompt).toContain("headSha");
+  expect(prompt).toContain("passed: false");
+  expect(prompt).toContain("A tool error is not a recorded verdict");
+  expect(prompt).toContain("Any change to the head invalidates your previous review");
+  for (const kind of [undefined, "investigator", "implementer"] as const)
+    expect(appendCoordinatorReviewerSystemPrompt("Existing", kind)).toBe("Existing");
+  const owner = buildProjectCoordinatorSystemPrompt("Project", "autopilot");
+  expect(owner).toContain("coordinator_merge");
+  expect(owner).toContain("You cannot submit the reviewer verdict yourself");
 });

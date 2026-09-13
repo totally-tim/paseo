@@ -199,10 +199,27 @@ export interface PullRequestCommandStatus {
   forgeSpecific?: ForgeSpecificStatusFacts;
 }
 
+export interface PullRequestMergeFacts {
+  headSha: string;
+  baseSha: string;
+  state: string;
+  draft: boolean;
+  mergeable: boolean;
+  mergeReady: boolean;
+  upToDate: boolean;
+  strictBaseProtection: boolean;
+  additions: number;
+  deletions: number;
+  filesComplete: boolean;
+  files: Array<{ path: string; previousPath?: string; lineCountsKnown: boolean }>;
+  checksComplete: boolean;
+  checks: Array<{ name: string; status: PullRequestCheckStatus; traits?: string[] }>;
+}
 export interface MergePullRequestOptions {
   cwd: string;
   prNumber: number;
   mergeMethod: PullRequestMergeMethod;
+  expectedHeadSha?: string;
   status?: PullRequestCommandStatus | null;
 }
 
@@ -221,6 +238,7 @@ export interface DisablePullRequestAutoMergeOptions {
 
 export interface PullRequestMergeResult {
   success: true;
+  merged?: boolean;
 }
 
 export interface PullRequestAutoMergeResult {
@@ -529,6 +547,10 @@ export interface ForgeService {
   retryPullRequestChecks(
     options: RetryPullRequestChecksOptions,
   ): Promise<RetryPullRequestChecksResult>;
+  getPullRequestMergeFacts?(options: {
+    cwd: string;
+    prNumber: number;
+  }): Promise<PullRequestMergeFacts>;
   mergePullRequest(options: MergePullRequestOptions): Promise<PullRequestMergeResult>;
   enablePullRequestAutoMerge(
     options: EnablePullRequestAutoMergeOptions,

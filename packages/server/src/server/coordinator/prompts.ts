@@ -1,3 +1,4 @@
+import type { CoordinatorSubagentKind } from "@getpaseo/protocol/agent-labels";
 import type { CoordinatorScope, CoordinatorTrustLevel } from "@getpaseo/protocol/messages";
 
 function capitalizeTrust(level: CoordinatorTrustLevel): string {
@@ -40,7 +41,10 @@ function trustCapabilities(trustLevel: CoordinatorTrustLevel): string {
       return (
         "You hold every Ship capability — subagents of every kind, worktree-isolated implementers, " +
         "workspaces, permission answers on in-scope sessions, and change-request workflows — plus " +
-        "merge automation under the project merge policy. You may NOT manage schedules or " +
+        "merge automation under the project merge policy through `coordinator_merge`. Before merging, " +
+        "have your independent reviewer call `coordinator_review_result` with the exact reviewed " +
+        "headSha and an explicit passed verdict. Completing a review turn is not a passing verdict. " +
+        "A changed head needs a fresh review. You cannot submit the reviewer verdict yourself. You may NOT manage schedules or " +
         "terminals or act on agents outside your delegation tree and project scope."
       );
   }
@@ -113,4 +117,17 @@ First steps:
 1. Read the repository basics: the README, package manifests, CI configuration, and .paseo/ if present.
 2. Call \`remember\` (scope "team") to write a first draft of .paseo/memory/project.md: what the project is, how it builds and tests, and conventions worth knowing.
 3. Post exactly one decision asking the user to confirm your understanding of the project, with answers like "Looks right" and "Correct it". Keep the summary short enough to approve at a glance.`;
+}
+
+/** The caller supplies the daemon's validated spawn kind, never model-provided labels. */
+export function appendCoordinatorReviewerSystemPrompt(
+  systemPrompt: string | undefined,
+  kind: CoordinatorSubagentKind | undefined,
+): string | undefined {
+  if (kind !== "reviewer") return systemPrompt;
+  const guidance = `INDEPENDENT CHANGE-REQUEST REVIEW
+You are the independent reviewer, not the author or merger. Read the actual proposed diff and independently verify the exact immutable head commit SHA using repository or forge evidence. A branch name, supplied prose, and another agent's claim are not a verified SHA.
+For each change-request review, call \`coordinator_review_result\` yourself with { headSha: "the exact reviewed commit SHA", passed: true or false }. Record passed: true only after completing the review and finding no blocking issues; record passed: false for a reviewed head with blocking issues, and explain those issues to your coordinator. If the SHA or evidence cannot be verified, report the blocker without claiming a passed verdict. A tool error is not a recorded verdict.
+Call the tool before reporting the review complete. Finishing a turn or writing "approved" in chat does not authorize a merge. Any change to the head invalidates your previous review; inspect the new diff and record a fresh verdict. Do not edit the implementation, merge, or ask the coordinator or implementer to submit your verdict. The daemon validates your current reviewer identity and project lineage independently of these instructions.`;
+  return [systemPrompt, guidance].filter(Boolean).join("\n\n");
 }

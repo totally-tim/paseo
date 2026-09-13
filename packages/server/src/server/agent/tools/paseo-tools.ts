@@ -174,6 +174,9 @@ export interface PaseoToolHostDependencies {
    * without the coordinator slice.
    */
   coordinator?: {
+    recordCoordinatorReview?: import("../../coordinator/merges.js").CoordinatorMerges["recordReview"];
+    recordCoordinatorCreatedPullRequest?: import("../../coordinator/merges.js").CoordinatorMerges["recordCreated"];
+    mergeCoordinatorPullRequest?: import("../../coordinator/merges.js").CoordinatorMerges["merge"];
     remember(input: CoordinatorRememberInput): Promise<CoordinatorRememberResult>;
     recordForgeArtifact?: import("../../coordinator/coordinator-service.js").CoordinatorService["recordForgeArtifact"];
     proposeCoordinatorAutomation?: import("../../coordinator/coordinator-service.js").CoordinatorService["proposeCoordinatorAutomation"];
@@ -3944,6 +3947,24 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         base: base ?? (await requireDefaultBranch(repoCwd)),
       });
       await recordForgeArtifact(head, `Opened change request #${result.number}`, result.url);
+      if (callerAgentId && reviewerAgentId && callerAgent && isCoordinatorAgent(callerAgent)) {
+        // The forge has already created the PR. A provenance failure must not invite a duplicate create.
+        try {
+          await options.coordinator?.recordCoordinatorCreatedPullRequest?.({
+            callerAgentId,
+            reviewerAgentId,
+            cwd: repoCwd,
+            number: result.number,
+            url: result.url,
+            head,
+          });
+        } catch (error) {
+          logger.warn(
+            { err: error, number: result.number },
+            "Created PR but could not record coordinator provenance",
+          );
+        }
+      }
       return {
         content: [],
         structuredContent: ensureValidJson(result),
@@ -4017,6 +4038,42 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         content: [],
         structuredContent: ensureValidJson(result),
       };
+    },
+  );
+
+  registerTool(
+    "coordinator_review_result",
+    {
+      title: "Record independent review verdict",
+      description:
+        "Reviewer subagents explicitly record passed or failed for the exact reviewed head SHA. Completing a turn is not a passing verdict. A new head requires a fresh review verdict.",
+      inputSchema: { headSha: z.string().regex(/^[a-f0-9]{40,64}$/i), passed: z.boolean() },
+      outputSchema: { recorded: z.boolean() },
+    },
+    async (input) => {
+      if (!callerAgentId || !options.coordinator?.recordCoordinatorReview)
+        throw new Error("Coordinator review recording is unavailable");
+      await options.coordinator.recordCoordinatorReview({ ...input, callerAgentId });
+      return { content: [], structuredContent: { recorded: true } };
+    },
+  );
+  registerTool(
+    "coordinator_merge",
+    {
+      title: "Merge under committed project policy",
+      description:
+        "Autopilot only. Merge a coordinator-created PR after fresh forge facts confirm the committed base policy, current checks, protected paths, current base, and an independent passed verdict for the exact head. Does not override branch protection. Confirmed merges add Done and archive the dedicated worktree.",
+      inputSchema: { number: z.number().int().positive() },
+      outputSchema: { merged: z.boolean(), headSha: z.string() },
+    },
+    async (input) => {
+      if (!callerAgentId || !options.coordinator?.mergeCoordinatorPullRequest)
+        throw new Error("Coordinator merging is unavailable");
+      const result = await options.coordinator.mergeCoordinatorPullRequest({
+        ...input,
+        callerAgentId,
+      });
+      return { content: [], structuredContent: ensureValidJson(result) };
     },
   );
 

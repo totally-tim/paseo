@@ -1,5 +1,7 @@
 import type { Logger } from "pino";
 
+import { getCoordinatorSubagentKind } from "@getpaseo/protocol/agent-labels";
+import { appendCoordinatorReviewerSystemPrompt } from "../../coordinator/prompts.js";
 import type { CoordinatorSubagentKind } from "@getpaseo/protocol/agent-labels";
 import type {
   CoordinatorService,
@@ -444,6 +446,7 @@ async function resolveMcpCreateAgent(
       resolvedMode: resolvedCreateConfig.modeId,
       resolvedFeatures: resolvedCreateConfig.featureValues,
       delegateOnly: spawnDecision?.delegateOnly,
+      coordinatorSubagentKind: getCoordinatorSubagentKind(spawnDecision?.labels) ?? undefined,
     }),
     createOptions: {
       ...(Object.keys(labels).length > 0 ? { labels } : {}),
@@ -556,6 +559,7 @@ function buildMcpSessionConfig(params: {
   resolvedMode?: string;
   resolvedFeatures?: Record<string, unknown>;
   delegateOnly?: boolean;
+  coordinatorSubagentKind?: CoordinatorSubagentKind;
 }): AgentSessionConfig {
   const passthroughConfig = params.input.config;
   const { provisionalTitle } = resolveCreateAgentTitles({
@@ -572,6 +576,10 @@ function buildMcpSessionConfig(params: {
     thinkingOptionId: params.input.thinking ?? passthroughConfig?.thinkingOptionId,
     internal: params.input.internal ?? passthroughConfig?.internal,
   };
+  config.systemPrompt = appendCoordinatorReviewerSystemPrompt(
+    config.systemPrompt,
+    params.coordinatorSubagentKind,
+  );
   if (params.delegateOnly) {
     // The spawn gate marks read-only kinds; the provider enforces it natively.
     config.delegateOnly = true;

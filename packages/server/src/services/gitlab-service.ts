@@ -1262,6 +1262,8 @@ export function createGitLabService(options: CreateGitLabServiceOptions = {}): F
     },
 
     async mergePullRequest(input: MergePullRequestOptions): Promise<PullRequestMergeResult> {
+      if (input.expectedHeadSha !== undefined)
+        throw new Error("This forge does not support head-guarded merging");
       assertGitLabDirectMergeReady(input);
       // `--auto-merge=false` forces an immediate merge: without it glab's default
       // would schedule "merge when the pipeline succeeds" while a pipeline runs,

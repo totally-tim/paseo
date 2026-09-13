@@ -220,3 +220,19 @@ test("global coordinator delegates at Observe but never spawns or mutates projec
     }
   }
 });
+
+test("M7 merges are project Autopilot only and review verdicts cannot be self-attested", () => {
+  for (const level of ["observe", "propose", "ship", "autopilot"] as const) {
+    const project = coordinatorAt(level);
+    if (level === "autopilot")
+      expect(() => assertCoordinatorToolAllowed(project, "coordinator_merge")).not.toThrow();
+    else expect(() => assertCoordinatorToolAllowed(project, "coordinator_merge")).toThrow();
+    expect(() => assertCoordinatorToolAllowed(project, "coordinator_review_result")).toThrow();
+    expect(() =>
+      assertCoordinatorToolAllowed(
+        { labels: { [PASEO_ROLE_LABEL]: "coordinator.global", [COORDINATOR_TRUST_LABEL]: level } },
+        "coordinator_merge",
+      ),
+    ).toThrow();
+  }
+});

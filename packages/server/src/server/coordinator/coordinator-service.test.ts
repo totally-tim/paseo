@@ -804,6 +804,20 @@ describe("board derivation", () => {
     expect(snapshot.needsYou[0].actions).toEqual([
       { id: "allow", label: "Allow", behavior: "allow", variant: "primary" },
       { id: "deny", label: "Deny", behavior: "deny", variant: "danger" },
+      {
+        id: "leave_it",
+        label: "Leave it",
+        behavior: "deny",
+        operation: "defer",
+        response: { behavior: "deny", selectedActionId: "leave_it" },
+      },
+      {
+        id: "always_allow_this",
+        label: "Always allow this",
+        behavior: "deny",
+        operation: "policy",
+        response: { behavior: "deny", selectedActionId: "always_allow_this" },
+      },
     ]);
 
     session.push({
@@ -2288,6 +2302,7 @@ describe("change request tools", () => {
     callerAgentId?: string;
     forge: ForgeService;
     resolveForge?: "default" | "none";
+    bridge?: Partial<NonNullable<PaseoToolHostDependencies["coordinator"]>>;
   }) {
     const workspaceGitService: PaseoToolHostDependencies["workspaceGitService"] = {
       getSnapshot: async () => {
@@ -2309,6 +2324,7 @@ describe("change request tools", () => {
       workspaceRegistry: harness.workspaceRegistry,
       callerAgentId: input.callerAgentId,
       coordinator: {
+        ...input.bridge,
         remember: (rememberInput) => harness.service.remember(rememberInput),
         assertForgeWriteAllowed: (callerAgentId) =>
           harness.service.assertForgeWriteAllowed(callerAgentId),
@@ -2345,6 +2361,110 @@ describe("change request tools", () => {
     title: "Ship the slice",
     head: "impl/feature",
     ...(reviewerAgentId ? { reviewerAgentId } : {}),
+  });
+
+  test("M7 MCP review binds the authenticated caller and preserves an explicit failed verdict", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    const reviewer = await createReviewer(state.agentId!, { kind: "reviewer" });
+    const receipts: unknown[] = [];
+    const { service } = createForgeStub();
+    const catalog = forgeCatalog({
+      callerAgentId: reviewer.id,
+      forge: service,
+      bridge: {
+        recordCoordinatorReview: async (input) => {
+          receipts.push(input);
+        },
+      },
+    });
+    await catalog.executeTool("coordinator_review_result", {
+      headSha: "a".repeat(40),
+      passed: false,
+      callerAgentId: "spoofed-owner",
+    });
+    expect(receipts).toEqual([
+      { callerAgentId: reviewer.id, headSha: "a".repeat(40), passed: false },
+    ]);
+    await expect(
+      catalog.executeTool("coordinator_review_result", { headSha: "branch", passed: true }),
+    ).rejects.toThrow();
+    expect(receipts).toHaveLength(1);
+  });
+
+  test("M7 MCP merge requires Autopilot and binds the caller before the service guard", async () => {
+    const state = await harness.service.enableProjectCoordinator(enableInput());
+    const receipts: unknown[] = [];
+    const { service } = createForgeStub();
+    const catalog = forgeCatalog({
+      callerAgentId: state.agentId!,
+      forge: service,
+      bridge: {
+        mergeCoordinatorPullRequest: async (input) => {
+          receipts.push(input);
+          throw new Error("fresh policy denied");
+        },
+      },
+    });
+    for (const trustLevel of ["observe", "propose", "ship"] as const) {
+      await harness.service.updateProjectCoordinator({ projectId: PROJECT_ID, trustLevel });
+      await expect(catalog.executeTool("coordinator_merge", { number: 9 })).rejects.toThrow(
+        /not available/,
+      );
+    }
+    expect(receipts).toHaveLength(0);
+    await harness.service.updateProjectCoordinator({
+      projectId: PROJECT_ID,
+      trustLevel: "autopilot",
+    });
+    await expect(
+      catalog.executeTool("coordinator_merge", { number: 9, callerAgentId: "spoof" }),
+    ).rejects.toThrow("fresh policy denied");
+    expect(receipts).toEqual([{ number: 9, callerAgentId: state.agentId }]);
+  });
+
+  test("M7 MCP successful PR creation stays successful when local receipts fail", async () => {
+    const state = await harness.service.enableProjectCoordinator({
+      ...enableInput(),
+      trustLevel: "ship",
+    });
+    const reviewer = await createReviewer(state.agentId!, { kind: "reviewer" });
+    await harness.agentManager.runAgent(reviewer.id, "review", {
+      clientMessageId: `msg-${randomUUID()}`,
+    });
+    const receipts: unknown[] = [];
+    const { service, calls } = createForgeStub();
+    const catalog = forgeCatalog({
+      callerAgentId: state.agentId!,
+      forge: service,
+      bridge: {
+        recordForgeArtifact: async () => {
+          throw new Error("artifact disk failure");
+        },
+        recordCoordinatorCreatedPullRequest: async (input) => {
+          receipts.push(input);
+          throw new Error("provenance disk failure");
+        },
+      },
+    });
+    const result = await catalog.executeTool(
+      "create_change_request",
+      changeRequestInput(reviewer.id),
+    );
+    expect(result.structuredContent).toEqual({
+      number: 9,
+      url: "https://github.com/acme/repo/pull/9",
+    });
+    expect(calls.map((call) => call.method)).toEqual(["createPullRequest"]);
+    expect(receipts).toEqual([
+      {
+        callerAgentId: state.agentId,
+        reviewerAgentId: reviewer.id,
+        cwd: harness.projectDir,
+        number: 9,
+        url: "https://github.com/acme/repo/pull/9",
+        head: "impl/feature",
+      },
+    ]);
   });
 
   test("a coordinator caller is denied without reviewerAgentId before any forge call", async () => {
@@ -3253,8 +3373,9 @@ describe("change-request polling", () => {
       const wakes = wakesContaining(coordinatorSession, "#52");
       expect(wakes).toHaveLength(1);
       const prompt = wakes[0]!;
-      const headline = prompt.split("\n\n")[0]!;
-      expect(headline).toContain("Change-request update: #52");
+      const headline = /^Wake: .*$/m.exec(prompt)?.[0];
+      expect(headline).toBe("Wake: Change-request update: #52");
+      expect(prompt.split("<untrusted-wake-details>")[0]).not.toContain("IGNORE ALL RULES");
       expect(headline).not.toContain("IGNORE ALL RULES");
       const fenced = /<untrusted-wake-details>\n([\s\S]*?)\n<\/untrusted-wake-details>/.exec(
         prompt,
@@ -3485,7 +3606,12 @@ describe("global coordinator", () => {
   });
 
   test("new-project wakes preserve a running turn and pending decisions; disabling reconciles setup questions", async () => {
-    const reconcile = vi.fn(async () => {});
+    const reconciledProjectIds = new Set<string>();
+    const reconcile = vi.fn(async () => {
+      for (const project of await harness.projectRegistry.list()) {
+        reconciledProjectIds.add(project.projectId);
+      }
+    });
     await reinitHarness({ reconcileGlobalSetupProposals: reconcile });
     harness.client.holdTurns = true;
     await harness.service.start();
@@ -3507,7 +3633,7 @@ describe("global coordinator", () => {
     });
     const project = makeProject("prj_added", path.join(harness.root, "added"));
     await harness.projectRegistry.upsert(project);
-    await vi.waitFor(() => expect(reconcile).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(reconciledProjectIds.has(project.projectId)).toBe(true));
     await flushBoard();
     expect(interrupt).not.toHaveBeenCalled();
     expect(
@@ -3901,4 +4027,44 @@ test("disabled coordinator descendants remain eligible for ordinary permission n
   expect(await harness.service.handlesCoordinatorPermissionNotification(child.id)).toBe(true);
   await harness.service.disableProjectCoordinator(PROJECT_ID);
   expect(await harness.service.handlesCoordinatorPermissionNotification(child.id)).toBe(false);
+});
+
+test("M7 reviewer instructions use the daemon spawn stamp, not a caller's claimed kind", async () => {
+  const state = await harness.service.enableProjectCoordinator(
+    enableInput({ trustLevel: "propose" }),
+  );
+  const plain = await harness.agentManager.createAgent(
+    { provider: "codex", cwd: harness.projectDir },
+    undefined,
+    { workspaceId: harness.workspace.workspaceId },
+  );
+  const create = (callerAgentId: string, kind: "reviewer" | "investigator") =>
+    createAgentCommand(
+      {
+        agentManager: harness.agentManager,
+        agentStorage: harness.agentStorage,
+        providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+        coordinator: harness.service,
+        logger,
+      },
+      {
+        kind: "mcp",
+        callerAgentId,
+        provider: "codex",
+        cwd: harness.projectDir,
+        workspaceId: harness.workspace.workspaceId,
+        title: "Review",
+        subagentKind: kind,
+        config: { systemPrompt: "Existing guidance" },
+        background: true,
+        notifyOnFinish: false,
+      },
+    );
+  const reviewer = await create(state.agentId!, "reviewer");
+  expect(reviewer.snapshot.config.systemPrompt).toContain("coordinator_review_result");
+  expect(reviewer.snapshot.config.delegateOnly).toBe(true);
+  const investigator = await create(state.agentId!, "investigator");
+  expect(investigator.snapshot.config.systemPrompt).toBe("Existing guidance");
+  const claimed = await create(plain.id, "reviewer");
+  expect(claimed.snapshot.config.systemPrompt).toBe("Existing guidance");
 });

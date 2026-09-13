@@ -132,6 +132,7 @@ import { createWorkspaceLabelService } from "./workspace-labels/index.js";
 import { createGitHubService } from "../services/github-service.js";
 import { createPaseoWorktree as createRegisteredPaseoWorktree } from "./paseo-worktree-service.js";
 import { createWorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
+import type { CoordinatorMergesDeps } from "./coordinator/merges.js";
 import { CoordinatorService } from "./coordinator/coordinator-service.js";
 import { ProjectSetupProposals } from "./coordinator/project-setup.js";
 import { createPaseoWorktreeWorkflow } from "./worktree-session.js";
@@ -488,6 +489,7 @@ export interface PaseoDaemon {
 export interface PaseoDaemonDependencies {
   /** Clock for durable coordinator decision/digest scheduling in isolated hosts. */
   coordinatorNow?: () => number;
+  coordinatorMergeForge?: CoordinatorMergesDeps["resolveForge"];
   accountBackend?: ConstructorParameters<typeof ProviderAccountService>[1];
   accountClient?: NonNullable<ConstructorParameters<typeof AgentManager>[0]["createAccountClient"]>;
   accountStoreOptions?: ProviderAccountStoreOptions;
@@ -1462,6 +1464,12 @@ export async function createPaseoDaemon(
   await coordinatorService.initializeRotation({
     providerSnapshotManager,
     schedules: () => scheduleService,
+  });
+  await coordinatorService.initializeMerges({
+    resolveForge: dependencies.coordinatorMergeForge,
+    archiveWorkspace: async (workspaceId) => {
+      await archiveWorkspaceByIdExternal(workspaceId, `coordinator-merge:${workspaceId}`);
+    },
   });
   await coordinatorService.initializeAutomation({
     cleanupNeverStartedWorkspace: async ({ workerAgentId, workspaceId, cwd }) => {

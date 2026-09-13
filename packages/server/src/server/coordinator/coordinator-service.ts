@@ -1,3 +1,7 @@
+import { ensurePolicyCommit, resolveCommittedPolicyBase } from "./committed-policy.js";
+import { capCoordinatorTrust } from "./merge-policy.js";
+import { CoordinatorMerges, type CoordinatorMergesDeps, type MergeActor } from "./merges.js";
+import { getCurrentBranch, getMainRepoRoot } from "../../utils/checkout-git.js";
 import { CoordinatorAutomation, GoalExecutionDeferred } from "./automation.js";
 import { executeCoordinatorJudgment } from "./judgment-execution.js";
 import type { GoalRecord } from "./goals.js";
@@ -612,6 +616,10 @@ export class CoordinatorService {
   private readonly memory: CoordinatorMemory;
   private rotation: CoordinatorRotation | null = null;
   private automation: CoordinatorAutomation | null = null;
+  private merges: CoordinatorMerges | null = null;
+  private mergeReconcileAt: number | null = null;
+  private mergeMaintenance: Promise<void> | null = null;
+  private readonly mergeQuestions = new Map<string, { agentId: string; unregister: () => void }>();
   private readonly rotationTrigger = new CoordinatorRotationTrigger();
   private readonly pendingRotations = new Map<
     string,
@@ -865,6 +873,7 @@ export class CoordinatorService {
     this.started = true;
     try {
       await this.rotation?.resume();
+      this.requestMergeReconcile();
       await this.reconcileOnLoad();
       const global = await this.global.get();
       if (!global.agentId || !this.isRotatingAgentTarget(global.agentId))
@@ -900,9 +909,12 @@ export class CoordinatorService {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    await this.mergeMaintenance;
     setAgentPromptDecorator(this.agentManager, null);
     await this.rotation?.stop();
     await this.decisions.stop();
+    for (const question of this.mergeQuestions.values()) question.unregister();
+    this.mergeQuestions.clear();
     this.stopProjectSummaries();
     this.changeRequestPoll?.stop();
     if (this.stallSweepTimer) {
@@ -927,6 +939,285 @@ export class CoordinatorService {
         this.logger.warn({ err: error, projectId }, "Failed to persist coordinator usage"),
       );
     }
+  }
+
+  async initializeMerges(input: {
+    archiveWorkspace: (workspaceId: string) => Promise<void>;
+    resolveForge?: CoordinatorMergesDeps["resolveForge"];
+  }): Promise<void> {
+    this.merges = new CoordinatorMerges({
+      paseoHome: this.paseoHome,
+      now: this.now,
+      resolveActor: (agentId) => this.resolveMergeActor(agentId),
+      resolveForge:
+        input.resolveForge ??
+        (async (cwd) => {
+          const forge = await this.workspaceGitService?.resolveForge(cwd);
+          if (!forge) throw new CoordinatorRequestError("No supported forge for this project");
+          return forge.service;
+        }),
+      policyBase: (projectId) => this.mergePolicyBase(projectId),
+      ensurePolicyCommit,
+      workspaceForHead: (projectId, head) => this.mergeWorkspaceForHead(projectId, head),
+      authorizeMerge: (projectId, coordinatorAgentId, run) =>
+        this.withProjectLock(projectId, async () => {
+          const state = await this.getState(projectId);
+          if (
+            this.stopped ||
+            !state?.enabled ||
+            state.agentId !== coordinatorAgentId ||
+            this.isRotatingAgentTarget(coordinatorAgentId)
+          )
+            return undefined;
+          return run();
+        }),
+      appendDone: (projectId, text, refs, dedupe) =>
+        this.appendDoneRow(
+          projectId,
+          text,
+          { agentId: refs.agentId, url: refs.artifactUrl },
+          dedupe,
+        ),
+      authorizeRecovery: (projectId, run) =>
+        this.withProjectLock(projectId, async () => {
+          const state = await this.getState(projectId);
+          if (
+            this.stopped ||
+            !state?.enabled ||
+            !state.agentId ||
+            this.isRotatingAgentTarget(state.agentId)
+          )
+            return undefined;
+          return run();
+        }),
+      archiveWorkspace: async (workspaceId, expected) => {
+        const workspace = await this.workspaceRegistry.get(workspaceId);
+        if (workspace?.archivedAt) return;
+        if (
+          !workspace ||
+          !expected.cwd ||
+          workspace.projectId !== expected.projectId ||
+          !areEquivalentPaths(workspace.cwd, expected.cwd)
+        )
+          throw new CoordinatorRequestError(
+            "The merged workspace has been removed or repurposed; archive it manually",
+          );
+        const current = await this.mergeWorkspaceForHead(expected.projectId, expected.head);
+        if (!current || current.workspaceId !== workspaceId)
+          throw new CoordinatorRequestError(
+            "The merged branch no longer has its original dedicated workspace",
+          );
+        await input.archiveWorkspace(workspaceId);
+      },
+      attention: async (projectId, reason, dedupe) => {
+        if (this.stopped) return;
+        // Merge preparation reports definitive policy failures outside mutation locks.
+        if (dedupe.startsWith("merge-policy:"))
+          await this.withProjectLock(projectId, async () => {
+            const state = await this.getState(projectId);
+            if (state?.trustLevel === "autopilot")
+              await this.updateProjectCoordinatorLocked(
+                { projectId, trustLevel: "ship" },
+                state.trustInherited,
+              );
+          });
+        await this.appendMergeAttention(projectId, reason, dedupe);
+      },
+    });
+    await this.merges.initialize();
+  }
+
+  private requireMerges(): CoordinatorMerges {
+    if (!this.merges) throw new CoordinatorRequestError("Coordinator merging is unavailable");
+    return this.merges;
+  }
+  recordCoordinatorReview(input: Parameters<CoordinatorMerges["recordReview"]>[0]) {
+    return this.requireMerges().recordReview(input);
+  }
+  recordCoordinatorCreatedPullRequest(input: Parameters<CoordinatorMerges["recordCreated"]>[0]) {
+    return this.requireMerges().recordCreated(input);
+  }
+  mergeCoordinatorPullRequest(input: Parameters<CoordinatorMerges["merge"]>[0]) {
+    return this.requireMerges().merge(input);
+  }
+
+  private async resolveMergeActor(agentId: string): Promise<MergeActor> {
+    const record = await this.agentStorage.get(agentId);
+    const live = this.agentManager.getAgent(agentId);
+    const actor = live && live.lifecycle !== "closed" ? live : record;
+    const labels = actor?.labels;
+    if (!actor || !labels || !actor.workspaceId)
+      throw new CoordinatorRequestError("Merge actor not found");
+    const ancestor = await nearestCoordinatorAncestor(
+      { agentManager: this.agentManager, agentStorage: this.agentStorage },
+      agentId,
+    );
+    if (!ancestor || getCoordinatorRole(ancestor.node.labels) !== COORDINATOR_PROJECT_ROLE)
+      throw new CoordinatorRequestError("A project coordinator lineage is required");
+    const projectId = getCoordinatorProjectIdFromLabels(ancestor.node.labels);
+    if (!projectId) throw new CoordinatorRequestError("Project ownership is missing");
+    await this.assertVisibleProject(projectId);
+    const state = await this.getState(projectId);
+    if (
+      this.stopped ||
+      !state?.enabled ||
+      state.agentId !== ancestor.node.agentId ||
+      this.isRotatingAgentTarget(state.agentId)
+    )
+      throw new CoordinatorRequestError("Project coordinator ownership is inactive");
+    const workspace = await this.workspaceRegistry.get(actor.workspaceId);
+    if (!workspace || workspace.projectId !== projectId)
+      throw new CoordinatorRequestError("Merge actor belongs to another project workspace");
+    let kind: MergeActor["kind"] = "other";
+    if (agentId === state.agentId) kind = "coordinator";
+    else if (getCoordinatorSubagentKind(labels) === "reviewer") kind = "reviewer";
+    return {
+      projectId,
+      coordinatorAgentId: state.agentId,
+      trustLevel: state.trustLevel,
+      cwd: actor.cwd,
+      workspaceId: actor.workspaceId,
+      kind,
+    };
+  }
+
+  private async mergePolicyBase(projectId: string): Promise<{ cwd: string; baseSha: string }> {
+    const project = await this.projectRegistry.get(projectId);
+    if (!project || project.hidden || project.archivedAt)
+      throw new CoordinatorRequestError("Project policy repository is unavailable");
+    return resolveCommittedPolicyBase(project.rootPath);
+  }
+  private async mergeWorkspaceForHead(
+    projectId: string,
+    head: string,
+  ): Promise<{ workspaceId: string; cwd: string } | null> {
+    const project = await this.projectRegistry.get(projectId);
+    if (!project || project.hidden || project.archivedAt) return null;
+    const owner = await this.getState(projectId);
+    const ownerRecord = owner?.agentId ? await this.agentStorage.get(owner.agentId) : null;
+    const matches: Array<{ workspaceId: string; cwd: string }> = [];
+    for (const workspace of await this.workspaceRegistry.list()) {
+      if (
+        workspace.projectId !== projectId ||
+        workspace.kind !== "worktree" ||
+        workspace.archivedAt ||
+        workspace.workspaceId === ownerRecord?.workspaceId ||
+        areEquivalentPaths(workspace.cwd, project.rootPath)
+      )
+        continue;
+      try {
+        if ((await getCurrentBranch(workspace.cwd)) !== head) continue;
+        const main = await getMainRepoRoot(workspace.cwd);
+        if (!areEquivalentPaths(main, await getMainRepoRoot(project.rootPath))) continue;
+        matches.push({ workspaceId: workspace.workspaceId, cwd: workspace.cwd });
+      } catch {
+        /* Missing worktrees cannot establish provenance. */
+      }
+    }
+    return matches.length === 1 ? matches[0]! : null;
+  }
+
+  private async appendMergeAttention(
+    projectId: string,
+    question: string,
+    dedupe: string,
+  ): Promise<void> {
+    const id = dedupe.startsWith("merge-policy:") ? `merge-policy:${projectId}` : dedupe;
+    await this.withBoardLock(projectId, async () => {
+      const board = await this.getBoard(projectId);
+      const prior = board.attention.find((entry) => entry.id === id);
+      const row = { id, question, askedAt: prior?.askedAt ?? new Date(this.now()).toISOString() };
+      await this.saveBoard(projectId, {
+        ...board,
+        attention: [...board.attention.filter((entry) => entry.id !== id), row],
+      });
+    });
+    this.queueBoardRefresh(projectId);
+  }
+
+  private async capProjectMergeTrust(
+    projectId: string,
+    requested: CoordinatorTrustLevel,
+  ): Promise<CoordinatorTrustLevel> {
+    if (!this.merges) return requested;
+    const policy = this.merges.cachedProjectPolicy(projectId);
+    if (!policy || policy.unavailable) {
+      // An outage cannot rewrite configured trust. Newly requested elevation is
+      // still bounded by durable verified evidence or the existing saved level.
+      const prior = await this.getState(projectId);
+      const levels: CoordinatorTrustLevel[] = ["observe", "propose", "ship", "autopilot"];
+      const verified = await this.merges.lastVerifiedCap(projectId);
+      return levels[
+        Math.min(
+          levels.indexOf(requested),
+          levels.indexOf(prior?.trustLevel ?? "ship"),
+          levels.indexOf(verified ?? prior?.trustLevel ?? "ship"),
+        )
+      ]!;
+    }
+    const capped = capCoordinatorTrust(requested, policy);
+    if (requested === "autopilot" && !policy.policy)
+      await this.appendMergeAttention(
+        projectId,
+        `Autopilot is unavailable: ${policy.reason}. Check the committed default-branch .paseo/coordinator.yml.`,
+        `merge-policy:${projectId}`,
+      );
+    if (policy.policy && requested === "autopilot") {
+      await this.withBoardLock(projectId, async () => {
+        const board = await this.getBoard(projectId);
+        const attention = board.attention.filter(
+          (entry) => entry.id !== `merge-policy:${projectId}`,
+        );
+        if (attention.length !== board.attention.length)
+          await this.saveBoard(projectId, { ...board, attention });
+      });
+    }
+    return capped;
+  }
+  private requestMergeReconcile(): void {
+    if (this.mergeMaintenance || !this.merges || this.stopped) return;
+    this.mergeMaintenance = this.reconcileMergePolicies()
+      .catch((err) => {
+        this.logger.warn({ err }, "Coordinator merge maintenance failed");
+      })
+      .finally(() => {
+        this.mergeMaintenance = null;
+      });
+  }
+  /** Explicit refresh seam; ordinary schedule ticks launch this without awaiting network. */
+  async reconcileMergePolicies(force = false): Promise<void> {
+    if (!this.merges) return;
+    const now = this.now();
+    if (
+      !force &&
+      this.mergeReconcileAt !== null &&
+      now - this.mergeReconcileAt < (this.changeRequestPollIntervalMs ?? 120000)
+    )
+      return;
+    this.mergeReconcileAt = now;
+    for (const projectId of await this.store.listProjectIds()) {
+      if (this.stopped) break;
+      if (!(await this.getState(projectId))?.enabled) continue;
+      await this.merges.projectPolicy(projectId);
+      await this.withProjectLock(projectId, async () => {
+        const state = await this.getState(projectId);
+        if (this.stopped || !state?.enabled) return;
+        const trustLevel = await this.capProjectMergeTrust(projectId, state.trustLevel);
+        if (trustLevel !== state.trustLevel)
+          await this.updateProjectCoordinatorLocked(
+            { projectId, trustLevel },
+            state.trustInherited,
+          );
+      });
+    }
+    if (!this.stopped) await this.merges.reconcile();
+  }
+
+  private async prefetchInheritedMergePolicies(): Promise<void> {
+    if (!this.merges) return;
+    for (const projectId of await this.store.listProjectIds())
+      if ((await this.getState(projectId))?.trustInherited)
+        await this.merges.projectPolicy(projectId);
   }
 
   async initializeRotation(
@@ -1532,6 +1823,7 @@ export class CoordinatorService {
   /** Driven by the daemon schedule tick, also available to the isolated daemon harness. */
   async tickDecisions(): Promise<void> {
     if (this.started && !this.stopped) {
+      this.requestMergeReconcile();
       await this.automation?.tick();
       await this.decisions.tick();
       await this.sweepStalledSessions();
@@ -1589,6 +1881,12 @@ export class CoordinatorService {
     profile: CoordinatorProfileSelection;
     trustLevel?: CoordinatorTrustLevel;
   }): Promise<GlobalCoordinatorState> {
+    const beforePolicy = await this.global.get();
+    if (
+      input.trustLevel !== undefined &&
+      !coordinatorTrustAtLeast(beforePolicy.trustLevel, input.trustLevel)
+    )
+      await this.prefetchInheritedMergePolicies();
     return this.withGlobalLock(async () => {
       this.assertAgentMcpEndpoint("required");
       const state = await this.global.enable(input);
@@ -1608,6 +1906,12 @@ export class CoordinatorService {
     profile?: CoordinatorProfileSelection;
     trustLevel?: CoordinatorTrustLevel;
   }): Promise<GlobalCoordinatorState> {
+    const beforePolicy = await this.global.get();
+    if (
+      input.trustLevel !== undefined &&
+      !coordinatorTrustAtLeast(beforePolicy.trustLevel, input.trustLevel)
+    )
+      await this.prefetchInheritedMergePolicies();
     return this.withGlobalLock(async () => {
       const state = await this.global.update(input);
       this.rearmRotation(
@@ -1657,6 +1961,7 @@ export class CoordinatorService {
   async enableProjectCoordinator(
     input: EnableProjectCoordinatorInput,
   ): Promise<ProjectCoordinatorState> {
+    await this.merges?.projectPolicy(input.projectId);
     const state = await this.withGlobalLock(() =>
       this.enableProjectCoordinatorAtCurrentDefault(input),
     );
@@ -1680,7 +1985,10 @@ export class CoordinatorService {
       }
       const scope = input.scope ?? "everything";
       const global = await this.global.get();
-      const trustLevel = input.trustLevel ?? global.trustLevel;
+      const trustLevel = await this.capProjectMergeTrust(
+        input.projectId,
+        input.trustLevel ?? global.trustLevel,
+      );
       const now = new Date().toISOString();
       const records = await this.agentStorage.list();
       let state = (await this.getState(input.projectId)) ?? this.newState(input.projectId, now);
@@ -1763,6 +2071,7 @@ export class CoordinatorService {
         // The trust label is mirrored before the load so the tool gate and the
         // launch env both see the new level.
         await this.syncTrustLabel(agentId, trustLevel);
+        await this.syncTrustPrompt(state, trustLevel);
         const record = await this.agentStorage.get(agentId);
         this.assertAgentMcpEndpoint(record?.config?.paseoTools);
         await ensureUnarchivedAgentLoaded(agentId, {
@@ -1820,7 +2129,28 @@ export class CoordinatorService {
   async updateProjectCoordinator(
     input: UpdateProjectCoordinatorInput,
   ): Promise<ProjectCoordinatorState | null> {
-    return this.withProjectLock(input.projectId, () => this.updateProjectCoordinatorLocked(input));
+    const beforePolicy = await this.getState(input.projectId);
+    // A requested reduction takes effect without waiting for any network lookup.
+    if (
+      !input.trustLevel ||
+      !beforePolicy ||
+      !coordinatorTrustAtLeast(beforePolicy.trustLevel, input.trustLevel)
+    )
+      await this.merges?.projectPolicy(input.projectId);
+    return this.withProjectLock(input.projectId, async () => {
+      const current = await this.getState(input.projectId);
+      if (
+        input.trustLevel &&
+        beforePolicy?.trustLevel !== current?.trustLevel &&
+        current &&
+        coordinatorTrustAtLeast(input.trustLevel, current.trustLevel) &&
+        input.trustLevel !== current.trustLevel
+      )
+        throw new CoordinatorRequestError(
+          "Coordinator trust changed during policy verification; review the current level and retry",
+        );
+      return this.updateProjectCoordinatorLocked(input);
+    });
   }
 
   /** Caller holds this project's lock. */
@@ -1853,8 +2183,11 @@ export class CoordinatorService {
       next.fallbackProfile = input.fallbackProfile ?? undefined;
     if (input.rotationThresholdPercent !== undefined)
       next.rotationThresholdPercent = input.rotationThresholdPercent;
+    next.trustLevel = await this.capProjectMergeTrust(
+      input.projectId,
+      input.trustLevel ?? state.trustLevel,
+    );
     if (input.trustLevel !== undefined) {
-      next.trustLevel = input.trustLevel;
       next.trustInherited = trustInherited;
     }
     if (input.scope !== undefined) next.scope = input.scope;
@@ -1872,15 +2205,15 @@ export class CoordinatorService {
     // Stepping down applies instantly: the tool gate reads the label on every
     // call, and the spawn guard reads the persisted state, so mirroring the
     // label here is what makes a lowered level take effect mid-session.
-    if (input.trustLevel !== undefined && input.trustLevel !== state.trustLevel) {
-      await this.syncTrustLabel(next.agentId, input.trustLevel);
+    if (next.trustLevel !== state.trustLevel) {
+      await this.syncTrustLabel(next.agentId, next.trustLevel);
       // The system prompt carries the level's rules ("you may NOT spawn") —
       // leave it stale and a raised coordinator keeps refusing the workflow
       // the label now permits.
-      await this.syncTrustPrompt(next, input.trustLevel);
+      await this.syncTrustPrompt(next, next.trustLevel);
       await this.appendWakeRow(
         input.projectId,
-        `Trust: now at ${capitalizeTrust(input.trustLevel)}`,
+        `Trust: now at ${capitalizeTrust(next.trustLevel)}`,
       );
     }
     this.queueBoardRefresh(input.projectId);
@@ -2619,6 +2952,7 @@ export class CoordinatorService {
         .filter((workspace) => workspace.projectId === projectId && !workspace.archivedAt)
         .map((workspace) => workspace.workspaceId),
     );
+    this.reconcileMergeAttention(projectId, state, board);
     const agents = this.agentManager.listAgents();
     const covered = agents
       .filter(
@@ -2663,6 +2997,68 @@ export class CoordinatorService {
       enabled,
       ...(usage ? { usage } : {}),
     };
+  }
+
+  /** Rebuild daemon-owned acknowledgement requests from durable board issues. */
+  private reconcileMergeAttention(
+    projectId: string,
+    state: PersistedProjectCoordinator | null,
+    board: PersistedCoordinatorBoard,
+  ): void {
+    const owner =
+      state?.enabled && state.agentId ? this.agentManager.getAgent(state.agentId) : null;
+    const eligible =
+      owner && owner.lifecycle !== "closed" && !this.isRotatingAgentTarget(owner.id) ? owner : null;
+    for (const [key, question] of this.mergeQuestions) {
+      if (!key.startsWith(`${projectId}:`)) continue;
+      if (
+        eligible?.id === question.agentId &&
+        board.attention.some((entry) => key === `${projectId}:${entry.id}`)
+      )
+        continue;
+      question.unregister();
+      this.mergeQuestions.delete(key);
+    }
+    if (!eligible) return;
+    for (const attention of board.attention) {
+      const key = `${projectId}:${attention.id}`;
+      if (this.mergeQuestions.has(key)) continue;
+      const unregister = this.agentManager.registerDaemonQuestion({
+        agentId: eligible.id,
+        request: {
+          id: attention.id,
+          kind: "question",
+          provider: eligible.provider,
+          name: "coordinator_merge_attention",
+          title: attention.question,
+          requestedAt: attention.askedAt,
+          actions: [
+            {
+              id: "dismiss",
+              label: "Dismiss",
+              behavior: "deny",
+              response: { behavior: "deny", selectedActionId: "dismiss" },
+            },
+          ],
+        },
+        respond: async (response) => {
+          if (response.selectedActionId !== "dismiss" || response.behavior !== "deny")
+            throw new CoordinatorRequestError(
+              "Only Dismiss acknowledges this issue; it cannot authorize a merge",
+            );
+          await this.withBoardLock(projectId, async () => {
+            const current = await this.getBoard(projectId);
+            await this.saveBoard(projectId, {
+              ...current,
+              attention: current.attention.filter((entry) => entry.id !== attention.id),
+            });
+          });
+          this.mergeQuestions.delete(key);
+          this.queueBoardRefresh(projectId);
+        },
+      });
+      this.mergeQuestions.set(key, { agentId: eligible.id, unregister });
+    }
   }
 
   private buildNeedsYouRows(
