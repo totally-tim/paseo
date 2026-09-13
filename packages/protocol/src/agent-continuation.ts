@@ -20,5 +20,10 @@ export const AgentContinuationStatusSchema = z.object({
   previousAgentId: z.string().optional(),
   previousAccountId: z.string().optional(),
   accountId: z.string().optional(),
+  /**
+   * Permitted accounts currently holding a banked provider reset credit. Present only
+   * while the task waits for capacity and at least one permitted account has one.
+   */
+  resetCreditAccountIds: z.array(z.string()).optional(),
 });
 export type AgentContinuationStatus = z.infer<typeof AgentContinuationStatusSchema>;

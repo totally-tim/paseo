@@ -29,12 +29,14 @@ const StoreSchema = z.object({
   accounts: z.array(ProviderAccountSchema),
   policy: AccountPolicySchema.nullable(),
   automaticAccounts: z.record(z.string(), z.string()).optional(),
+  resetCreditKeys: z.record(z.string(), z.string()).optional(),
 });
 
 export class ProviderAccountStore {
   private accounts: ProviderAccount[] = [];
   private policy: AccountPolicy | null = null;
   private automaticAccounts: Record<string, string> = {};
+  private resetCreditKeys: Record<string, string> = {};
   private writeQueue: Promise<unknown> = Promise.resolve();
   /** Set when the metadata on disk must not be replaced; every mutation refuses. */
   private readOnlyReason: string | null = null;
@@ -68,6 +70,7 @@ export class ProviderAccountStore {
       this.accounts = data.accounts;
       this.policy = data.policy;
       this.automaticAccounts = data.automaticAccounts ?? {};
+      this.resetCreditKeys = data.resetCreditKeys ?? {};
     } catch {
       // Truncated bytes, or a file a newer daemon wrote, must not stop this one from starting.
       // Keep them for inspection; the accounts are re-added rather than silently overwritten.
@@ -104,6 +107,30 @@ export class ProviderAccountStore {
       const automaticAccounts = { ...this.automaticAccounts, [key]: id };
       await this.write({ accounts: this.accounts, policy: this.policy, automaticAccounts });
       this.automaticAccounts = automaticAccounts;
+    });
+  }
+
+  /** Persist before contacting the provider; a restart must retry the same spend. */
+  async resetCreditKey(accountId: string): Promise<string> {
+    return this.serialize(async () => {
+      this.get(accountId);
+      const existing = this.resetCreditKeys[accountId];
+      if (existing) return existing;
+      const key = randomUUID();
+      const resetCreditKeys = { ...this.resetCreditKeys, [accountId]: key };
+      await this.write({ accounts: this.accounts, policy: this.policy, resetCreditKeys });
+      this.resetCreditKeys = resetCreditKeys;
+      return key;
+    });
+  }
+
+  async completeResetCredit(accountId: string, key: string): Promise<void> {
+    await this.serialize(async () => {
+      if (this.resetCreditKeys[accountId] !== key) return;
+      const resetCreditKeys = { ...this.resetCreditKeys };
+      delete resetCreditKeys[accountId];
+      await this.write({ accounts: this.accounts, policy: this.policy, resetCreditKeys });
+      this.resetCreditKeys = resetCreditKeys;
     });
   }
 
@@ -205,7 +232,7 @@ export class ProviderAccountStore {
     });
   }
 
-  private serialize(work: () => Promise<void>): Promise<void> {
+  private serialize<T>(work: () => Promise<T>): Promise<T> {
     const next = this.writeQueue.then(work, work);
     this.writeQueue = next.catch(() => undefined);
     return next;
@@ -222,7 +249,11 @@ export class ProviderAccountStore {
       await fs.writeFile(
         temporary,
         JSON.stringify(
-          { ...data, automaticAccounts: data.automaticAccounts ?? this.automaticAccounts },
+          {
+            ...data,
+            automaticAccounts: data.automaticAccounts ?? this.automaticAccounts,
+            resetCreditKeys: data.resetCreditKeys ?? this.resetCreditKeys,
+          },
           null,
           2,
         ),

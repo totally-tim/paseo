@@ -3804,6 +3804,8 @@ export const ServerInfoStatusPayloadSchema = z
         providerAccounts: z.boolean().optional(),
         // COMPAT(providerAccountOrdering): added after v1.2.0; remove after 2027-03-08.
         providerAccountOrdering: z.boolean().optional(),
+        // COMPAT(providerAccountResetCredits): added after v1.2.0; remove after 2027-03-08.
+        providerAccountResetCredits: z.boolean().optional(),
         agentContinuation: z.boolean().optional(),
         // COMPAT(agentForkContextCursor): added in v0.1.108, remove gate after 2027-01-14.
         agentForkContextCursor: z.boolean().optional(),
@@ -6322,6 +6324,13 @@ export const ProviderUsageDetailSchema = z.object({
   tone: ProviderUsageToneSchema.optional(),
 });
 
+/** Banked reset credits a provider granted the account (Codex only today). */
+export const ProviderUsageResetCreditsSchema = z.object({
+  availableCount: z.number().int().nonnegative(),
+  nextExpiresAt: z.string().nullable().optional(),
+});
+export type ProviderUsageResetCredits = z.infer<typeof ProviderUsageResetCreditsSchema>;
+
 export const ProviderUsageSchema = z.object({
   providerId: z.string(),
   displayName: z.string(),
@@ -6333,6 +6342,7 @@ export const ProviderUsageSchema = z.object({
   windows: z.array(ProviderUsageWindowSchema),
   balances: z.array(ProviderUsageBalanceSchema).optional(),
   details: z.array(ProviderUsageDetailSchema).optional(),
+  resetCredits: ProviderUsageResetCreditsSchema.optional(),
   error: z.string().nullable().optional(),
 });
 
@@ -6365,6 +6375,16 @@ export const ProviderAccountsListResponseSchema = z.object({
     ),
   }),
 });
+export const ProviderAccountResetCreditOutcomeSchema = z.enum([
+  "reset",
+  "nothingToReset",
+  "noCredit",
+  "alreadyRedeemed",
+]);
+export type ProviderAccountResetCreditOutcome = z.infer<
+  typeof ProviderAccountResetCreditOutcomeSchema
+>;
+
 export const ProviderAccountsManageResponseSchema = z.object({
   type: z.literal("provider.accounts.manage.response"),
   payload: z.object({
@@ -6372,6 +6392,17 @@ export const ProviderAccountsManageResponseSchema = z.object({
     error: z.string().nullable(),
     account: ProviderAccountSchema.nullable(),
     login: AccountLoginSchema.nullable(),
+    /**
+     * Result of a `consume-reset-credit` operation. `confirmed` is false when the
+     * provider reported the reset but the follow-up usage read could not confirm it.
+     */
+    resetCredit: z
+      .object({
+        outcome: ProviderAccountResetCreditOutcomeSchema,
+        confirmed: z.boolean(),
+      })
+      .nullable()
+      .optional(),
   }),
 });
 

@@ -21,6 +21,8 @@ import { ProviderUsageCard } from "@/provider-usage/card";
 import { settingsStyles } from "@/styles/settings";
 import { useProviderAccounts } from "./use-provider-accounts";
 import { openAccountForm } from "./account-form-model";
+import { PooledAccountUsage } from "./pooled-usage-card";
+import { ResetCreditControl } from "./reset-credit";
 
 const ThemedPencil = withUnistyles(Pencil);
 const ThemedArrowUp = withUnistyles(ArrowUp);
@@ -134,6 +136,7 @@ export function ProviderAccountsSettingsSection({ serverId }: { serverId: string
           {error ?? t("providerAccounts.loadError")}
         </Text>
       ) : null}
+      <PooledAccountUsage serverId={serverId} />
       <AccountList serverId={serverId} edit={setEditing} perform={perform} pending={pending} />
       <SelectField
         label={t("providerAccounts.unknownUsage")}
@@ -299,7 +302,7 @@ function AccountRow({
       {account.removedAt ? <Text style={styles.text}>{t("providerAccounts.removed")}</Text> : null}
       {account.error ? <Text style={styles.error}>{account.error}</Text> : null}
       <AccountCapacityStatus account={account} usage={usage} />
-      <AccountRowUsage account={account} entry={usageEntry} />
+      <AccountRowUsage account={account} entry={usageEntry} serverId={serverId} />
     </View>
   );
 }
@@ -307,9 +310,11 @@ function AccountRow({
 function AccountRowUsage({
   account,
   entry,
+  serverId,
 }: {
   account: ProviderAccount;
   entry: NonNullable<ReturnType<typeof useProviderAccounts>["data"]>["usage"][number] | undefined;
+  serverId: string;
 }) {
   const { t } = useTranslation();
   if (!entry || account.removedAt || account.authState !== "ready") return null;
@@ -317,6 +322,7 @@ function AccountRowUsage({
     <>
       {entry.stale ? <Text style={styles.text}>{t("providerAccounts.stale")}</Text> : null}
       <ProviderUsageCard usage={entry.usage} compact showIdentity={false} showResetDates />
+      <ResetCreditControl serverId={serverId} accountId={account.id} />
     </>
   );
 }

@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { StyleSheet } from "react-native-unistyles";
 import { applicableAccountUsage } from "./account-view-model";
 import { ProviderUsageCard } from "@/provider-usage/card";
+import { ResetCreditControl } from "./reset-credit";
 import { useProviderAccounts } from "./use-provider-accounts";
 
 export function AccountUsageTooltip({
@@ -38,6 +39,7 @@ export function AccountUsageTooltip({
       ) : (
         <Text style={styles.detail}>{t("providerAccounts.usageUnavailable")}</Text>
       )}
+      <ResetCreditControl serverId={serverId} accountId={accountId} />
       {entry?.stale ? (
         <Text style={styles.detail}>{t("providerAccounts.lastReported")}</Text>
       ) : null}

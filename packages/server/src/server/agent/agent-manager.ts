@@ -400,6 +400,8 @@ interface ManagedAgentBase {
   capabilities: AgentCapabilityFlags;
   config: AgentSessionConfig;
   runtimeInfo?: AgentRuntimeInfo;
+  // Runtime-only value after session-open hooks. Empty disables an inherited default.
+  spawnIsolationOverride?: string;
   createdAt: Date;
   updatedAt: Date;
   availableModes: AgentMode[];
@@ -1588,6 +1590,7 @@ export class AgentManager {
     }
     await this.requireExternalMcpSupport(session, storedConfig);
     const agent = await this.registerSession(session, storedConfig, resolvedAgentId, {
+      spawnIsolationOverride: launchContext.env?.PASEO_AGENT_SPAWN_ISOLATION,
       labels: options.labels,
       initialTitle: options.initialTitle,
       workspaceId: options.workspaceId,
@@ -1739,6 +1742,7 @@ export class AgentManager {
     await this.requireExternalMcpSupport(session, storedConfig);
     return this.registerSession(session, storedConfig, resolvedAgentId, {
       ...options,
+      spawnIsolationOverride: launchContext.env?.PASEO_AGENT_SPAWN_ISOLATION,
       persistence: handle,
     });
   }
@@ -1848,6 +1852,7 @@ export class AgentManager {
 
       handedToRegistration = true;
       const agent = await this.registerSession(imported.session, importedConfig, resolvedAgentId, {
+        spawnIsolationOverride: launchContext.env?.PASEO_AGENT_SPAWN_ISOLATION,
         labels: input.labels,
         workspaceId: input.workspaceId,
         timelineRows,
@@ -1992,6 +1997,7 @@ export class AgentManager {
       // Preserve existing labels and timeline during reload.
       handedToRegistration = true;
       return this.registerSession(session, storedConfig, agentId, {
+        spawnIsolationOverride: launchContext.env?.PASEO_AGENT_SPAWN_ISOLATION,
         labels: existing.labels,
         workspaceId: existing.workspaceId,
         owner: existing.owner,
@@ -3883,6 +3889,7 @@ export class AgentManager {
     config: AgentSessionConfig,
     agentId: string,
     options?: {
+      spawnIsolationOverride?: string;
       createdAt?: Date;
       updatedAt?: Date;
       lastUserMessageAt?: Date | null;
@@ -4040,6 +4047,7 @@ export class AgentManager {
     durableTimelineHasRows: boolean;
     options:
       | {
+          spawnIsolationOverride?: string;
           createdAt?: Date;
           updatedAt?: Date;
           lastUserMessageAt?: Date | null;
@@ -4065,6 +4073,7 @@ export class AgentManager {
       capabilities: session.capabilities,
       config,
       runtimeInfo: undefined,
+      spawnIsolationOverride: options?.spawnIsolationOverride,
       lifecycle: "initializing",
       createdAt: options?.createdAt ?? now,
       updatedAt: options?.updatedAt ?? now,
@@ -4720,46 +4729,8 @@ export class AgentManager {
   }): Promise<void> | undefined {
     const { agent, event, options, isForegroundEvent, eventTurnId, terminalDisposition, flags } =
       params;
+    if (this.applyStreamAgentState(agent, event, flags)) return undefined;
     switch (event.type) {
-      case "thread_started":
-        this.onStreamThreadStarted(agent);
-        return undefined;
-      case "usage_updated":
-        agent.lastUsage = event.usage;
-        this.emitState(agent);
-        return undefined;
-      case "mode_changed":
-        agent.currentModeId = event.currentModeId;
-        agent.availableModes = event.availableModes;
-        if (agent.runtimeInfo) {
-          agent.runtimeInfo = { ...agent.runtimeInfo, modeId: event.currentModeId };
-        }
-        flags.shouldDispatchEvent = false;
-        this.emitState(agent);
-        return undefined;
-      case "model_changed":
-        agent.runtimeInfo = event.runtimeInfo;
-        if (!agent.persistence && event.runtimeInfo.sessionId) {
-          agent.persistence = attachPersistenceCwd(
-            { provider: agent.provider, sessionId: event.runtimeInfo.sessionId },
-            agent.cwd,
-          );
-        }
-        agent.currentModeId = event.runtimeInfo.modeId ?? agent.currentModeId;
-        flags.shouldDispatchEvent = false;
-        this.emitState(agent);
-        return undefined;
-      case "thinking_option_changed":
-        agent.config.thinkingOptionId = event.thinkingOptionId ?? undefined;
-        if (agent.runtimeInfo) {
-          agent.runtimeInfo = {
-            ...agent.runtimeInfo,
-            thinkingOptionId: event.thinkingOptionId,
-          };
-        }
-        flags.shouldDispatchEvent = false;
-        this.emitState(agent);
-        return undefined;
       case "timeline":
         return this.onStreamTimelineEvent({ agent, event, options, flags });
       case "turn_completed":
@@ -4799,8 +4770,67 @@ export class AgentManager {
       case "permission_resolved":
         this.onStreamPermissionResolved({ agent, event, options, flags });
         return undefined;
+      case "account_rate_limits":
+        // The payload is raw provider output; it feeds the usage cache but never the stream.
+        flags.shouldDispatchEvent = false;
+        flags.shouldNotifyWaiters = false;
+        if (agent.config.accountId && !options?.fromHistory) {
+          this.accounts?.applyLiveUsage(agent.config.accountId, event.payload);
+        }
+        return undefined;
       default:
         return undefined;
+    }
+  }
+
+  /** Events that only update agent state. Returns true when the event was one of them. */
+  private applyStreamAgentState(
+    agent: ActiveManagedAgent,
+    event: AgentStreamEvent,
+    flags: StreamEventFlags,
+  ): boolean {
+    switch (event.type) {
+      case "thread_started":
+        this.onStreamThreadStarted(agent);
+        return true;
+      case "usage_updated":
+        agent.lastUsage = event.usage;
+        this.emitState(agent);
+        return true;
+      case "mode_changed":
+        agent.currentModeId = event.currentModeId;
+        agent.availableModes = event.availableModes;
+        if (agent.runtimeInfo) {
+          agent.runtimeInfo = { ...agent.runtimeInfo, modeId: event.currentModeId };
+        }
+        flags.shouldDispatchEvent = false;
+        this.emitState(agent);
+        return true;
+      case "model_changed":
+        agent.runtimeInfo = event.runtimeInfo;
+        if (!agent.persistence && event.runtimeInfo.sessionId) {
+          agent.persistence = attachPersistenceCwd(
+            { provider: agent.provider, sessionId: event.runtimeInfo.sessionId },
+            agent.cwd,
+          );
+        }
+        agent.currentModeId = event.runtimeInfo.modeId ?? agent.currentModeId;
+        flags.shouldDispatchEvent = false;
+        this.emitState(agent);
+        return true;
+      case "thinking_option_changed":
+        agent.config.thinkingOptionId = event.thinkingOptionId ?? undefined;
+        if (agent.runtimeInfo) {
+          agent.runtimeInfo = {
+            ...agent.runtimeInfo,
+            thinkingOptionId: event.thinkingOptionId,
+          };
+        }
+        flags.shouldDispatchEvent = false;
+        this.emitState(agent);
+        return true;
+      default:
+        return false;
     }
   }
 
