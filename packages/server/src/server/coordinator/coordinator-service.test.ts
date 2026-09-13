@@ -1744,6 +1744,65 @@ describe("resolveSubagentProfile", () => {
 });
 
 describe("migration review delegation regressions", () => {
+  test.each(
+    (["investigator", "reviewer", "implementer"] as const).flatMap((kind) =>
+      (["self", "sibling", "coordinator"] as const).map((target) => ({ kind, target })),
+    ),
+  )("$kind cannot change $target mode through a prompt", async ({ kind, target }) => {
+    const state = await harness.service.enableProjectCoordinator(
+      enableInput({ trustLevel: "ship" }),
+    );
+    const child = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      {
+        workspaceId: harness.workspace.workspaceId,
+        labels: {
+          [PARENT_AGENT_ID_LABEL]: state.agentId!,
+          [COORDINATOR_SUBAGENT_KIND_LABEL]: kind,
+        },
+      },
+    );
+    const sibling = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      {
+        workspaceId: harness.workspace.workspaceId,
+        labels: { [PARENT_AGENT_ID_LABEL]: state.agentId! },
+      },
+    );
+    const agentId = { self: child.id, sibling: sibling.id, coordinator: state.agentId! }[target];
+    const setMode = vi.spyOn(harness.agentManager, "setAgentMode");
+    const catalog = createPaseoToolCatalog({
+      agentManager: harness.agentManager,
+      agentStorage: harness.agentStorage,
+      providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+      callerAgentId: child.id,
+      coordinator: harness.service,
+      logger,
+    });
+    await expect(
+      catalog.executeTool("send_agent_prompt", {
+        agentId,
+        prompt: "change permissions",
+        sessionMode: "bypassPermissions",
+        background: true,
+        notifyOnFinish: false,
+      }),
+    ).rejects.toThrow(/runtime settings|descendants|read-only|ancestors/i);
+    expect(setMode).not.toHaveBeenCalled();
+
+    // Reports and ordinary steering retain the same targets without mode changes.
+    const response = await catalog.executeTool("send_agent_prompt", {
+      agentId,
+      prompt: "progress report",
+      background: true,
+      notifyOnFinish: false,
+    });
+    expect(response.structuredContent).toMatchObject({ success: true });
+    expect(setMode).not.toHaveBeenCalled();
+  });
+
   test.each(["investigator", "reviewer"] as const)(
     "%s cannot start or stop workspace scripts",
     async (kind) => {

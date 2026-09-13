@@ -2396,7 +2396,12 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     }) => {
       const shouldNotifyOnFinish = Boolean(callerAgentId && notifyOnFinish && background);
 
-      await assertAgentTargetAllowed(agentId);
+      await assertAgentTargetAllowed(agentId, {
+        action: sessionMode !== undefined ? "mutate" : "steer",
+      });
+      if (sessionMode !== undefined) {
+        await assertSelfActionAllowed(agentId, "change runtime settings");
+      }
       await sendPromptToAgent({
         agentManager,
         agentStorage,

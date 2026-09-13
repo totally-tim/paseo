@@ -2419,7 +2419,7 @@ export class CoordinatorService {
       const action = options?.action ?? "steer";
       // Mutating an ancestor severs the caller's own lineage: the archive
       // cascade would detach the child and drop it outside the boundary
-      // entirely. Steering upward (prompts, cancels) stays allowed — a
+      // entirely. Reporting upward through plain prompts stays allowed — a
       // delegated agent may report to the coordinator it rolls up to.
       if (
         action === "mutate" &&
