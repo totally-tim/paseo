@@ -184,8 +184,9 @@ do not merge app bundle contents. With the default `daemon.keepRunningAfterQuit:
 stops a daemon the desktop started and interrupts its agents. A preexisting CLI or launchd daemon
 continues running. Upgrade that daemon separately after permission to interrupt its agents.
 
-Confirm the swap took: `paseo daemon status` reports the approved fork version for both `CLI` and
-`Daemon Version`. A desktop-managed installation uses the bundled CLI shim. A launchd installation
+Confirm the swap took: `paseo --version` reports the CLI version, and `paseo daemon status`
+reports `Daemon Version`. Both must match the approved fork release. A desktop-managed
+installation uses the bundled CLI shim. A launchd installation
 uses its approved versioned launcher; invoking the desktop's **Install CLI** action replaces that
 link with the bundled shim, so recheck command resolution afterward.
 For desktop-managed installs, reinstall the CLI through the app after a bundle rename so the

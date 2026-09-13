@@ -35,6 +35,32 @@ describe("server config", () => {
     expect(config.mcpInjectIntoAgents).toBe(settings.expected);
   });
 
+  test.each([
+    { enabled: false, inject: undefined, cliEnabled: undefined, expected: false },
+    { enabled: false, inject: true, cliEnabled: undefined, expected: false },
+    { enabled: true, inject: true, cliEnabled: false, expected: false },
+    { enabled: false, inject: undefined, cliEnabled: true, expected: true },
+    { enabled: false, inject: false, cliEnabled: true, expected: false },
+  ])("respects the effective global MCP setting: %j", async (settings) => {
+    const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-config-mcp-disabled-"));
+    roots.push(paseoHome);
+    await writeFile(
+      path.join(paseoHome, "config.json"),
+      JSON.stringify({
+        version: 1,
+        daemon: { mcp: { enabled: settings.enabled, injectIntoAgents: settings.inject } },
+      }),
+    );
+
+    const config = loadConfig(paseoHome, {
+      env: {},
+      cli: { mcpEnabled: settings.cliEnabled },
+    });
+
+    expect(config.mcpEnabled).toBe(settings.cliEnabled ?? settings.enabled);
+    expect(config.mcpInjectIntoAgents).toBe(settings.expected);
+  });
+
   test("records when the daemon is managed by Paseo Desktop", async () => {
     const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-config-desktop-managed-"));
     roots.push(paseoHome);
