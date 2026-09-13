@@ -116,7 +116,7 @@ describe("CoordinatorStore", () => {
       },
     };
     await store.saveBoard("prj_a", board);
-    expect(await store.loadBoard("prj_a")).toEqual(board);
+    expect(await store.loadBoard("prj_a")).toEqual({ ...board, attention: [] });
   });
 
   test("loadState returns null for missing and unreadable files", async () => {
@@ -135,6 +135,7 @@ describe("CoordinatorStore", () => {
       version: 1,
       done: [],
       wake: null,
+      attention: [],
     });
   });
 
@@ -147,6 +148,7 @@ describe("CoordinatorStore", () => {
       version: 1,
       done: [],
       wake: null,
+      attention: [],
     });
     expect(await store.listProjectIds()).toEqual(["prj_a", "prj_b"]);
     expect(home).toBeTruthy();

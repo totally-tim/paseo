@@ -118,7 +118,7 @@ vi.mock("@/components/adaptive-modal-sheet", () => ({
 }));
 
 import { CoordinatorEnableSheet } from "./setup-row";
-import { buildDraftStoreKey } from "@/stores/draft-keys";
+import { buildCoordinatorBoardDraftKey, buildDraftStoreKey } from "@/stores/draft-keys";
 import { useDraftStore } from "@/stores/draft-store";
 import { useCoordinatorProjectStore } from "./project-store";
 
@@ -196,7 +196,7 @@ describe("coordinator setup sheet CI note", () => {
     expect(screen.queryByTestId("coordinator-setup-no-ci")).toBeNull();
   });
 
-  it("queues the add-CI ask into the new coordinator's composer draft on enable", async () => {
+  it("queues the add-CI ask in the project composer across coordinator rotation", async () => {
     const client = clientWith({
       coordinator: coordinatorRecord("coordinator-agent-1"),
       ciConfigured: false,
@@ -211,9 +211,10 @@ describe("coordinator setup sheet CI note", () => {
     fireEvent.click(screen.getByTestId("coordinator-enable-submit"));
     await waitFor(() => expect(client.enableProjectCoordinator).toHaveBeenCalled());
 
-    const draftKey = buildDraftStoreKey({
+    const draftKey = buildCoordinatorBoardDraftKey({
       serverId: SERVER_ID,
-      agentId: "coordinator-agent-1",
+      projectId: PROJECT_ID,
+      coordinatorAgentId: "coordinator-agent-1",
     });
     await waitFor(() =>
       expect(useDraftStore.getState().getDraftInput(draftKey)?.text).toBe(
@@ -223,6 +224,25 @@ describe("coordinator setup sheet CI note", () => {
     expect(
       useCoordinatorProjectStore.getState().hosts[SERVER_ID]?.get(PROJECT_ID)?.coordinator?.agentId,
     ).toBe("coordinator-agent-1");
+    useCoordinatorProjectStore.getState().applyProjectResult(SERVER_ID, PROJECT_ID, {
+      coordinator: coordinatorRecord("coordinator-successor"),
+    });
+    const successorDraftKey = buildCoordinatorBoardDraftKey({
+      serverId: SERVER_ID,
+      projectId: PROJECT_ID,
+      coordinatorAgentId: "coordinator-successor",
+    });
+    expect(useDraftStore.getState().getDraftInput(successorDraftKey)?.text).toBe(
+      "Set up CI for this repository.",
+    );
+    expect(
+      useDraftStore.getState().getDraftInput(
+        buildDraftStoreKey({
+          serverId: SERVER_ID,
+          agentId: "coordinator-agent-1",
+        }),
+      ),
+    ).toBeUndefined();
   });
 
   it("leaves the composer draft alone when the ask was never queued", async () => {
@@ -236,9 +256,10 @@ describe("coordinator setup sheet CI note", () => {
     fireEvent.click(screen.getByTestId("coordinator-enable-submit"));
     await waitFor(() => expect(hostClient.current?.enableProjectCoordinator).toHaveBeenCalled());
 
-    const draftKey = buildDraftStoreKey({
+    const draftKey = buildCoordinatorBoardDraftKey({
       serverId: SERVER_ID,
-      agentId: "coordinator-agent-2",
+      projectId: PROJECT_ID,
+      coordinatorAgentId: "coordinator-agent-2",
     });
     expect(useDraftStore.getState().getDraftInput(draftKey)).toBeUndefined();
   });

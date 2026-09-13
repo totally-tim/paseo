@@ -6521,13 +6521,13 @@ test("coordinator RPCs reject when the host does not advertise the feature", asy
 
   await expect(
     client.enableProjectCoordinator({ projectId: "project-1", profile: { provider: "claude" } }),
-  ).rejects.toThrow("Update this host to use project coordinators.");
+  ).rejects.toThrow("Update this host to use coordinators.");
   await expect(client.getProjectCoordinator("project-1")).rejects.toThrow(
-    "Update this host to use project coordinators.",
+    "Update this host to use coordinators.",
   );
 
   const observation = client.observeCoordinatorBoard({ projectId: "project-1" });
-  await expect(observation.ready).rejects.toThrow("Update this host to use project coordinators.");
+  await expect(observation.ready).rejects.toThrow("Update this host to use coordinators.");
   expect(mock.sent).toHaveLength(0);
 });
 
