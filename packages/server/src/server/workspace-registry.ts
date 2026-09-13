@@ -20,6 +20,7 @@ const UntrustedWorkspaceSourceSchema = z.object({
 });
 
 const PersistedProjectRecordSchema = z.object({
+  hidden: z.boolean().optional(),
   projectId: z.string(),
   rootPath: z.string(),
   kind: z.enum(["git", "non_git"]),
@@ -56,6 +57,7 @@ const PersistedProjectRecordSchema = z.object({
 
 const PersistedWorkspaceRecordSchema = z.object({
   workspaceId: z.string(),
+  hidden: z.boolean().optional(),
   projectId: z.string(),
   cwd: z.string(),
   kind: z.enum(["local_checkout", "worktree", "directory"]),
@@ -647,6 +649,7 @@ export class FileBackedWorkspaceRegistry
 }
 
 export function createPersistedProjectRecord(input: {
+  hidden?: boolean;
   projectId: string;
   rootPath: string;
   kind: PersistedProjectKind;
@@ -691,6 +694,7 @@ export function resolveProjectOverrideFields(record: PersistedProjectRecord | nu
 }
 
 export function createPersistedWorkspaceRecord(input: {
+  hidden?: boolean;
   workspaceId: string;
   projectId: string;
   cwd: string;

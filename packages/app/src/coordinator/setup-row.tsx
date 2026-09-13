@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { Check, ChevronRight } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { AgentProvider } from "@getpaseo/protocol/agent-types";
-import type { CoordinatorProfiles } from "@getpaseo/protocol/messages";
+import type { CoordinatorProfiles, CoordinatorProfileSelection } from "@getpaseo/protocol/messages";
 import { AdaptiveModalSheet } from "@/components/adaptive-modal-sheet";
 import { Button } from "@/components/ui/button";
 import { Field } from "@/components/ui/form-field";
@@ -83,7 +83,7 @@ interface CoordinatorProviderRow {
  * `null` in state means the user never touched the role; the daemon then
  * launches it with the coordinator's own provider.
  */
-interface CoordinatorRoleSelection {
+export interface CoordinatorRoleSelection {
   provider: AgentProvider;
   modelId: string;
 }
@@ -91,7 +91,7 @@ interface CoordinatorRoleSelection {
 const COORDINATOR_ROLE_KEYS = ["investigator", "implementer"] as const;
 type CoordinatorRoleKey = (typeof COORDINATOR_ROLE_KEYS)[number];
 
-function CoordinatorRoleProfileField({
+export function CoordinatorRoleProfileField({
   label,
   selection,
   fallbackProvider,
@@ -197,17 +197,21 @@ export function CoordinatorEnableSheet({
   serverId,
   cwd,
   onClose,
+  initialProfile,
 }: {
   visible: boolean;
   projectId: string;
   serverId: string;
   cwd: string | null;
   onClose: () => void;
+  initialProfile?: CoordinatorProfileSelection;
 }) {
   const { t } = useTranslation();
   const client = useHostRuntimeClient(serverId);
   const snapshot = useProvidersSnapshot(serverId, { cwd });
-  const [selectedProvider, setSelectedProvider] = useState<AgentProvider | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<AgentProvider | null>(
+    initialProfile?.provider ?? null,
+  );
   const [roleSelections, setRoleSelections] = useState<
     Record<CoordinatorRoleKey, CoordinatorRoleSelection | null>
   >({ investigator: null, implementer: null });
@@ -273,7 +277,10 @@ export function CoordinatorEnableSheet({
     try {
       const result = await client.enableProjectCoordinator({
         projectId,
-        profile: { provider: effectiveSelection },
+        profile: {
+          ...(initialProfile?.provider === effectiveSelection ? initialProfile : {}),
+          provider: effectiveSelection,
+        },
         ...(Object.keys(profiles).length > 0 ? { profiles } : {}),
       });
       useCoordinatorProjectStore.getState().applyProjectResult(serverId, projectId, result);
@@ -292,7 +299,17 @@ export function CoordinatorEnableSheet({
     } finally {
       setIsEnabling(false);
     }
-  }, [ciSeedQueued, client, effectiveSelection, onClose, projectId, roleSelections, serverId, t]);
+  }, [
+    ciSeedQueued,
+    client,
+    effectiveSelection,
+    onClose,
+    projectId,
+    roleSelections,
+    serverId,
+    t,
+    initialProfile,
+  ]);
 
   const selectInvestigator = useCallback((selection: CoordinatorRoleSelection) => {
     setRoleSelections((current) => ({ ...current, investigator: selection }));

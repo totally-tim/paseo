@@ -132,6 +132,11 @@ function submittedPromptText(prompt: AgentPromptInput): string {
     .trim();
 }
 
+interface DaemonQuestion {
+  request: AgentPermissionRequest;
+  respond: (response: AgentPermissionResponse) => Promise<void>;
+}
+
 export class AgentManagerShuttingDownError extends Error {
   constructor() {
     super("Agent manager is shutting down");
@@ -762,6 +767,7 @@ export class AgentManager {
   private readonly providerEnabled = new Map<AgentProvider, boolean>();
   private readonly providerDefinitions = new Map<AgentProvider, ProviderEnabledFlag>();
   private readonly agents = new Map<string, LiveManagedAgent>();
+  private readonly daemonQuestions = new Map<string, Map<string, DaemonQuestion>>();
   private readonly timelineStore = new InMemoryAgentTimelineStore();
   private readonly providerSubagents = new ProviderSubagentStore();
   private readonly agentsAwaitingInitialSnapshotPersist = new Set<string>();
@@ -3495,6 +3501,53 @@ export class AgentManager {
     });
   }
 
+  /** The owning service persists and restores these questions; provider turns cannot clear them. */
+  registerDaemonQuestion(input: {
+    agentId: string;
+    request: AgentPermissionRequest;
+    respond: (response: AgentPermissionResponse) => Promise<void>;
+  }): (resolution?: AgentPermissionResponse) => void {
+    const agent = this.requireSessionAgent(input.agentId);
+    if (input.request.kind !== "question") throw new Error("Daemon decisions must be questions");
+    let questions = this.daemonQuestions.get(input.agentId);
+    if (!questions) {
+      questions = new Map();
+      this.daemonQuestions.set(input.agentId, questions);
+    }
+    if (questions.has(input.request.id)) throw new Error("Daemon question already registered");
+    const request = {
+      ...input.request,
+      requestedAt: input.request.requestedAt ?? new Date().toISOString(),
+    };
+    questions.set(request.id, { request, respond: input.respond });
+    agent.pendingPermissions.set(request.id, request);
+    agent.permissionRequestedAt.set(request.id, request.requestedAt);
+    // Proposals stay on the board: do not broadcast attention or push here.
+    this.dispatchStream(agent.id, {
+      type: "permission_requested",
+      provider: agent.provider,
+      request,
+    });
+    this.emitState(agent);
+    return (resolution) => {
+      questions.delete(request.id);
+      if (questions.size === 0) this.daemonQuestions.delete(agent.id);
+      // Reload replaces the managed object while preserving daemon-owned requests.
+      const current = this.agents.get(agent.id);
+      if (!current) return;
+      current.pendingPermissions.delete(request.id);
+      current.permissionRequestedAt.delete(request.id);
+      if (resolution)
+        this.dispatchStream(current.id, {
+          type: "permission_resolved",
+          provider: current.provider,
+          requestId: request.id,
+          resolution,
+        });
+      this.emitState(current);
+    };
+  }
+
   async respondToPermission(
     agentId: string,
     requestId: string,
@@ -3507,6 +3560,25 @@ export class AgentManager {
     agent.inFlightPermissionResponses.add(requestId);
 
     try {
+      const question = this.daemonQuestions.get(agentId)?.get(requestId);
+      if (question) {
+        await question.respond(response);
+        const questions = this.daemonQuestions.get(agentId);
+        questions?.delete(requestId);
+        if (questions?.size === 0) this.daemonQuestions.delete(agentId);
+        const current = this.agents.get(agentId);
+        if (!current) return;
+        current.pendingPermissions.delete(requestId);
+        current.permissionRequestedAt.delete(requestId);
+        this.dispatchStream(current.id, {
+          type: "permission_resolved",
+          provider: current.provider,
+          requestId,
+          resolution: response,
+        });
+        this.emitState(current);
+        return;
+      }
       const result = await agent.session.respondToPermission(requestId, response);
       agent.pendingPermissions.delete(requestId);
       // Clear the side-map stamp here rather than relying on refreshSessionState's
@@ -4451,6 +4523,10 @@ export class AgentManager {
     } catch {
       agent.pendingPermissions.clear();
     }
+    for (const { request } of this.daemonQuestions.get(agent.id)?.values() ?? []) {
+      agent.pendingPermissions.set(request.id, request);
+      if (request.requestedAt) agent.permissionRequestedAt.set(request.id, request.requestedAt);
+    }
     // permissionRequestedAt is a subset of pendingPermissions at all times, so
     // prune any id that's no longer pending regardless of whether the block
     // above succeeded or threw. A transient failure clears pendingPermissions
@@ -5212,6 +5288,7 @@ export class AgentManager {
     message: string,
   ): void {
     for (const [requestId] of agent.pendingPermissions) {
+      if (this.daemonQuestions.get(agent.id)?.has(requestId)) continue;
       agent.pendingPermissions.delete(requestId);
       agent.permissionRequestedAt.delete(requestId);
       if (!options?.fromHistory) {

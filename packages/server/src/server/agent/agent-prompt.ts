@@ -4,6 +4,7 @@ import type {
   AgentPermissionRequest,
   AgentPromptInput,
   AgentRunOptions,
+  AgentStreamEvent,
 } from "./agent-sdk-types.js";
 import type { AgentManager, ManagedAgent } from "./agent-manager.js";
 import type { AgentStorage } from "./agent-storage.js";
@@ -30,7 +31,14 @@ export type AgentRunController = Pick<
     reloadAgentSession(agentId: string): Promise<unknown>;
   };
 
+type AgentRunIterator = AsyncGenerator<AgentStreamEvent>;
+type BackgroundRecovery = (
+  recover: () => Promise<AgentRunIterator>,
+) => Promise<AgentRunIterator | undefined>;
+
 export interface StartAgentRunOptions {
+  /** Recheck daemon-owned receiver eligibility when background recovery would reopen a session. */
+  backgroundRecovery?: BackgroundRecovery;
   replaceRunning?: boolean;
   activeTurnBehavior?: ActiveTurnBehavior;
   runOptions?: AgentRunOptions;
@@ -174,9 +182,14 @@ async function startAgentRunInner(
           { agentId, err: error },
           "Provider session went stale; reopening from persistence",
         );
-        await agentManager.reloadAgentSession(agentId);
-        const retry = await startOrReplaceRun(agentManager, agentId, prompt, options);
-        await drainAgentRunIterator(retry.iterator);
+        const recover = async () => {
+          await agentManager.reloadAgentSession(agentId);
+          return (await startOrReplaceRun(agentManager, agentId, prompt, options)).iterator;
+        };
+        const retry = options?.backgroundRecovery
+          ? await options.backgroundRecovery(recover)
+          : await recover();
+        if (retry) await drainAgentRunIterator(retry);
       }
       logger.trace(
         {
@@ -243,7 +256,7 @@ export function formatSystemNotificationPrompt(reason: string): string {
  * `</paseo-system >`).
  */
 const PROMPT_TAG_PATTERN =
-  /<\/?(untrusted-wake-details|untrusted-forge-data|untrusted-git-data|wake-context|paseo-system|agent-response|permission-request)(?=[\s/>"'`])[^>]*>/gi;
+  /<\/?(untrusted-wake-details|untrusted-projects|untrusted-project|untrusted-forge-data|untrusted-git-data|wake-context|paseo-system|agent-response|permission-request)(?=[\s/>"'`])[^>]*>/gi;
 
 export function sanitizeUntrustedText(text: string): string {
   return text.replace(PROMPT_TAG_PATTERN, (match) =>
@@ -258,6 +271,7 @@ export function isSystemInjectedEnvelope(text: string): boolean {
 }
 
 export interface SendPromptToAgentParams {
+  backgroundRecovery?: BackgroundRecovery;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   agentId: string;
@@ -369,6 +383,7 @@ export async function sendPromptToAgent(
     : params.runOptions;
 
   return await startAgentRun(params.agentManager, params.agentId, params.prompt, params.logger, {
+    backgroundRecovery: params.backgroundRecovery,
     replaceRunning: params.replaceRunning ?? true,
     activeTurnBehavior: params.activeTurnBehavior,
     clearPendingPermissions: params.clearPendingPermissions,
@@ -501,7 +516,35 @@ async function resolveNotificationTarget(
   return { targetAgentId, record };
 }
 
-export function setupFinishNotification(params: SetupFinishNotificationParams): void {
+/** One active per-turn subscription per sender/receiver pair, shared by
+ * explicit delegation and daemon-owned project summary forwarding. */
+const finishSubscriptions = new WeakMap<AgentManager, Map<string, () => void>>();
+type NotificationDeliveryHandler = <T>(
+  agentId: string,
+  deliver: () => Promise<T>,
+) => Promise<T | undefined>;
+const notificationDeliveryHandlers = new WeakMap<AgentManager, NotificationDeliveryHandler>();
+
+/** The coordinator service owns eligibility and serializes delivery against
+ * disable. Keep its handler until the manager is collected so queued work
+ * also sees a stopped service; a replacement service installs its handler. */
+export function setAgentNotificationDeliveryHandler(
+  agentManager: AgentManager,
+  handler: NotificationDeliveryHandler,
+): void {
+  notificationDeliveryHandlers.set(agentManager, handler);
+}
+
+export async function withAgentNotificationDelivery<T>(
+  agentManager: AgentManager,
+  agentId: string,
+  deliver: () => Promise<T>,
+): Promise<T | undefined> {
+  const handler = notificationDeliveryHandlers.get(agentManager);
+  return handler ? handler(agentId, deliver) : deliver();
+}
+
+export function setupFinishNotification(params: SetupFinishNotificationParams): () => void {
   const {
     agentManager,
     agentStorage,
@@ -510,6 +553,14 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
     requireParentOwnership = false,
     logger,
   } = params;
+  let subscriptions = finishSubscriptions.get(agentManager);
+  if (!subscriptions) {
+    subscriptions = new Map();
+    finishSubscriptions.set(agentManager, subscriptions);
+  }
+  const subscriptionKey = JSON.stringify([childAgentId, callerAgentId]);
+  const existing = subscriptions.get(subscriptionKey);
+  if (existing) return existing;
   let hasSeenRunning = false;
   let stopped = false;
   const notifiedPermissionRequestIds = new Set<string>();
@@ -520,7 +571,9 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
     if (stopped) return;
     stopped = true;
     unsubscribe?.();
+    if (subscriptions?.get(subscriptionKey) === stop) subscriptions.delete(subscriptionKey);
   }
+  subscriptions.set(subscriptionKey, stop);
 
   async function notify(
     reason: FinishNotificationReason,
@@ -548,15 +601,19 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
       permissionRequest,
     });
 
-    await sendPromptToAgent({
-      agentManager,
-      agentStorage,
-      agentId: targetAgentId,
-      prompt: formatSystemNotificationPrompt(body),
-      activeTurnBehavior: "steer",
-      unarchive: false,
-      logger,
-    });
+    await withAgentNotificationDelivery(agentManager, targetAgentId, () =>
+      sendPromptToAgent({
+        agentManager,
+        agentStorage,
+        agentId: targetAgentId,
+        prompt: formatSystemNotificationPrompt(body),
+        activeTurnBehavior: "steer",
+        unarchive: false,
+        backgroundRecovery: (recover) =>
+          withAgentNotificationDelivery(agentManager, targetAgentId, recover),
+        logger,
+      }),
+    );
   }
 
   function notifySafely(reason: FinishNotificationReason, options: NotifySafelyOptions = {}): void {
@@ -643,11 +700,12 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
   const childSnapshot = agentManager.getAgent(childAgentId);
   if (!childSnapshot || childSnapshot.lifecycle === "closed") {
     stop();
-    return;
+    return stop;
   }
   if (childSnapshot.lifecycle === "running") {
     hasSeenRunning = true;
   } else if (childSnapshot.lifecycle === "error") {
     notifySafely("errored");
   }
+  return stop;
 }

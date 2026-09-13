@@ -569,7 +569,10 @@ export class WorkspaceDirectory {
     );
     return persistedProjects
       .filter(
-        (project) => !project.archivedAt && !projectIdsWithActiveWorkspaces.has(project.projectId),
+        (project) =>
+          !project.hidden &&
+          !project.archivedAt &&
+          !projectIdsWithActiveWorkspaces.has(project.projectId),
       )
       .map((project) => ({
         projectId: project.projectId,

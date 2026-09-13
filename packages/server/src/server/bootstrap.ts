@@ -133,6 +133,7 @@ import { createGitHubService } from "../services/github-service.js";
 import { createPaseoWorktree as createRegisteredPaseoWorktree } from "./paseo-worktree-service.js";
 import { createWorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
 import { CoordinatorService } from "./coordinator/coordinator-service.js";
+import { ProjectSetupProposals } from "./coordinator/project-setup.js";
 import { createPaseoWorktreeWorkflow } from "./worktree-session.js";
 import { DownloadTokenStore } from "./file-download/token-store.js";
 import type { OpenAiSpeechProviderConfig } from "./speech/providers/openai/config.js";
@@ -1034,7 +1035,7 @@ export async function createPaseoDaemon(
 
   // Project coordinators are ordinary persisted agents with role labels; the
   // service reconciles records, keeps them resident, and derives the board.
-  const coordinatorService = new CoordinatorService({
+  const coordinatorService: CoordinatorService = new CoordinatorService({
     agentManager,
     agentStorage,
     projectRegistry,
@@ -1045,6 +1046,14 @@ export async function createPaseoDaemon(
     workspaceGitService,
     paseoHome: config.paseoHome,
     logger,
+    reconcileGlobalSetupProposals: (state) => projectSetupProposals.reconcile(state),
+  });
+  const projectSetupProposals = new ProjectSetupProposals({
+    paseoHome: config.paseoHome,
+    agentManager,
+    listProjects: () => projectRegistry.list(),
+    coordinatorEnabled: async (projectId) =>
+      (await coordinatorService.getProjectCoordinator(projectId))?.enabled === true,
   });
   await continuations.initialize();
   const teardownArchivedWorkspaceRuntime = (workspaceId: string): void => {
@@ -1905,6 +1914,7 @@ export async function createPaseoDaemon(
     // Freeze both ingress and registration before taking the agent closure snapshot.
     wsServer?.prepareForShutdown();
     agentManager.prepareForShutdown();
+    projectSetupProposals.stop();
     await coordinatorService.stop().catch(() => undefined);
     await continuations.close();
     await providerAccounts.close();

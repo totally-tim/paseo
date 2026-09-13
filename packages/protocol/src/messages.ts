@@ -3382,6 +3382,7 @@ export const CoordinatorGuardSchema = z.object({
 export type CoordinatorGuard = z.infer<typeof CoordinatorGuardSchema>;
 
 export const CoordinatorDecisionBoardRowSchema = z.object({
+  setupProjectId: z.string().optional(),
   kind: z.literal("decision"),
   id: z.string(),
   projectId: z.string(),
@@ -3487,11 +3488,12 @@ export const CoordinatorBoardRowSchema = z.discriminatedUnion("kind", [
 export type CoordinatorBoardRow = z.infer<typeof CoordinatorBoardRowSchema>;
 
 /**
- * One project's board. `done` arrives capped and sorted server-side. The global
- * board is the union of per-project snapshots; a global snapshot type lands with
- * the global tier in a later milestone.
+ * One coordinator's board. `done` arrives capped and sorted server-side.
+ * An unfiltered subscription includes the global and project snapshots.
  */
 export const CoordinatorBoardSnapshotSchema = z.object({
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13 once daemon floor >= v0.8.0.
+  tier: z.enum(["global", "project"]).optional(),
   projectId: z.string(),
   projectName: z.string().optional(),
   needsYou: z.array(CoordinatorDecisionBoardRowSchema),
@@ -3526,6 +3528,67 @@ export const ProjectCoordinatorStateSchema = z.object({
   guard: CoordinatorGuardSchema.optional(),
 });
 export type ProjectCoordinatorState = z.infer<typeof ProjectCoordinatorStateSchema>;
+
+export const GlobalCoordinatorStateSchema = z.object({
+  enabled: z.boolean(),
+  agentId: z.string().nullable(),
+  workspaceId: z.string().nullable(),
+  projectId: z.string().nullable(),
+  trustLevel: CoordinatorTrustLevelSchema,
+  profile: CoordinatorProfileSelectionSchema.optional(),
+});
+export type GlobalCoordinatorState = z.infer<typeof GlobalCoordinatorStateSchema>;
+
+export const CoordinatorGlobalEnableRequestSchema = z.object({
+  type: z.literal("coordinator.global.enable.request"),
+  requestId: z.string(),
+  profile: CoordinatorProfileSelectionSchema,
+  trustLevel: CoordinatorTrustLevelSchema.optional(),
+});
+export type CoordinatorGlobalEnableRequest = z.infer<typeof CoordinatorGlobalEnableRequestSchema>;
+
+export const CoordinatorGlobalDisableRequestSchema = z.object({
+  type: z.literal("coordinator.global.disable.request"),
+  requestId: z.string(),
+});
+export type CoordinatorGlobalDisableRequest = z.infer<typeof CoordinatorGlobalDisableRequestSchema>;
+
+export const CoordinatorGlobalUpdateRequestSchema = z.object({
+  type: z.literal("coordinator.global.update.request"),
+  requestId: z.string(),
+  profile: CoordinatorProfileSelectionSchema.optional(),
+  trustLevel: CoordinatorTrustLevelSchema.optional(),
+});
+export type CoordinatorGlobalUpdateRequest = z.infer<typeof CoordinatorGlobalUpdateRequestSchema>;
+
+export const CoordinatorGlobalGetRequestSchema = z.object({
+  type: z.literal("coordinator.global.get.request"),
+  requestId: z.string(),
+});
+export type CoordinatorGlobalGetRequest = z.infer<typeof CoordinatorGlobalGetRequestSchema>;
+
+const CoordinatorGlobalStateResultSchema = z.object({
+  requestId: z.string(),
+  coordinator: GlobalCoordinatorStateSchema.nullable(),
+  error: z.string().nullable(),
+});
+
+export const CoordinatorGlobalEnableResponseSchema = z.object({
+  type: z.literal("coordinator.global.enable.response"),
+  payload: CoordinatorGlobalStateResultSchema,
+});
+export const CoordinatorGlobalDisableResponseSchema = z.object({
+  type: z.literal("coordinator.global.disable.response"),
+  payload: CoordinatorGlobalStateResultSchema,
+});
+export const CoordinatorGlobalUpdateResponseSchema = z.object({
+  type: z.literal("coordinator.global.update.response"),
+  payload: CoordinatorGlobalStateResultSchema,
+});
+export const CoordinatorGlobalGetResponseSchema = z.object({
+  type: z.literal("coordinator.global.get.response"),
+  payload: CoordinatorGlobalStateResultSchema,
+});
 
 export const CoordinatorProjectEnableRequestSchema = z.object({
   type: z.literal("coordinator.project.enable.request"),
@@ -3845,6 +3908,10 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   LoopInspectRequestSchema,
   LoopLogsRequestSchema,
   LoopStopRequestSchema,
+  CoordinatorGlobalEnableRequestSchema,
+  CoordinatorGlobalDisableRequestSchema,
+  CoordinatorGlobalUpdateRequestSchema,
+  CoordinatorGlobalGetRequestSchema,
   CoordinatorProjectEnableRequestSchema,
   CoordinatorProjectDisableRequestSchema,
   CoordinatorProjectUpdateRequestSchema,
@@ -4470,6 +4537,8 @@ export const WorkspaceGitHubRuntimePayloadSchema = z
 
 export const WorkspaceDescriptorPayloadSchema = z
   .object({
+    // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13 once daemon floor >= v0.8.0.
+    hidden: z.boolean().optional(),
     id: z.string(),
     projectId: z.string(),
     projectDisplayName: z.string(),
@@ -4671,6 +4740,8 @@ export const FetchRecentProviderSessionsResponseMessageSchema = z.object({
 // project row with a new-workspace child so projects persist after their last
 // workspace is archived.
 export const WorkspaceProjectDescriptorPayloadSchema = z.object({
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13 once daemon floor >= v0.8.0.
+  hidden: z.boolean().optional(),
   projectId: z.string(),
   // COMPAT(projectKey): added in v0.2.4 on 2026-07-28; remove optional after 2027-01-28.
   projectKey: z.string().optional(),
@@ -7418,6 +7489,10 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   LoopStopResponseSchema,
   DaemonUpdateProgressMessageSchema,
   DaemonUpdateResponseSchema,
+  CoordinatorGlobalEnableResponseSchema,
+  CoordinatorGlobalDisableResponseSchema,
+  CoordinatorGlobalUpdateResponseSchema,
+  CoordinatorGlobalGetResponseSchema,
   CoordinatorProjectEnableResponseSchema,
   CoordinatorProjectDisableResponseSchema,
   CoordinatorProjectUpdateResponseSchema,

@@ -123,6 +123,7 @@ import type {
   CoordinatorTrustLevel,
   CoordinatorUsageExpectation,
   ProjectCoordinatorState,
+  GlobalCoordinatorState,
   PluginListItem,
   PluginLogEntry,
   PluginSourceStatusItem,
@@ -573,6 +574,18 @@ export type CoordinatorBoardSubscribePayload = Extract<
   SessionOutboundMessage,
   { type: "coordinator.board.subscribe.response" }
 >["payload"];
+
+export interface EnableGlobalCoordinatorOptions {
+  profile: CoordinatorProfileSelection;
+  trustLevel?: CoordinatorTrustLevel;
+  requestId?: string;
+}
+
+export interface UpdateGlobalCoordinatorOptions {
+  profile?: CoordinatorProfileSelection;
+  trustLevel?: CoordinatorTrustLevel;
+  requestId?: string;
+}
 
 export interface EnableProjectCoordinatorOptions {
   projectId: string;
@@ -2978,8 +2991,76 @@ export class DaemonClient {
 
   private requireCoordinatorSupport(): void {
     if (this.lastServerInfoMessage?.features?.coordinator !== true) {
-      throw new Error("Update this host to use project coordinators.");
+      throw new Error("Update this host to use coordinators.");
     }
+  }
+
+  async enableGlobalCoordinator(
+    options: EnableGlobalCoordinatorOptions,
+  ): Promise<GlobalCoordinatorState> {
+    this.requireCoordinatorSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.global.enable.response">({
+        requestId: options.requestId,
+        message: {
+          type: "coordinator.global.enable.request",
+          profile: options.profile,
+          ...(options.trustLevel !== undefined ? { trustLevel: options.trustLevel } : {}),
+        },
+      });
+    if (payload.error || !payload.coordinator) {
+      throw new Error(payload.error ?? "enableGlobalCoordinator rejected");
+    }
+    return payload.coordinator;
+  }
+
+  async disableGlobalCoordinator(requestId?: string): Promise<GlobalCoordinatorState> {
+    this.requireCoordinatorSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.global.disable.response">({
+        requestId: requestId,
+        message: {
+          type: "coordinator.global.disable.request",
+        },
+      });
+    if (payload.error || !payload.coordinator) {
+      throw new Error(payload.error ?? "disableGlobalCoordinator rejected");
+    }
+    return payload.coordinator;
+  }
+
+  async updateGlobalCoordinator(
+    options: UpdateGlobalCoordinatorOptions,
+  ): Promise<GlobalCoordinatorState> {
+    this.requireCoordinatorSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.global.update.response">({
+        requestId: options.requestId,
+        message: {
+          type: "coordinator.global.update.request",
+          ...(options.profile !== undefined ? { profile: options.profile } : {}),
+          ...(options.trustLevel !== undefined ? { trustLevel: options.trustLevel } : {}),
+        },
+      });
+    if (payload.error || !payload.coordinator) {
+      throw new Error(payload.error ?? "updateGlobalCoordinator rejected");
+    }
+    return payload.coordinator;
+  }
+
+  async getGlobalCoordinator(requestId?: string): Promise<GlobalCoordinatorState> {
+    this.requireCoordinatorSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.global.get.response">({
+        requestId: requestId,
+        message: {
+          type: "coordinator.global.get.request",
+        },
+      });
+    if (payload.error || !payload.coordinator) {
+      throw new Error(payload.error ?? "getGlobalCoordinator rejected");
+    }
+    return payload.coordinator;
   }
 
   async enableProjectCoordinator(

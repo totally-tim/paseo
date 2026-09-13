@@ -4,6 +4,7 @@ import type { CoordinatorDecisionBoardRow } from "@getpaseo/protocol/messages";
 import type { PendingPermission } from "@/types/shared";
 import {
   buildBoardActionResponse,
+  shouldOpenProjectSetup,
   buildComposerQuoteText,
   isMultiQuestionRow,
   resolveBoardActions,
@@ -359,5 +360,30 @@ describe("buildComposerQuoteText", () => {
 
   it("keeps blank lines as bare quote markers", () => {
     expect(buildComposerQuoteText("First\n\nSecond")).toBe("> First\n>\n> Second\n\n");
+  });
+});
+
+describe("project setup answers", () => {
+  it("opens setup only for Set up and lets Ignore answer the question normally", () => {
+    const row = {
+      setupProjectId: "project-1",
+      requestKind: "question",
+      questionHeader: "Coordinator",
+      actions: [
+        { id: "option-0", label: "Set up" },
+        { id: "option-1", label: "Ignore" },
+      ],
+    };
+    const [setup, ignore] = resolveBoardActions(row, null);
+    expect(setup.behavior).toBe("allow");
+    expect(ignore.behavior).toBe("allow");
+    expect(shouldOpenProjectSetup(row, setup)).toBe(true);
+    expect(shouldOpenProjectSetup(row, ignore)).toBe(false);
+    expect(buildBoardActionResponse(row, ignore)).toEqual({
+      behavior: "allow",
+      updatedInput: { answers: { Coordinator: "Ignore" } },
+    });
+    expect(shouldOpenProjectSetup({}, setup)).toBe(false);
+    expect(shouldOpenProjectSetup(row, { ...setup, behavior: "deny" })).toBe(false);
   });
 });

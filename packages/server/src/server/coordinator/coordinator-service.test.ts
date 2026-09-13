@@ -5,6 +5,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 import {
+  COORDINATOR_GLOBAL_ROLE,
   COORDINATOR_PROJECT_ID_LABEL,
   COORDINATOR_PROJECT_ROLE,
   COORDINATOR_SUBAGENT_KIND_LABEL,
@@ -58,6 +59,7 @@ import {
   type CoordinatorServiceDeps,
   type CoordinatorSpawnDecision,
 } from "./coordinator-service.js";
+import { CoordinatorStore } from "./persistence.js";
 import { SPAWN_ISOLATION_ENV } from "./spawn-isolation.js";
 import { CoordinatorToolDeniedError } from "./tool-policy.js";
 
@@ -200,6 +202,11 @@ class StubProjectRegistry {
     this.records.set(record.projectId, record);
   }
 
+  async upsert(record: PersistedProjectRecord): Promise<void> {
+    this.add(record);
+    this.emit({ kind: "upsert", projectId: record.projectId, project: record });
+  }
+
   async get(projectId: string): Promise<PersistedProjectRecord | null> {
     return this.records.get(projectId) ?? null;
   }
@@ -224,6 +231,10 @@ class StubWorkspaceRegistry {
 
   add(record: PersistedWorkspaceRecord): void {
     this.records.set(record.workspaceId, record);
+  }
+
+  async upsert(record: PersistedWorkspaceRecord): Promise<void> {
+    this.add(record);
   }
 
   async get(workspaceId: string): Promise<PersistedWorkspaceRecord | null> {
@@ -303,6 +314,7 @@ interface Harness {
 type HarnessOptions = Partial<
   Pick<
     CoordinatorServiceDeps,
+    | "reconcileGlobalSetupProposals"
     | "workspaceGitService"
     | "changeRequestPollIntervalMs"
     | "stallSweepIntervalMs"
@@ -3218,3 +3230,421 @@ describe("resolveCiConfigured", () => {
     expect(await harness.service.resolveCiConfigured("prj_missing")).toBeUndefined();
   });
 });
+
+describe("global coordinator", () => {
+  test("concurrent enable creates one hidden residency and reparents old and new project coordinators", async () => {
+    const project = await harness.service.enableProjectCoordinator({
+      projectId: PROJECT_ID,
+      profile: CODEX_PROFILE,
+    });
+    const emissions: PersistedProjectRecord[] = [];
+    harness.projectRegistry.subscribeToMutations((mutation) => {
+      if (mutation.project) emissions.push(mutation.project);
+    });
+    const [a, b] = await Promise.all([
+      harness.service.enableGlobalCoordinator({ profile: CODEX_PROFILE }),
+      harness.service.enableGlobalCoordinator({ profile: CODEX_PROFILE }),
+    ]);
+    expect(a.agentId).toBe(b.agentId);
+    expect(a.workspaceId).toBe(b.workspaceId);
+    expect((await harness.projectRegistry.get(a.projectId!))?.hidden).toBe(true);
+    expect((await harness.workspaceRegistry.get(a.workspaceId!))?.hidden).toBe(true);
+    expect(
+      emissions
+        .filter((record) => record.projectId === a.projectId)
+        .every((record) => record.hidden),
+    ).toBe(true);
+    expect(harness.agentManager.getAgent(project.agentId!)?.labels[PARENT_AGENT_ID_LABEL]).toBe(
+      a.agentId,
+    );
+    const second = makeProject("prj_second", path.join(harness.root, "second"));
+    mkdirSync(second.rootPath);
+    harness.projectRegistry.add(second);
+    const enabled = await harness.service.enableProjectCoordinator({
+      projectId: second.projectId,
+      profile: CODEX_PROFILE,
+    });
+    expect(harness.agentManager.getAgent(enabled.agentId!)?.labels[PARENT_AGENT_ID_LABEL]).toBe(
+      a.agentId,
+    );
+    expect(
+      (await harness.service.listBoardSnapshots()).find((board) => board.projectId === a.projectId)
+        ?.tier,
+    ).toBe("global");
+  });
+
+  test("global steering cannot bypass project trust or target project workers", async () => {
+    const global = await harness.service.enableGlobalCoordinator({
+      profile: CODEX_PROFILE,
+      trustLevel: "ship",
+    });
+    const project = await harness.service.enableProjectCoordinator({
+      projectId: PROJECT_ID,
+      profile: CODEX_PROFILE,
+      trustLevel: "observe",
+    });
+    await expect(
+      harness.service.assertAgentTargetAllowed(global.agentId!, project.agentId!),
+    ).resolves.toBeUndefined();
+    await expect(
+      harness.service.assertSpawnAllowed({
+        parentAgentId: global.agentId!,
+        subagentKind: "implementer",
+      }),
+    ).rejects.toThrow("never spawns workers");
+    await expect(
+      harness.service.assertSpawnAllowed({
+        parentAgentId: project.agentId!,
+        subagentKind: "implementer",
+      }),
+    ).rejects.toThrow("Observe");
+    const worker = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      {
+        workspaceId: harness.workspace.workspaceId,
+        labels: { [PARENT_AGENT_ID_LABEL]: project.agentId! },
+      },
+    );
+    await expect(
+      harness.service.assertAgentTargetAllowed(global.agentId!, worker.id),
+    ).rejects.toThrow("only send prompts");
+    await expect(
+      harness.service.assertAgentTargetAllowed(global.agentId!, project.agentId!, {
+        action: "mutate",
+      }),
+    ).rejects.toThrow("only send prompts");
+    await harness.service.disableProjectCoordinator(PROJECT_ID);
+    await expect(
+      harness.service.assertAgentTargetAllowed(global.agentId!, project.agentId!),
+    ).rejects.toThrow("only send prompts");
+  });
+
+  test("disable retains global lineage and re-enable resumes the same session", async () => {
+    const initial = await harness.service.enableGlobalCoordinator({ profile: CODEX_PROFILE });
+    const disabled = await harness.service.disableGlobalCoordinator();
+    expect(disabled.enabled).toBe(false);
+    expect(disabled.agentId).toBe(initial.agentId);
+    const enabled = await harness.service.enableGlobalCoordinator({ profile: CODEX_PROFILE });
+    expect(enabled.agentId).toBe(initial.agentId);
+    expect(enabled.workspaceId).toBe(initial.workspaceId);
+    expect(
+      (await harness.agentStorage.list()).filter(
+        (record) => record.labels[PASEO_ROLE_LABEL] === COORDINATOR_GLOBAL_ROLE,
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("a newer duplicate wins and retirement appears on the global board", async () => {
+    const initial = await harness.service.enableGlobalCoordinator({ profile: CODEX_PROFILE });
+    const original = await harness.agentStorage.get(initial.agentId!);
+    const newer = await harness.agentManager.createAgent(
+      { ...original!.config, provider: original!.provider, cwd: original!.cwd },
+      undefined,
+      {
+        workspaceId: initial.workspaceId!,
+        labels: original!.labels,
+      },
+    );
+    const newerRecord = await harness.agentStorage.get(newer.id);
+    await harness.agentStorage.upsert({
+      ...newerRecord!,
+      lastActivityAt: "2099-01-01T00:00:00.000Z",
+    });
+    const reconciled = await harness.service.enableGlobalCoordinator({ profile: CODEX_PROFILE });
+    expect(reconciled.agentId).toBe(newer.id);
+    expect((await harness.agentStorage.get(initial.agentId!))?.archivedAt).toBeTruthy();
+    const board = await harness.service.getBoardSnapshot(initial.projectId!);
+    expect(
+      board.done.some((row) => row.text === "Retired a duplicate global coordinator session"),
+    ).toBe(true);
+  });
+
+  test("new-project wakes preserve a running turn and pending decisions; disabling reconciles setup questions", async () => {
+    const reconcile = vi.fn(async () => {});
+    await reinitHarness({ reconcileGlobalSetupProposals: reconcile });
+    harness.client.holdTurns = true;
+    await harness.service.start();
+    const global = await harness.service.enableGlobalCoordinator({ profile: CODEX_PROFILE });
+    const session = harness.client.sessions[0];
+    await vi.waitFor(() =>
+      expect(harness.agentManager.getAgent(global.agentId!)?.lifecycle).toBe("running"),
+    );
+    const interrupt = vi.spyOn(session, "interrupt");
+    session.push({
+      type: "permission_requested",
+      provider: "codex",
+      request: {
+        id: "global-question",
+        kind: "question",
+        name: "Question",
+        input: { questions: [{ question: "Which project?", options: [{ label: "Paseo" }] }] },
+      },
+    });
+    const project = makeProject("prj_added", path.join(harness.root, "added"));
+    await harness.projectRegistry.upsert(project);
+    await vi.waitFor(() => expect(reconcile).toHaveBeenCalledTimes(2));
+    await flushBoard();
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(
+      harness.agentManager.getAgent(global.agentId!)?.pendingPermissions.has("global-question"),
+    ).toBe(true);
+    await harness.service.disableGlobalCoordinator();
+    expect(reconcile).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: false }));
+  });
+
+  test("autonomous project turns send one summary even when global delegation also requests notification", async () => {
+    await harness.service.start();
+    const global = await harness.service.enableGlobalCoordinator({ profile: CODEX_PROFILE });
+    const project = await harness.service.enableProjectCoordinator({
+      projectId: PROJECT_ID,
+      profile: CODEX_PROFILE,
+    });
+    const globalSession = harness.client.sessions[0];
+    await vi.waitFor(() => expect(globalSession.prompts.length).toBe(2));
+    expect(JSON.stringify(globalSession.prompts[1])).toContain(project.agentId!);
+    await vi.waitFor(() =>
+      expect(harness.agentManager.getAgent(project.agentId!)?.lifecycle).toBe("idle"),
+    );
+    const catalog = createPaseoToolCatalog({
+      agentManager: harness.agentManager,
+      agentStorage: harness.agentStorage,
+      providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+      callerAgentId: global.agentId!,
+      coordinator: harness.service,
+      logger,
+    });
+    await catalog.executeTool("send_agent_prompt", {
+      agentId: project.agentId!,
+      prompt: "Summarize this project",
+      background: true,
+      notifyOnFinish: true,
+    });
+    await vi.waitFor(() => expect(globalSession.prompts.length).toBe(3));
+    await flushBoard();
+    expect(globalSession.prompts).toHaveLength(3);
+  });
+
+  test("project completion cannot reload a disabled global coordinator", async () => {
+    await harness.service.start();
+    await harness.service.enableGlobalCoordinator({ profile: CODEX_PROFILE });
+    harness.client.holdTurns = true;
+    const project = await harness.service.enableProjectCoordinator({
+      projectId: PROJECT_ID,
+      profile: CODEX_PROFILE,
+    });
+    const projectSession = harness.client.sessions.at(-1)!;
+    await vi.waitFor(() =>
+      expect(harness.agentManager.getAgent(project.agentId!)?.lifecycle).toBe("running"),
+    );
+    const global = await harness.service.disableGlobalCoordinator();
+    const sessionsBeforeFinish = harness.client.sessions.length;
+    projectSession.push({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: projectSession.lastTurnId!,
+    });
+    await flushBoard();
+    expect(harness.client.sessions).toHaveLength(sessionsBeforeFinish);
+    expect(harness.agentManager.getAgent(global.agentId!)).toBeNull();
+  });
+
+  test("a concurrent project override wins over propagation and stays an override", async () => {
+    await harness.service.enableGlobalCoordinator({
+      profile: CODEX_PROFILE,
+      trustLevel: "propose",
+    });
+    await harness.service.enableProjectCoordinator({
+      projectId: PROJECT_ID,
+      profile: CODEX_PROFILE,
+    });
+    const entered = deferredSignal();
+    const release = deferredSignal();
+    const listed = deferredSignal();
+    const get = harness.projectRegistry.get.bind(harness.projectRegistry);
+    vi.spyOn(harness.projectRegistry, "get").mockImplementationOnce(async (id) => {
+      entered.resolve();
+      await release.promise;
+      return get(id);
+    });
+    const list = CoordinatorStore.prototype.listProjectIds;
+    const listSpy = vi
+      .spyOn(CoordinatorStore.prototype, "listProjectIds")
+      .mockImplementation(async function (this: CoordinatorStore) {
+        const ids = await list.call(this);
+        listed.resolve();
+        return ids;
+      });
+    const override = harness.service.updateProjectCoordinator({
+      projectId: PROJECT_ID,
+      trustLevel: "observe",
+    });
+    await entered.promise;
+    const propagation = harness.service.updateGlobalCoordinator({ trustLevel: "ship" });
+    await listed.promise;
+    await flushBoard();
+    release.resolve();
+    try {
+      await Promise.all([override, propagation]);
+      expect((await harness.service.getProjectCoordinator(PROJECT_ID))?.trustLevel).toBe("observe");
+      await harness.service.updateGlobalCoordinator({ trustLevel: "propose" });
+      expect((await harness.service.getProjectCoordinator(PROJECT_ID))?.trustLevel).toBe("observe");
+    } finally {
+      listSpy.mockRestore();
+    }
+  });
+
+  test("concurrent global defaults propagate in the same order they are saved", async () => {
+    await harness.service.enableGlobalCoordinator({
+      profile: CODEX_PROFILE,
+      trustLevel: "propose",
+    });
+    const project = await harness.service.enableProjectCoordinator({
+      projectId: PROJECT_ID,
+      profile: CODEX_PROFILE,
+    });
+    const entered = deferredSignal();
+    const release = deferredSignal();
+    const setLabels = harness.agentManager.setLabels.bind(harness.agentManager);
+    vi.spyOn(harness.agentManager, "setLabels").mockImplementation(async (id, labels) => {
+      if (id === project.agentId && labels[COORDINATOR_TRUST_LABEL] === "ship") {
+        entered.resolve();
+        await release.promise;
+      }
+      return setLabels(id, labels);
+    });
+    const first = harness.service.updateGlobalCoordinator({ trustLevel: "ship" });
+    await entered.promise;
+    const second = harness.service.updateGlobalCoordinator({ trustLevel: "observe" });
+    await flushBoard();
+    release.resolve();
+    await Promise.all([first, second]);
+    expect((await harness.service.getGlobalCoordinator()).trustLevel).toBe("observe");
+    expect((await harness.service.getProjectCoordinator(PROJECT_ID))?.trustLevel).toBe("observe");
+  });
+
+  test("re-enabling a same-provider global applies its requested model and persists it", async () => {
+    const first = await harness.service.enableGlobalCoordinator({
+      profile: { ...CODEX_PROFILE, model: "first-model" },
+    });
+    const changed = await harness.service.enableGlobalCoordinator({
+      profile: { ...CODEX_PROFILE, model: "second-model" },
+    });
+    expect(changed.agentId).toBe(first.agentId);
+    expect(changed.profile?.model).toBe("second-model");
+    expect(harness.agentManager.getAgent(first.agentId!)?.config.model).toBe("second-model");
+    await harness.service.disableGlobalCoordinator();
+    expect((await harness.agentStorage.get(first.agentId!))?.config.model).toBe("second-model");
+    const resumed = await harness.service.enableGlobalCoordinator({ profile: changed.profile! });
+    expect(harness.agentManager.getAgent(resumed.agentId!)?.config.model).toBe("second-model");
+  });
+
+  test("a profile update cannot resurrect the global when disable is queued during it", async () => {
+    const global = await harness.service.enableGlobalCoordinator({ profile: CODEX_PROFILE });
+    const entered = deferredSignal();
+    const release = deferredSignal();
+    const setModel = harness.agentManager.setAgentModel.bind(harness.agentManager);
+    vi.spyOn(harness.agentManager, "setAgentModel").mockImplementation(async (id, model) => {
+      entered.resolve();
+      await release.promise;
+      return setModel(id, model);
+    });
+    const update = harness.service.updateGlobalCoordinator({
+      profile: { ...CODEX_PROFILE, model: "updated-model" },
+    });
+    await entered.promise;
+    const disable = harness.service.disableGlobalCoordinator();
+    await flushBoard();
+    release.resolve();
+    await Promise.all([update, disable]);
+    expect((await harness.service.getGlobalCoordinator()).enabled).toBe(false);
+    expect(harness.agentManager.getAgent(global.agentId!)).toBeNull();
+  });
+
+  test.each(["summary", "project-added"] as const)(
+    "disable waits for an eligible %s dispatch before closing the global",
+    async (source) => {
+      await harness.service.start();
+      const global = await harness.service.enableGlobalCoordinator({ profile: CODEX_PROFILE });
+      await vi.waitFor(() =>
+        expect(harness.agentManager.getAgent(global.agentId!)?.lifecycle).toBe("idle"),
+      );
+      harness.client.holdTurns = true;
+      let projectSession: StubAgentSession | undefined;
+      if (source === "summary") {
+        const project = await harness.service.enableProjectCoordinator({
+          projectId: PROJECT_ID,
+          profile: CODEX_PROFILE,
+        });
+        projectSession = harness.client.sessions.at(-1)!;
+        await vi.waitFor(() =>
+          expect(harness.agentManager.getAgent(project.agentId!)?.lifecycle).toBe("running"),
+        );
+      }
+      const entered = deferredSignal();
+      const release = deferredSignal();
+      let reads = 0;
+      const get = harness.agentStorage.get.bind(harness.agentStorage);
+      vi.spyOn(harness.agentStorage, "get").mockImplementation(async (id) => {
+        // A summary first resolves its recipient, then sendPromptToAgent reads
+        // it again after eligibility. A project-added wake starts at that read.
+        if (id === global.agentId && ++reads === (source === "summary" ? 2 : 1)) {
+          entered.resolve();
+          await release.promise;
+        }
+        return get(id);
+      });
+      if (projectSession)
+        projectSession.push({
+          type: "turn_completed",
+          provider: "codex",
+          turnId: projectSession.lastTurnId!,
+        });
+      else
+        await harness.projectRegistry.upsert(
+          makeProject("prj_late", path.join(harness.root, "late")),
+        );
+      await entered.promise;
+      const disable = harness.service.disableGlobalCoordinator();
+      await flushBoard();
+      const disabledBeforeDispatchFinished = !(await harness.service.getGlobalCoordinator())
+        .enabled;
+      release.resolve();
+      await disable;
+      expect(disabledBeforeDispatchFinished).toBe(false);
+      expect(harness.agentManager.getAgent(global.agentId!)).toBeNull();
+      expect((await harness.service.getGlobalCoordinator()).enabled).toBe(false);
+    },
+  );
+
+  test("global default applies only to projects inheriting it", async () => {
+    await harness.service.enableGlobalCoordinator({
+      profile: CODEX_PROFILE,
+      trustLevel: "propose",
+    });
+    expect(
+      (
+        await harness.service.enableProjectCoordinator({
+          projectId: PROJECT_ID,
+          profile: CODEX_PROFILE,
+        })
+      ).trustLevel,
+    ).toBe("propose");
+    await harness.service.updateGlobalCoordinator({ trustLevel: "ship" });
+    expect((await harness.service.getProjectCoordinator(PROJECT_ID))?.trustLevel).toBe("ship");
+    await harness.service.updateProjectCoordinator({
+      projectId: PROJECT_ID,
+      trustLevel: "observe",
+    });
+    await harness.service.updateGlobalCoordinator({ trustLevel: "propose" });
+    expect((await harness.service.getProjectCoordinator(PROJECT_ID))?.trustLevel).toBe("observe");
+  });
+});
+
+function deferredSignal(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}

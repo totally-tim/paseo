@@ -8,6 +8,7 @@ import { BrowserAutomationHostCapabilitySchema } from "@getpaseo/protocol/browse
 import type {
   CoordinatorBoardSnapshot,
   ProjectCoordinatorState,
+  GlobalCoordinatorState,
   SessionEventSubscription,
 } from "@getpaseo/protocol/messages";
 import type { AgentRequests } from "./agent/requests/index.js";
@@ -3166,6 +3167,11 @@ export class Session {
     source?: object,
   ): Promise<void> | undefined {
     switch (msg.type) {
+      case "coordinator.global.enable.request":
+      case "coordinator.global.disable.request":
+      case "coordinator.global.update.request":
+      case "coordinator.global.get.request":
+        return this.handleCoordinatorGlobalMessage(msg, source);
       case "coordinator.project.enable.request":
       case "coordinator.project.disable.request":
       case "coordinator.project.update.request":
@@ -3179,10 +3185,77 @@ export class Session {
   }
 
   /**
-   * The four project RPCs share one result payload (`coordinator` plus `error`),
+   * The four global RPCs share one result payload (`coordinator` plus `error`),
    * so failures answer in-band rather than as rpc_error — a disabled or
    * unconfigured coordinator is a normal outcome, not a transport fault.
    */
+  private async handleCoordinatorGlobalMessage(
+    msg: Extract<
+      SessionInboundMessage,
+      {
+        type:
+          | "coordinator.global.enable.request"
+          | "coordinator.global.disable.request"
+          | "coordinator.global.update.request"
+          | "coordinator.global.get.request";
+      }
+    >,
+    source?: object,
+  ): Promise<void> {
+    const respond = (coordinator: GlobalCoordinatorState | null, error: string | null) => {
+      const payload = { requestId: msg.requestId, coordinator, error };
+      switch (msg.type) {
+        case "coordinator.global.enable.request":
+          this.emitForSource({ type: "coordinator.global.enable.response", payload }, source);
+          return;
+        case "coordinator.global.disable.request":
+          this.emitForSource({ type: "coordinator.global.disable.response", payload }, source);
+          return;
+        case "coordinator.global.update.request":
+          this.emitForSource({ type: "coordinator.global.update.response", payload }, source);
+          return;
+        case "coordinator.global.get.request":
+          this.emitForSource({ type: "coordinator.global.get.response", payload }, source);
+          return;
+      }
+    };
+    const service = this.coordinatorService;
+    if (!service) {
+      respond(null, "Coordinator support is not available on this daemon");
+      return;
+    }
+    try {
+      switch (msg.type) {
+        case "coordinator.global.enable.request":
+          respond(
+            await service.enableGlobalCoordinator({
+              profile: msg.profile,
+              ...(msg.trustLevel !== undefined ? { trustLevel: msg.trustLevel } : {}),
+            }),
+            null,
+          );
+          return;
+        case "coordinator.global.disable.request":
+          respond(await service.disableGlobalCoordinator(), null);
+          return;
+        case "coordinator.global.update.request":
+          respond(
+            await service.updateGlobalCoordinator({
+              ...(msg.profile !== undefined ? { profile: msg.profile } : {}),
+              ...(msg.trustLevel !== undefined ? { trustLevel: msg.trustLevel } : {}),
+            }),
+            null,
+          );
+          return;
+        case "coordinator.global.get.request":
+          respond(await service.getGlobalCoordinator(), null);
+          return;
+      }
+    } catch (error) {
+      respond(null, getErrorMessage(error));
+    }
+  }
+
   private async handleCoordinatorProjectMessage(
     msg: Extract<
       SessionInboundMessage,
@@ -5702,6 +5775,7 @@ export class Session {
 
     return {
       id: workspace.workspaceId,
+      ...(workspace.hidden || resolvedProjectRecord?.hidden ? { hidden: true } : {}),
       projectId: workspace.projectId,
       projectDisplayName: resolvedProjectRecord
         ? resolveProjectDisplayName(resolvedProjectRecord)
@@ -5790,6 +5864,7 @@ export class Session {
     const projectRecord = await this.projectRegistry.get(result.workspace.projectId);
     return {
       id: result.workspace.workspaceId,
+      ...(result.workspace.hidden || projectRecord?.hidden ? { hidden: true } : {}),
       projectId: result.workspace.projectId,
       projectDisplayName: projectRecord
         ? resolveProjectDisplayName(projectRecord)
@@ -5971,6 +6046,7 @@ export class Session {
     const icon = await this.projectIcons.snapshot(project);
     return {
       projectId: project.projectId,
+      ...(project.hidden !== undefined ? { hidden: project.hidden } : {}),
       ...(project.projectKey ? { projectKey: project.projectKey } : {}),
       projectDisplayName: resolveProjectDisplayName(project),
       projectCustomName: project.customName ?? null,

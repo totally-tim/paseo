@@ -7,11 +7,15 @@ import { join } from "node:path";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { AgentManager } from "./agent-manager.js";
+import { StaleProviderSessionError } from "./stale-provider-session-error.js";
 import { AgentStorage } from "./agent-storage.js";
 import {
   formatSystemNotificationPrompt,
   isSystemInjectedEnvelope,
   setupFinishNotification,
+  setAgentNotificationDeliveryHandler,
+  withAgentNotificationDelivery,
+  startAgentRun,
   waitForAgentRunStartWithTimeout,
 } from "./agent-prompt.js";
 import type { AgentManagerEvent, ManagedAgent } from "./agent-manager.js";
@@ -63,6 +67,7 @@ interface FinishNotificationScenarioOptions {
 }
 
 interface FinishNotificationScenario {
+  setDeliveryGuard(guard: (agentId: string) => Promise<boolean>): void;
   startWatchingChild(): void;
   requestChildPermission(requestId?: string): void;
   resolveChildPermission(requestId?: string): void;
@@ -154,6 +159,12 @@ function createFinishNotificationScenario(
   });
 
   return {
+    setDeliveryGuard(guard: (agentId: string) => Promise<boolean>) {
+      setAgentNotificationDeliveryHandler(agentManager, async (agentId, deliver) => {
+        if (await guard(agentId)) return deliver();
+        return undefined;
+      });
+    },
     startWatchingChild() {
       setupFinishNotification({
         agentManager,
@@ -948,4 +959,58 @@ test("waiting for a run start still gives up at the run start budget", async () 
     vi.useRealTimers();
     await scenario.cleanup();
   }
+});
+
+test("a delivery guard can suppress a notification already queued before disable", async () => {
+  const harness = createFinishNotificationScenario();
+  let enabled = true;
+  const guard = vi.fn(async () => enabled);
+  harness.setDeliveryGuard(guard);
+  harness.startWatchingChild();
+  harness.finishChild();
+  enabled = false;
+  await vi.waitFor(() => expect(guard).toHaveBeenCalledWith("caller-agent"));
+  expect(harness.parentPrompts()).toEqual([]);
+});
+
+test("explicit and automatic finish subscriptions deliver once per turn", async () => {
+  const harness = createFinishNotificationScenario();
+  harness.startWatchingChild();
+  harness.startWatchingChild();
+  await harness.finishChildAndReadParentPrompt();
+  expect(harness.parentPrompts()).toHaveLength(1);
+  harness.startWatchingChild();
+  await harness.finishChildAndReadParentPrompt();
+  expect(harness.parentPrompts()).toHaveLength(2);
+});
+
+test("background stale-session recovery rechecks notification eligibility before reopening", async () => {
+  const manager = new AgentManager({ clients: {}, logger: createTestLogger() });
+  vi.spyOn(manager, "assertAgentCanAcceptPrompt").mockImplementation(() => {});
+  vi.spyOn(manager, "tryRunOutOfBand").mockReturnValue(false);
+  vi.spyOn(manager, "hasInFlightRun").mockReturnValue(false);
+  let release!: () => void;
+  const failed = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  vi.spyOn(manager, "streamAgent").mockImplementation(async function* () {
+    yield { type: "turn_started", provider: "codex", turnId: "stale-turn" };
+    await failed;
+    throw new StaleProviderSessionError("retired-session");
+  });
+  const reload = vi.spyOn(manager, "reloadAgentSession");
+  let enabled = true;
+  const eligibility = vi.fn(() => enabled);
+  setAgentNotificationDeliveryHandler(manager, async (_agentId, deliver) => {
+    if (eligibility()) return deliver();
+    return undefined;
+  });
+  await startAgentRun(manager, "global-agent", "project summary", createTestLogger(), {
+    backgroundRecovery: (recover) =>
+      withAgentNotificationDelivery(manager, "global-agent", recover),
+  });
+  enabled = false;
+  release();
+  await vi.waitFor(() => expect(eligibility).toHaveBeenCalled());
+  expect(reload).not.toHaveBeenCalled();
 });

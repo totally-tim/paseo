@@ -202,3 +202,21 @@ describe("assertCoordinatorToolAllowed", () => {
     }
   });
 });
+
+test("global coordinator delegates at Observe but never spawns or mutates projects at Ship", () => {
+  for (const trust of ["observe", "ship"]) {
+    const caller = {
+      labels: { [PASEO_ROLE_LABEL]: "coordinator.global", [COORDINATOR_TRUST_LABEL]: trust },
+    };
+    expect(() => assertCoordinatorToolAllowed(caller, "send_agent_prompt")).not.toThrow();
+    for (const tool of [
+      "create_agent",
+      "create_workspace",
+      "cancel_agent",
+      "respond_to_permission",
+      "create_change_request",
+    ]) {
+      expect(() => assertCoordinatorToolAllowed(caller, tool)).toThrow();
+    }
+  }
+});

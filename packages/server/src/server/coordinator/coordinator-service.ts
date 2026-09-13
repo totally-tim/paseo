@@ -4,6 +4,7 @@ import path from "node:path";
 import type { Logger } from "pino";
 
 import {
+  COORDINATOR_GLOBAL_ROLE,
   COORDINATOR_PROJECT_ID_LABEL,
   COORDINATOR_PROJECT_ROLE,
   COORDINATOR_SUBAGENT_KIND_LABEL,
@@ -19,6 +20,7 @@ import {
   type CoordinatorSubagentKind,
 } from "@getpaseo/protocol/agent-labels";
 import type {
+  GlobalCoordinatorState,
   CoordinatorBoardSnapshot,
   CoordinatorDecisionBoardRow,
   CoordinatorGuard,
@@ -43,6 +45,8 @@ import {
   formatSystemNotificationPrompt,
   sanitizeUntrustedText,
   sendPromptToAgent,
+  setupFinishNotification,
+  setAgentNotificationDeliveryHandler,
 } from "../agent/agent-prompt.js";
 import type { AgentManager, AgentManagerEvent, ManagedAgent } from "../agent/agent-manager.js";
 import type { LifecycleBus } from "../agent/lifecycle-bus.js";
@@ -82,6 +86,7 @@ import {
   buildProjectCoordinatorFirstContactPrompt,
   buildProjectCoordinatorSystemPrompt,
 } from "./prompts.js";
+import { GlobalCoordinator } from "./global-coordinator.js";
 import { coordinatorSpawnEnv } from "./spawn-isolation.js";
 import { coordinatorTrustAtLeast, coordinatorTrustLevelFromLabels } from "./tool-policy.js";
 import { composeWakeEnvelope } from "./wake-envelope.js";
@@ -212,10 +217,12 @@ interface CoordinatorCoverageEntry {
 }
 
 export interface CoordinatorServiceDeps {
+  /** Daemon-owned setup questions, reconciled when the global session becomes resident or a project is added. */
+  reconcileGlobalSetupProposals?: (state: GlobalCoordinatorState) => Promise<void>;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
-  projectRegistry: Pick<ProjectRegistry, "get" | "list" | "subscribeToMutations">;
-  workspaceRegistry: Pick<WorkspaceRegistry, "get" | "list" | "subscribeToMutations">;
+  projectRegistry: Pick<ProjectRegistry, "get" | "list" | "upsert" | "subscribeToMutations">;
+  workspaceRegistry: Pick<WorkspaceRegistry, "get" | "list" | "upsert" | "subscribeToMutations">;
   createWorkspaceForDirectory: (
     cwd: string,
     title?: string | null,
@@ -246,6 +253,10 @@ export interface CoordinatorWake {
   key: string;
   reason: string;
   details?: string;
+}
+
+function globalParentLabels(global: GlobalCoordinatorState): Record<string, string> {
+  return global.enabled && global.agentId ? { [PARENT_AGENT_ID_LABEL]: global.agentId } : {};
 }
 
 function recordActivityMs(record: StoredAgentRecord): number {
@@ -512,6 +523,9 @@ function cumulativeUsageDelta(total: number, last: number): number {
  * the service itself writes Wake and Done rows.
  */
 export class CoordinatorService {
+  private readonly global: GlobalCoordinator;
+  private globalSnapshot: GlobalCoordinatorState | null = null;
+  private readonly projectSummarySubscriptions = new Map<string, () => void>();
   private readonly store: CoordinatorStore;
   private readonly agentManager: AgentManager;
   private readonly agentStorage: AgentStorage;
@@ -538,6 +552,7 @@ export class CoordinatorService {
   private readonly listeners = new Set<(snapshot: CoordinatorBoardSnapshot) => void>();
   private readonly emittedSnapshotKeys = new Map<string, string>();
   private readonly projectOps = new Map<string, Promise<void>>();
+  private readonly globalOps = new Map<string, Promise<void>>();
   private readonly boardOps = new Map<string, Promise<void>>();
   /** Serializes guard-check-plus-create per coordinator so concurrent spawns can't race the cap. */
   private readonly spawnOps = new Map<string, Promise<void>>();
@@ -567,7 +582,7 @@ export class CoordinatorService {
   private started = false;
   private stopped = false;
 
-  constructor(deps: CoordinatorServiceDeps) {
+  constructor(private readonly deps: CoordinatorServiceDeps) {
     this.agentManager = deps.agentManager;
     this.agentStorage = deps.agentStorage;
     this.projectRegistry = deps.projectRegistry;
@@ -582,6 +597,35 @@ export class CoordinatorService {
     this.changeRequestPollIntervalMs = deps.changeRequestPollIntervalMs;
     this.logger = deps.logger.child({ module: "coordinator" });
     this.store = new CoordinatorStore(deps.paseoHome, deps.logger);
+    this.global = new GlobalCoordinator(
+      deps,
+      (state) => {
+        this.globalSnapshot = state;
+        if (!state.enabled) this.stopProjectSummaries();
+        if (state.enabled) {
+          for (const agent of this.agentManager.listAgents()) this.trackProjectSummary(agent);
+        }
+        if (state.projectId) this.queueBoardRefresh(state.projectId);
+      },
+      (projectId, agentId) =>
+        this.appendDoneRow(projectId, "Retired a duplicate global coordinator session", {
+          agentId,
+        }),
+      (agentId, profile) => this.applyProfileToLiveCoordinator(agentId, profile),
+    );
+    setAgentNotificationDeliveryHandler(this.agentManager, async (agentId, deliver) => {
+      const agent = this.agentManager.getAgent(agentId) ?? (await this.agentStorage.get(agentId));
+      if (!agent || getCoordinatorRole(agent.labels) !== COORDINATOR_GLOBAL_ROLE) return deliver();
+      return this.withGlobalLock(async () => {
+        if (
+          this.stopped ||
+          !this.globalSnapshot?.enabled ||
+          this.globalSnapshot.agentId !== agentId
+        )
+          return undefined;
+        return deliver();
+      });
+    });
   }
 
   /**
@@ -594,6 +638,7 @@ export class CoordinatorService {
     this.started = true;
     try {
       await this.reconcileOnLoad();
+      await this.withGlobalLock(() => this.global.start());
     } catch (error) {
       this.logger.error({ err: error }, "Coordinator reconciliation failed during startup");
     }
@@ -624,6 +669,7 @@ export class CoordinatorService {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.stopProjectSummaries();
     this.changeRequestPoll?.stop();
     if (this.stallSweepTimer) {
       clearInterval(this.stallSweepTimer);
@@ -653,7 +699,53 @@ export class CoordinatorService {
   // coordinator.project.*
   // -------------------------------------------------------------------------
 
+  getGlobalCoordinator(): Promise<GlobalCoordinatorState> {
+    return this.global.get();
+  }
+
+  async enableGlobalCoordinator(input: {
+    profile: CoordinatorProfileSelection;
+    trustLevel?: CoordinatorTrustLevel;
+  }): Promise<GlobalCoordinatorState> {
+    return this.withGlobalLock(async () => {
+      this.assertAgentMcpEndpoint("required");
+      const state = await this.global.enable(input);
+      if (input.trustLevel !== undefined) await this.propagateGlobalTrust(input.trustLevel);
+      return state;
+    });
+  }
+
+  disableGlobalCoordinator(): Promise<GlobalCoordinatorState> {
+    return this.withGlobalLock(() => this.global.disable());
+  }
+
+  async updateGlobalCoordinator(input: {
+    profile?: CoordinatorProfileSelection;
+    trustLevel?: CoordinatorTrustLevel;
+  }): Promise<GlobalCoordinatorState> {
+    return this.withGlobalLock(async () => {
+      const state = await this.global.update(input);
+      if (input.profile && state.enabled && state.agentId)
+        await this.applyProfileToLiveCoordinator(state.agentId, input.profile);
+      if (input.trustLevel !== undefined) await this.propagateGlobalTrust(input.trustLevel);
+      return state;
+    });
+  }
+
+  private async propagateGlobalTrust(trustLevel: CoordinatorTrustLevel): Promise<void> {
+    for (const projectId of await this.store.listProjectIds()) {
+      await this.withProjectLock(projectId, async () => {
+        // The inheritance test and mutation share the user override's lock.
+        // A project override can never be overwritten or re-marked inherited
+        // by a propagation that inspected an earlier version of its state.
+        if (!(await this.getState(projectId))?.trustInherited) return;
+        await this.updateProjectCoordinatorLocked({ projectId, trustLevel }, true);
+      });
+    }
+  }
+
   async getProjectCoordinator(projectId: string): Promise<ProjectCoordinatorState | null> {
+    if ((await this.global.get()).projectId === projectId) return null;
     const state = await this.getState(projectId);
     if (!state) return null;
     return this.toProjectCoordinatorState(state);
@@ -662,14 +754,25 @@ export class CoordinatorService {
   async enableProjectCoordinator(
     input: EnableProjectCoordinatorInput,
   ): Promise<ProjectCoordinatorState> {
+    return this.withGlobalLock(() => this.enableProjectCoordinatorAtCurrentDefault(input));
+  }
+
+  private async enableProjectCoordinatorAtCurrentDefault(
+    input: EnableProjectCoordinatorInput,
+  ): Promise<ProjectCoordinatorState> {
     return this.withProjectLock(input.projectId, async () => {
       const project = await this.projectRegistry.get(input.projectId);
       if (!project) throw new CoordinatorRequestError(`Unknown project: ${input.projectId}`);
+      if (project.hidden)
+        throw new CoordinatorRequestError(
+          "The hidden global project cannot host a project coordinator",
+        );
       if (project.archivedAt) {
         throw new CoordinatorRequestError(`Project is archived: ${input.projectId}`);
       }
       const scope = input.scope ?? "everything";
-      const trustLevel = input.trustLevel ?? "observe";
+      const global = await this.global.get();
+      const trustLevel = input.trustLevel ?? global.trustLevel;
       const now = new Date().toISOString();
       const records = await this.agentStorage.list();
       let state = (await this.getState(input.projectId)) ?? this.newState(input.projectId, now);
@@ -690,6 +793,7 @@ export class CoordinatorService {
         scope,
         profile: input.profile,
         profiles: input.profiles ?? state.profiles,
+        trustInherited: input.trustLevel === undefined,
         updatedAt: now,
       };
 
@@ -709,6 +813,7 @@ export class CoordinatorService {
           initialTitle: COORDINATOR_TITLE,
           env: coordinatorSpawnEnv(trustLevel),
           labels: {
+            ...globalParentLabels(global),
             [PASEO_ROLE_LABEL]: COORDINATOR_PROJECT_ROLE,
             [COORDINATOR_PROJECT_ID_LABEL]: input.projectId,
             [COORDINATOR_TRUST_LABEL]: trustLevel,
@@ -760,6 +865,8 @@ export class CoordinatorService {
       }
 
       await this.setState(input.projectId, state);
+      await this.global.reparentProjects();
+      await this.reconcileGlobalSetupProposals();
       this.changeRequestPoll?.trackProject(input.projectId);
       this.queueBoardRefresh(input.projectId);
       return this.toProjectCoordinatorState(state);
@@ -768,6 +875,7 @@ export class CoordinatorService {
 
   async disableProjectCoordinator(projectId: string): Promise<ProjectCoordinatorState | null> {
     return this.withProjectLock(projectId, async () => {
+      await this.assertVisibleProject(projectId);
       const state = await this.getState(projectId);
       if (!state) return null;
       const next: PersistedProjectCoordinator = {
@@ -801,52 +909,62 @@ export class CoordinatorService {
   async updateProjectCoordinator(
     input: UpdateProjectCoordinatorInput,
   ): Promise<ProjectCoordinatorState | null> {
-    return this.withProjectLock(input.projectId, async () => {
-      const state = await this.getState(input.projectId);
-      if (!state) return null;
-      const now = new Date().toISOString();
-      const next: PersistedProjectCoordinator = { ...state, updatedAt: now };
+    return this.withProjectLock(input.projectId, () => this.updateProjectCoordinatorLocked(input));
+  }
 
-      if (input.profile !== undefined) {
-        if (state.agentId) {
-          const record = await this.agentStorage.get(state.agentId);
-          if (record && record.provider !== input.profile.provider) {
-            throw new CoordinatorRequestError(
-              "The coordinator's provider is fixed for its session lifetime; disable and re-enable to switch providers",
-            );
-          }
-        }
-        if (state.enabled && state.agentId) {
-          await this.applyProfileToLiveCoordinator(state.agentId, input.profile);
-        }
-        next.profile = input.profile;
-      }
-      if (input.profiles !== undefined) next.profiles = input.profiles;
-      if (input.trustLevel !== undefined) next.trustLevel = input.trustLevel;
-      if (input.scope !== undefined) next.scope = input.scope;
-      if (input.guard !== undefined) next.guard = input.guard;
-      if (Object.prototype.hasOwnProperty.call(input, "usageExpectation")) {
-        next.usageExpectation = input.usageExpectation ?? undefined;
-      }
+  /** Caller holds this project's lock. */
+  private async updateProjectCoordinatorLocked(
+    input: UpdateProjectCoordinatorInput,
+    trustInherited = false,
+  ): Promise<ProjectCoordinatorState | null> {
+    await this.assertVisibleProject(input.projectId);
+    const state = await this.getState(input.projectId);
+    if (!state) return null;
+    const now = new Date().toISOString();
+    const next: PersistedProjectCoordinator = { ...state, updatedAt: now };
 
-      await this.setState(input.projectId, next);
-      // Stepping down applies instantly: the tool gate reads the label on every
-      // call, and the spawn guard reads the persisted state, so mirroring the
-      // label here is what makes a lowered level take effect mid-session.
-      if (input.trustLevel !== undefined && input.trustLevel !== state.trustLevel) {
-        await this.syncTrustLabel(next.agentId, input.trustLevel);
-        // The system prompt carries the level's rules ("you may NOT spawn") —
-        // leave it stale and a raised coordinator keeps refusing the workflow
-        // the label now permits.
-        await this.syncTrustPrompt(next, input.trustLevel);
-        await this.appendWakeRow(
-          input.projectId,
-          `Trust: now at ${capitalizeTrust(input.trustLevel)}`,
-        );
+    if (input.profile !== undefined) {
+      if (state.agentId) {
+        const record = await this.agentStorage.get(state.agentId);
+        if (record && record.provider !== input.profile.provider) {
+          throw new CoordinatorRequestError(
+            "The coordinator's provider is fixed for its session lifetime; disable and re-enable to switch providers",
+          );
+        }
       }
-      this.queueBoardRefresh(input.projectId);
-      return this.toProjectCoordinatorState(next);
-    });
+      if (state.enabled && state.agentId) {
+        await this.applyProfileToLiveCoordinator(state.agentId, input.profile);
+      }
+      next.profile = input.profile;
+    }
+    if (input.profiles !== undefined) next.profiles = input.profiles;
+    if (input.trustLevel !== undefined) {
+      next.trustLevel = input.trustLevel;
+      next.trustInherited = trustInherited;
+    }
+    if (input.scope !== undefined) next.scope = input.scope;
+    if (input.guard !== undefined) next.guard = input.guard;
+    if (Object.prototype.hasOwnProperty.call(input, "usageExpectation")) {
+      next.usageExpectation = input.usageExpectation ?? undefined;
+    }
+
+    await this.setState(input.projectId, next);
+    // Stepping down applies instantly: the tool gate reads the label on every
+    // call, and the spawn guard reads the persisted state, so mirroring the
+    // label here is what makes a lowered level take effect mid-session.
+    if (input.trustLevel !== undefined && input.trustLevel !== state.trustLevel) {
+      await this.syncTrustLabel(next.agentId, input.trustLevel);
+      // The system prompt carries the level's rules ("you may NOT spawn") —
+      // leave it stale and a raised coordinator keeps refusing the workflow
+      // the label now permits.
+      await this.syncTrustPrompt(next, input.trustLevel);
+      await this.appendWakeRow(
+        input.projectId,
+        `Trust: now at ${capitalizeTrust(input.trustLevel)}`,
+      );
+    }
+    this.queueBoardRefresh(input.projectId);
+    return this.toProjectCoordinatorState(next);
   }
 
   /**
@@ -1068,6 +1186,9 @@ export class CoordinatorService {
       return;
     }
 
+    if (getCoordinatorRole(caller.labels) === COORDINATOR_GLOBAL_ROLE) {
+      return this.assertGlobalTargetAllowed(callerAgentId, targetAgentId, options);
+    }
     if (await isAgentDescendantOf(deps, callerAgentId, targetAgentId)) return;
 
     const projectId = getCoordinatorProjectIdFromLabels(caller.labels);
@@ -1084,6 +1205,32 @@ export class CoordinatorService {
       coordinatorTrustAtLeast(trust, "ship")
         ? "Coordinators may only act on their own subagents or sessions inside this project's scope — the target is outside that boundary"
         : "Coordinators may only act on their own subagents; sessions outside the delegation tree need Ship trust and in-scope coverage",
+    );
+  }
+
+  private async assertGlobalTargetAllowed(
+    callerAgentId: string,
+    targetAgentId: string,
+    options?: { action?: "steer" | "mutate" },
+  ): Promise<void> {
+    const global = await this.global.get();
+    const target =
+      this.agentManager.getAgent(targetAgentId) ?? (await this.agentStorage.get(targetAgentId));
+    const targetProjectId = target ? getCoordinatorProjectIdFromLabels(target.labels) : null;
+    const project = targetProjectId ? await this.getState(targetProjectId) : null;
+    if (
+      global.enabled &&
+      global.agentId === callerAgentId &&
+      options?.action !== "mutate" &&
+      target &&
+      getCoordinatorRole(target.labels) === COORDINATOR_PROJECT_ROLE &&
+      getParentAgentIdFromLabels(target.labels) === callerAgentId &&
+      project?.enabled &&
+      project.agentId === targetAgentId
+    )
+      return;
+    throw new CoordinatorRequestError(
+      "The global coordinator may only send prompts to its enabled project coordinators",
     );
   }
 
@@ -1364,6 +1511,10 @@ export class CoordinatorService {
     governing: { node: { agentId: string; labels: Record<string, string> }; depth: number },
     input: CoordinatorSpawnGateInput,
   ): Promise<CoordinatorSpawnDecision> {
+    if (getCoordinatorRole(governing.node.labels) === COORDINATOR_GLOBAL_ROLE)
+      throw new CoordinatorRequestError(
+        "The global coordinator delegates to project coordinators; it never spawns workers",
+      );
     const projectId = getCoordinatorProjectIdFromLabels(governing.node.labels);
     const state = projectId ? await this.getState(projectId) : null;
     const trust = state?.trustLevel ?? coordinatorTrustLevelFromLabels(governing.node.labels);
@@ -1473,6 +1624,8 @@ export class CoordinatorService {
     }
     const projectIds = new Set<string>(await this.store.listProjectIds());
     for (const key of this.states.keys()) projectIds.add(key);
+    const global = await this.global.get();
+    if (global.projectId) projectIds.add(global.projectId);
     const snapshots: CoordinatorBoardSnapshot[] = [];
     for (const id of projectIds) {
       snapshots.push(await this.buildBoardSnapshot(id));
@@ -1573,9 +1726,11 @@ export class CoordinatorService {
     const needsYou = this.buildNeedsYouRows(projectId, needsYouAgents);
     const working = await this.buildWorkingRows(projectId, covered);
     const done = this.pruneDoneRows(board.done).slice(0, DONE_SNAPSHOT_LIMIT);
-    const usage = state ? await this.currentUsage(state) : undefined;
+    const globalTier = project?.hidden === true;
+    const usage = state && !globalTier ? await this.currentUsage(state) : undefined;
     return {
       projectId,
+      tier: globalTier ? "global" : "project",
       ...(project ? { projectName: project.customName ?? project.displayName } : {}),
       needsYou,
       working,
@@ -1612,6 +1767,7 @@ export class CoordinatorService {
         const actions =
           questions && questions.count > 1 ? [] : decisionRowActions(request, question);
         needsYou.push({
+          ...projectSetupRowFields(request),
           kind: "decision",
           id: `decision:${agent.id}:${request.id}`,
           projectId,
@@ -1710,6 +1866,7 @@ export class CoordinatorService {
     if (this.stopped) return;
     try {
       if (event.type === "agent_state") {
+        this.trackProjectSummary(event.agent);
         await this.onAgentState(event.agent);
       } else if (event.type === "agent_stream") {
         await this.onAgentStream(event.agentId, event.event);
@@ -1717,6 +1874,36 @@ export class CoordinatorService {
     } catch (error) {
       this.logger.warn({ err: error, eventType: event.type }, "Coordinator event handling failed");
     }
+  }
+
+  private trackProjectSummary(agent: ManagedAgent): void {
+    const global = this.globalSnapshot;
+    if (
+      !global?.enabled ||
+      !global.agentId ||
+      agent.lifecycle !== "running" ||
+      getCoordinatorRole(agent.labels) !== COORDINATOR_PROJECT_ROLE ||
+      getParentAgentIdFromLabels(agent.labels) !== global.agentId
+    )
+      return;
+    // Arm synchronously on the running state, before an immediately finishing
+    // provider can publish idle. Explicit send_agent_prompt shares this watcher.
+    this.projectSummarySubscriptions.set(
+      agent.id,
+      setupFinishNotification({
+        agentManager: this.agentManager,
+        agentStorage: this.agentStorage,
+        childAgentId: agent.id,
+        callerAgentId: global.agentId,
+        requireParentOwnership: true,
+        logger: this.logger,
+      }),
+    );
+  }
+
+  private stopProjectSummaries(): void {
+    for (const stop of this.projectSummarySubscriptions.values()) stop();
+    this.projectSummarySubscriptions.clear();
   }
 
   private async onAgentState(agent: ManagedAgent): Promise<void> {
@@ -1919,7 +2106,7 @@ export class CoordinatorService {
       this.agentManager.getAgent(agentId)?.labels ??
       (await this.agentStorage.get(agentId))?.labels ??
       null;
-    if (labels) {
+    if (labels && getCoordinatorRole(labels) !== COORDINATOR_GLOBAL_ROLE) {
       if (getCoordinatorRole(labels) !== null) {
         projectId = getCoordinatorProjectIdFromLabels(labels);
       } else {
@@ -2120,12 +2307,19 @@ export class CoordinatorService {
     }
   }
 
+  private async reconcileGlobalSetupProposals(): Promise<void> {
+    await this.deps.reconcileGlobalSetupProposals?.(await this.global.get());
+  }
+
   private async onProjectMutation(mutation: ProjectMutation): Promise<void> {
     if (this.stopped) return;
-    // A project addition arrives here as kind "upsert" — that is where the
-    // global coordinator's project-added wake belongs once the global
-    // coordinator exists (spec wake sources). Today only the per-project
-    // board refreshes; no wake is emitted for upserts.
+    if (mutation.kind === "upsert" && mutation.project) {
+      const project = mutation.project;
+      await this.withGlobalLock(() => this.global.projectAdded(project)).catch((error) =>
+        this.logger.warn({ err: error }, "Global project-added wake failed"),
+      );
+    }
+    await this.reconcileGlobalSetupProposals();
     this.queueBoardRefresh(mutation.projectId);
     if (mutation.kind !== "archive" && mutation.kind !== "remove") return;
     this.changeRequestPoll?.untrackProject(mutation.projectId);
@@ -2762,8 +2956,28 @@ export class CoordinatorService {
   // State + board persistence
   // -------------------------------------------------------------------------
 
+  private async assertVisibleProject(projectId: string): Promise<void> {
+    if ((await this.projectRegistry.get(projectId))?.hidden)
+      throw new CoordinatorRequestError(
+        "Use global coordinator operations for the hidden coordinator project",
+      );
+  }
+
   private async getState(projectId: string): Promise<PersistedProjectCoordinator | null> {
     if (this.states.has(projectId)) return this.states.get(projectId) ?? null;
+    const global = await this.global.get();
+    if (global.projectId === projectId)
+      return {
+        version: 1,
+        projectId,
+        agentId: global.agentId,
+        enabled: global.enabled,
+        profile: global.profile,
+        trustLevel: global.trustLevel,
+        scope: "project",
+        createdAt: "",
+        updatedAt: "",
+      };
     const state = await this.store.loadState(projectId);
     this.states.set(projectId, state);
     return state;
@@ -2954,6 +3168,10 @@ export class CoordinatorService {
     }
   }
 
+  private withGlobalLock<T>(run: () => Promise<T>): Promise<T> {
+    return this.serialize(this.globalOps, "global", run);
+  }
+
   private async withProjectLock<T>(projectId: string, run: () => Promise<T>): Promise<T> {
     return this.serialize(this.projectOps, projectId, run);
   }
@@ -3038,4 +3256,11 @@ export class CoordinatorService {
       await this.agentManager.setAgentFeature(agent.id, featureId, value);
     }
   }
+}
+
+function projectSetupRowFields(request: AgentPermissionRequest): { setupProjectId?: string } {
+  const setup = request.input?.coordinatorProjectSetup;
+  return isRecordValue(setup) && typeof setup.projectId === "string"
+    ? { setupProjectId: setup.projectId }
+    : {};
 }

@@ -169,6 +169,7 @@ function rowTextPressable({
 
 export function DecisionRow({
   row,
+  projectName,
   agentTitle,
   permission,
   state,
@@ -179,6 +180,7 @@ export function DecisionRow({
   onOpenAgent,
 }: {
   row: CoordinatorDecisionBoardRow;
+  projectName?: string;
   agentTitle: string | null;
   permission: PendingPermission | null;
   state: DecisionResponseState;
@@ -215,7 +217,10 @@ export function DecisionRow({
             style={rowTextPressable}
             testID={`coordinator-decision-text-${row.id}`}
           >
-            <Text style={styles.rowTitle}>{row.question}</Text>
+            <Text style={styles.rowTitle}>
+              {projectName ? `${projectName} · ` : ""}
+              {row.question}
+            </Text>
             {meta ? (
               <Text numberOfLines={2} style={styles.rowMeta}>
                 {meta}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useState, type ReactElement, type ReactNode } from "react";
 import { Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { StyleSheet } from "react-native-unistyles";
@@ -116,6 +116,8 @@ function CoordinatorUsageMeter({
 export interface CoordinatorTrustPillProps {
   /** The board snapshot's level — the echoed truth, not the pending selection. */
   trustLevel: CoordinatorTrustLevel;
+  children?: ReactNode;
+  global?: boolean;
   usage: CoordinatorUsage | null;
   usageExpectation: CoordinatorUsageExpectation | null;
   onSelectTrust: (level: CoordinatorTrustLevel) => Promise<void> | void;
@@ -132,6 +134,8 @@ export function CoordinatorTrustPill({
   usage,
   usageExpectation,
   onSelectTrust,
+  children,
+  global = false,
 }: CoordinatorTrustPillProps): ReactElement {
   const { t } = useTranslation();
   const [autopilotArmed, setAutopilotArmed] = useState(false);
@@ -210,13 +214,14 @@ export function CoordinatorTrustPill({
               onPress={confirmAutopilot}
               testID="coordinator-trust-confirm-autopilot"
             >
-              {t("coordinator.trust.allowAutopilot")}
+              {t(global ? "coordinator.global.allowAutopilot" : "coordinator.trust.allowAutopilot")}
             </Button>
           </View>
         ) : null}
         {usageExpectation && usage ? (
           <CoordinatorUsageMeter usage={usage} expectation={usageExpectation} />
         ) : null}
+        {children}
         {error ? (
           <Text style={styles.errorText} testID="coordinator-trust-error">
             {error}

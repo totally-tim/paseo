@@ -2070,6 +2070,22 @@ export const en = {
     },
   },
   coordinator: {
+    global: {
+      allProjects: "All projects",
+      enableTitle: "Enable coordinator",
+      profile: "Coordinator profile",
+      defaultTrust: "Default trust level",
+      overrides: "Project overrides",
+      allowAutopilot: "Allow autopilot by default",
+      enable: "Enable",
+      loading: "Loading coordinator…",
+      updateHost: "Update this host to use Coordinator.",
+      disconnected: "Connect to this host to use Coordinator.",
+      setup: "Set up a coordinator",
+      retry: "Retry",
+      chooseProfile: "Choose a coordinator profile.",
+      actions: "Coordinator actions",
+    },
     board: {
       title: "Coordinator",
       needsYou: "Needs you",

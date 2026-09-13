@@ -28,6 +28,7 @@ import { useCoordinatorBoardSnapshot } from "@/coordinator/board-store";
 import { buildComposerQuoteText } from "@/coordinator/decisions";
 import { lastAssistantLine } from "@/coordinator/timeline-text";
 import { CoordinatorBoard, type CoordinatorBoardHandlers } from "./board";
+import { GlobalCoordinatorScreen } from "@/coordinator/global-screen";
 import { CoordinatorBoardTracks } from "./board-tracks";
 
 const ThemedKanban = withUnistyles(Kanban);
@@ -170,6 +171,10 @@ function CoordinatorBoardPanel() {
     () => [styles.composerDock, { paddingBottom: insets.bottom }],
     [insets.bottom],
   );
+
+  if (board?.tier === "global") {
+    return <GlobalCoordinatorScreen serverId={serverId} />;
+  }
 
   if (!board || !board.enabled) {
     return (

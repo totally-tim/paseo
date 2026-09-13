@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  WorkspaceDescriptorPayloadSchema,
+  WorkspaceProjectDescriptorPayloadSchema,
   CoordinatorBoardRowSchema,
   CoordinatorBoardSnapshotSchema,
   ProjectCoordinatorStateSchema,
@@ -261,5 +263,75 @@ describe("coordinator wire schemas", () => {
       features: {},
     });
     expect(legacy.features?.coordinator).toBeUndefined();
+  });
+});
+
+describe("global coordinator wire schemas", () => {
+  const state = {
+    enabled: false,
+    agentId: null,
+    workspaceId: null,
+    projectId: null,
+    trustLevel: "observe",
+  };
+
+  it("parses all global requests and correlated success and failure responses", () => {
+    for (const operation of ["enable", "disable", "update", "get"]) {
+      const request = {
+        type: `coordinator.global.${operation}.request`,
+        requestId: `global-${operation}`,
+        ...(["enable", "update"].includes(operation)
+          ? { profile: { provider: "codex" }, trustLevel: "propose" }
+          : {}),
+      };
+      expect(SessionInboundMessageSchema.parse(request)).toEqual(request);
+      for (const result of [
+        { coordinator: state, error: null },
+        { coordinator: null, error: "Coordinator support is not available on this daemon" },
+      ]) {
+        const response = {
+          type: `coordinator.global.${operation}.response`,
+          payload: { requestId: request.requestId, ...result },
+        };
+        expect(SessionOutboundMessageSchema.parse(response)).toEqual(response);
+      }
+    }
+    expect(
+      SessionInboundMessageSchema.safeParse({
+        type: "coordinator.global.enable.request",
+        requestId: "missing-profile",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("keeps legacy descriptors and boards parseable while preserving hidden and tier fields", () => {
+    const project = {
+      projectId: "project-1",
+      projectDisplayName: "paseo",
+      projectRootPath: "/repo",
+      projectKind: "directory",
+    };
+    const workspace = {
+      ...project,
+      id: "workspace-1",
+      workspaceKind: "directory",
+      name: "paseo",
+      status: "done",
+      activityAt: null,
+      gitRuntime: null,
+      githubRuntime: null,
+    };
+    expect(WorkspaceProjectDescriptorPayloadSchema.parse(project).hidden).toBeUndefined();
+    expect(WorkspaceDescriptorPayloadSchema.parse(workspace).hidden).toBeUndefined();
+    expect(WorkspaceProjectDescriptorPayloadSchema.parse({ ...project, hidden: true }).hidden).toBe(
+      true,
+    );
+    expect(WorkspaceDescriptorPayloadSchema.parse({ ...workspace, hidden: true }).hidden).toBe(
+      true,
+    );
+    expect(CoordinatorBoardSnapshotSchema.parse(SNAPSHOT).tier).toBeUndefined();
+    expect(CoordinatorBoardSnapshotSchema.parse({ ...SNAPSHOT, tier: "global" }).tier).toBe(
+      "global",
+    );
   });
 });

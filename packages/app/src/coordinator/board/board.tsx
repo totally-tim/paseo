@@ -1,13 +1,20 @@
-import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Children, memo, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Pressable, Text, View, type PressableStateCallbackType } from "react-native";
 import { useTranslation } from "react-i18next";
 import { StyleSheet } from "react-native-unistyles";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type {
   CoordinatorBoardSnapshot,
+  CoordinatorDecisionBoardRow,
   CoordinatorDoneBoardRow,
   CoordinatorWorkingBoardRow,
 } from "@getpaseo/protocol/messages";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { ScrollView } from "@/components/ui/scroll-view";
 import type { PendingPermission } from "@/types/shared";
@@ -15,6 +22,7 @@ import { formatCompactTimeAgo, formatDuration } from "@/utils/time";
 import { openExternalUrl } from "@/utils/open-external-url";
 import {
   buildBoardActionResponse,
+  shouldOpenProjectSetup,
   resolveComposerQuoteSource,
   resolveDecisionPermission,
   type BoardAction,
@@ -35,10 +43,11 @@ const RESPOND_TIMEOUT_MS = 15_000;
 export interface CoordinatorBoardHandlers {
   /** Opens the coordinator session's ordinary agent tab. */
   onOpenChat: () => void;
+  onSetupProject?: (row: CoordinatorDecisionBoardRow, action: BoardAction) => void;
   /** Opens an agent tab for a working/done row's session. */
   onOpenAgent: (agentId: string) => void;
   /** Opens a done row's file link inside the workspace. */
-  onOpenFile: (request: WorkspaceFileOpenRequest) => void;
+  onOpenFile: (request: WorkspaceFileOpenRequest, projectId?: string) => void;
   /**
    * A resolved composerQuote action: the board composer takes the question as a
    * quote and focuses for the free-text correction.
@@ -71,8 +80,10 @@ function WorkingRow({
   row,
   now,
   onOpenAgent,
+  compact,
 }: {
   row: CoordinatorWorkingBoardRow;
+  compact: boolean;
   now: number;
   onOpenAgent: (agentId: string) => void;
 }) {
@@ -93,7 +104,7 @@ function WorkingRow({
         <Text numberOfLines={1} style={styles.rowTitle}>
           {title}
         </Text>
-        {meta ? (
+        {meta && !compact ? (
           <Text numberOfLines={1} style={styles.rowMeta}>
             {meta}
           </Text>
@@ -132,7 +143,7 @@ function DoneRow({
   row: CoordinatorDoneBoardRow;
   now: number;
   onOpenAgent: (agentId: string) => void;
-  onOpenFile: (request: WorkspaceFileOpenRequest) => void;
+  onOpenFile: (request: WorkspaceFileOpenRequest, projectId?: string) => void;
 }) {
   const { t } = useTranslation();
   const at = formatCompactTimeAgo(new Date(row.at), new Date(now));
@@ -150,9 +161,9 @@ function DoneRow({
       return;
     }
     if (link.filePath) {
-      onOpenFile({ location: { path: link.filePath }, disposition: "preferred" });
+      onOpenFile({ location: { path: link.filePath }, disposition: "preferred" }, row.projectId);
     }
-  }, [link, onOpenAgent, onOpenFile]);
+  }, [link, onOpenAgent, onOpenFile, row.projectId]);
 
   return (
     <View style={styles.rowPress} testID={`coordinator-done-${row.id}`}>
@@ -183,6 +194,164 @@ function DoneRow({
   );
 }
 
+function CompactBoardScroll({
+  children,
+  hasDecisions,
+  doneCount,
+  onToggleDone,
+}: {
+  children: ReactNode;
+  hasDecisions: boolean;
+  doneCount: number;
+  onToggleDone: () => void;
+}) {
+  const content = Children.toArray(children);
+  const needsYou = hasDecisions ? content[0] : null;
+  const working = content[hasDecisions ? 1 : 0];
+  const done = content[hasDecisions ? 2 : 1];
+  const { t } = useTranslation();
+  const stickyHeaders = useMemo(() => (needsYou ? [0, 2, 4] : [0, 2]), [needsYou]);
+  const sections = [];
+  if (needsYou)
+    sections.push(
+      <View key="needs-header" style={styles.stickyHeader}>
+        <SectionLabel title={t("coordinator.board.needsYou")} />
+      </View>,
+      <View key="needs">{needsYou}</View>,
+    );
+  sections.push(
+    <View key="working-header" style={styles.stickyHeader}>
+      <SectionLabel title={t("coordinator.board.working")} />
+    </View>,
+    <View key="working">{working}</View>,
+    <Pressable
+      key="done-header"
+      style={styles.stickyHeader}
+      accessibilityRole="button"
+      onPress={onToggleDone}
+      testID="coordinator-done-toggle"
+    >
+      <SectionLabel title={t("coordinator.board.doneCount", { count: doneCount })} />
+    </Pressable>,
+    <View key="done">{done}</View>,
+  );
+  return (
+    <ScrollView
+      style={styles.boardScroll}
+      contentContainerStyle={styles.boardScrollContent}
+      stickyHeaderIndices={stickyHeaders}
+    >
+      {sections}
+    </ScrollView>
+  );
+}
+
+function CoordinatorChatAction({
+  compact,
+  onOpenChat,
+}: {
+  compact: boolean;
+  onOpenChat: () => void;
+}) {
+  const { t } = useTranslation();
+  if (compact)
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          accessibilityLabel={t("coordinator.global.actions")}
+          testID="coordinator-header-menu"
+        >
+          <Text style={styles.sectionLabel}>•••</Text>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onSelect={onOpenChat}>
+            {t("coordinator.board.openChat")}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    );
+  return (
+    <Button size="sm" variant="ghost" onPress={onOpenChat} testID="coordinator-chat-button">
+      {t("coordinator.board.chat")}
+    </Button>
+  );
+}
+
+function ProjectWorking({
+  board,
+  grouped,
+  compact,
+  now,
+  onOpenAgent,
+}: {
+  board: CoordinatorBoardSnapshot;
+  grouped: boolean;
+  compact: boolean;
+  now: number;
+  onOpenAgent: (agentId: string) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <View style={styles.section} testID={`coordinator-working-project-${board.projectId}`}>
+      {grouped ? <SectionLabel title={board.projectName ?? board.projectId} /> : null}
+      {board.wake ? (
+        <Text numberOfLines={2} style={styles.wakeLine} testID="coordinator-wake">
+          {board.wake.text}
+        </Text>
+      ) : null}
+      {!board.working.length && !board.wake ? (
+        <Text style={styles.emptyLine}>{t("coordinator.board.nothingWorking")}</Text>
+      ) : null}
+      {board.working.map((row) => (
+        <WorkingRow key={row.id} row={row} compact={compact} now={now} onOpenAgent={onOpenAgent} />
+      ))}
+    </View>
+  );
+}
+
+function ProjectDone({
+  board,
+  grouped,
+  now,
+  handlers,
+}: {
+  board: CoordinatorBoardSnapshot;
+  grouped: boolean;
+  now: number;
+  handlers: CoordinatorBoardHandlers;
+}) {
+  const { t } = useTranslation();
+  const openChat = useCallback(() => {
+    if (board.coordinatorAgentId) handlers.onOpenAgent(board.coordinatorAgentId);
+  }, [board.coordinatorAgentId, handlers]);
+  return (
+    <View style={styles.section} testID={`coordinator-done-project-${board.projectId}`}>
+      {grouped ? (
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionLabel}>{board.projectName ?? board.projectId}</Text>
+          {board.coordinatorAgentId ? (
+            <Pressable accessibilityRole="button" onPress={openChat}>
+              <Text style={styles.sectionLabelLink}>{t("coordinator.board.doneWindow")}</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
+      {!board.done.length ? (
+        <Text style={styles.emptyLine}>{t("coordinator.board.nothingDone")}</Text>
+      ) : null}
+      {board.done.slice(0, DONE_ROW_LIMIT).map((row) => (
+        <DoneRow
+          key={row.id}
+          row={row}
+          now={now}
+          onOpenAgent={handlers.onOpenAgent}
+          onOpenFile={handlers.onOpenFile}
+        />
+      ))}
+    </View>
+  );
+}
+
 /**
  * The project board: Needs-you strip, Working and Done sections, the wake
  * line, the reply area and the composer. Everything is a row; the board never
@@ -197,8 +366,14 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
   handlers,
   reply,
   children,
+  groups,
+  headerContent,
+  projectNameForId,
 }: {
   board: CoordinatorBoardSnapshot;
+  groups?: readonly CoordinatorBoardSnapshot[];
+  headerContent?: ReactNode;
+  projectNameForId?: (projectId: string) => string | undefined;
   client: DaemonClient | null;
   pendingPermissions: ReadonlyMap<string, PendingPermission>;
   agentTitleForId: (agentId: string) => string | null;
@@ -216,13 +391,16 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
   const [decisionStates, setDecisionStates] = useState<Record<string, DecisionResponseState>>({});
 
   const decisionRows = board.needsYou;
-  const doneRows = useMemo(() => board.done.slice(0, DONE_ROW_LIMIT), [board.done]);
   const hasDecisions = decisionRows.length > 0;
 
   const respondToDecision = useCallback(
     async (rowId: string, action: BoardAction) => {
       const row = decisionRows.find((entry) => entry.id === rowId);
       if (!row) {
+        return;
+      }
+      if (shouldOpenProjectSetup(row, action) && handlers.onSetupProject) {
+        handlers.onSetupProject(row, action);
         return;
       }
       if (!client) {
@@ -278,11 +456,16 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
 
   const needsYouSection = hasDecisions ? (
     <View style={styles.section} testID="coordinator-section-needs-you">
-      <SectionLabel title={t("coordinator.board.needsYou")} />
+      {!compact ? <SectionLabel title={t("coordinator.board.needsYou")} /> : null}
       {decisionRows.map((row) => (
         <DecisionRow
           key={row.id}
           row={row}
+          projectName={
+            projectNameForId?.(row.setupProjectId ?? row.projectId) ??
+            groups?.find((group) => group.projectId === row.projectId)?.projectName ??
+            undefined
+          }
           agentTitle={agentTitleForId(row.agentId)}
           permission={resolveDecisionPermission(pendingPermissions, row)}
           state={decisionStates[row.id] ?? IDLE_DECISION_STATE}
@@ -298,48 +481,32 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
 
   const workingSection = (
     <View style={styles.section} testID="coordinator-section-working">
-      <SectionLabel title={t("coordinator.board.working")} />
-      {board.wake ? (
-        <Text numberOfLines={2} style={styles.wakeLine} testID="coordinator-wake">
-          {board.wake.text}
-        </Text>
-      ) : null}
-      {board.working.length === 0 && !board.wake ? (
-        <Text style={styles.emptyLine}>{t("coordinator.board.nothingWorking")}</Text>
-      ) : (
-        board.working.map((row) => (
-          <WorkingRow key={row.id} row={row} now={now} onOpenAgent={handlers.onOpenAgent} />
-        ))
-      )}
-    </View>
-  );
-
-  const doneBody =
-    doneRows.length === 0 ? (
-      <Text style={styles.emptyLine}>{t("coordinator.board.nothingDone")}</Text>
-    ) : (
-      doneRows.map((row) => (
-        <DoneRow
-          key={row.id}
-          row={row}
+      {!compact ? <SectionLabel title={t("coordinator.board.working")} /> : null}
+      {(groups ?? [board]).map((group) => (
+        <ProjectWorking
+          key={group.projectId}
+          board={group}
+          grouped={Boolean(groups)}
+          compact={compact}
           now={now}
           onOpenAgent={handlers.onOpenAgent}
-          onOpenFile={handlers.onOpenFile}
         />
-      ))
-    );
+      ))}
+    </View>
+  );
+  const doneBody = (groups ?? [board]).map((group) => (
+    <ProjectDone
+      key={group.projectId}
+      board={group}
+      grouped={Boolean(groups)}
+      now={now}
+      handlers={handlers}
+    />
+  ));
 
   const doneSection = (
     <View style={styles.section} testID="coordinator-section-done">
-      {compact ? (
-        <Pressable
-          accessibilityRole="button"
-          onPress={toggleDoneExpanded}
-          testID="coordinator-done-toggle"
-        >
-          <SectionLabel title={t("coordinator.board.doneCount", { count: board.done.length })} />
-        </Pressable>
-      ) : (
+      {!compact ? (
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionLabel}>{t("coordinator.board.done")}</Text>
           {board.coordinatorAgentId ? (
@@ -352,7 +519,7 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
             </Pressable>
           ) : null}
         </View>
-      )}
+      ) : null}
       {compact && !doneExpanded ? null : doneBody}
     </View>
   );
@@ -364,23 +531,21 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
           {board.projectName ?? t("coordinator.board.title")}
         </Text>
         {board.coordinatorAgentId ? (
-          <Button
-            size="sm"
-            variant="ghost"
-            onPress={handlers.onOpenChat}
-            testID="coordinator-chat-button"
-          >
-            {t("coordinator.board.chat")}
-          </Button>
+          <CoordinatorChatAction compact={compact} onOpenChat={handlers.onOpenChat} />
         ) : null}
       </View>
 
+      {headerContent}
       {compact ? (
-        <ScrollView style={styles.boardScroll} contentContainerStyle={styles.boardScrollContent}>
+        <CompactBoardScroll
+          hasDecisions={hasDecisions}
+          doneCount={board.done.length}
+          onToggleDone={toggleDoneExpanded}
+        >
           {needsYouSection}
           {workingSection}
           {doneSection}
-        </ScrollView>
+        </CompactBoardScroll>
       ) : (
         <View style={styles.boardColumnsWrap}>
           {needsYouSection}
@@ -444,6 +609,7 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.fontSize.base,
     fontWeight: theme.fontWeight.medium,
   },
+  stickyHeader: { backgroundColor: theme.colors.surface0 },
   boardScroll: {
     flex: 1,
   },

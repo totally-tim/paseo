@@ -41,6 +41,14 @@ export interface BoardAction {
   primary: boolean;
 }
 
+/** Setup proposals use question options: Ignore is also an allowed answer. */
+export function shouldOpenProjectSetup(
+  row: Pick<CoordinatorDecisionBoardRow, "setupProjectId">,
+  action: Pick<BoardAction, "label" | "behavior">,
+): boolean {
+  return Boolean(row.setupProjectId) && action.behavior === "allow" && action.label === "Set up";
+}
+
 function normalizeWireVariant(variant: string | undefined): BoardActionVariant | undefined {
   return variant === "primary" || variant === "secondary" || variant === "danger"
     ? variant

@@ -1,4 +1,6 @@
 import {
+  COORDINATOR_GLOBAL_ROLE,
+  getCoordinatorRole,
   COORDINATOR_TRUST_LABEL,
   COORDINATOR_TRUST_LEVELS,
   isCoordinatorAgent,
@@ -150,7 +152,11 @@ export function assertCoordinatorToolAllowed(
 ): void {
   if (!caller || !isCoordinatorAgent(caller)) return;
   const trustLevel = coordinatorTrustLevelFromLabels(caller.labels);
-  if (!isCoordinatorToolAllowed(trustLevel, toolName)) {
+  const allowed =
+    getCoordinatorRole(caller.labels) === COORDINATOR_GLOBAL_ROLE
+      ? OBSERVE_ALLOWED_TOOLS.has(toolName) || toolName === "send_agent_prompt"
+      : isCoordinatorToolAllowed(trustLevel, toolName);
+  if (!allowed) {
     throw new CoordinatorToolDeniedError(toolName, trustLevel);
   }
 }

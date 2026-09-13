@@ -103,6 +103,7 @@ export interface Agent {
 }
 
 export interface WorkspaceDescriptor {
+  hidden?: boolean;
   id: string;
   projectId: string;
   projectDisplayName: string;
@@ -140,6 +141,7 @@ export function normalizeWorkspaceDescriptor(
   return {
     id: normalizeWorkspaceOpaqueId(payload.id) ?? payload.id,
     projectId: payload.projectId,
+    hidden: payload.hidden,
     projectDisplayName: payload.projectDisplayName,
     projectCustomName: payload.projectCustomName ?? null,
     projectGroup: payload.projectGroup ?? null,
@@ -170,6 +172,7 @@ export function normalizeWorkspaceDescriptor(
 }
 
 export interface ProjectDescriptor {
+  hidden?: boolean;
   projectId: string;
   projectKey?: string | null;
   projectDisplayName: string;
@@ -186,6 +189,7 @@ export function normalizeProjectDescriptor(
 ): ProjectDescriptor {
   return {
     projectId: payload.projectId,
+    hidden: payload.hidden,
     projectKey: payload.projectKey ?? null,
     projectDisplayName: payload.projectDisplayName,
     projectCustomName: payload.projectCustomName ?? null,

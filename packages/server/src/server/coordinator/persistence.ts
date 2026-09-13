@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { Logger } from "pino";
 
 import {
+  GlobalCoordinatorStateSchema,
   CoordinatorDoneBoardRowSchema,
   CoordinatorGuardSchema,
   CoordinatorProfilesSchema,
@@ -47,6 +48,7 @@ const PersistedProjectCoordinatorSchema = z.object({
   enabled: z.boolean(),
   trustLevel: CoordinatorTrustLevelSchema,
   scope: CoordinatorScopeSchema,
+  trustInherited: z.boolean().optional(),
   profile: CoordinatorProfileSelectionSchema.optional(),
   profiles: CoordinatorProfilesSchema.optional(),
   usageExpectation: CoordinatorUsageExpectationSchema.optional(),
@@ -92,6 +94,28 @@ export class CoordinatorStore {
   constructor(paseoHome: string, logger: Logger) {
     this.root = coordinatorRoot(paseoHome);
     this.logger = logger.child({ module: "coordinator", component: "store" });
+  }
+
+  async loadGlobal(): Promise<import("@getpaseo/protocol/messages").GlobalCoordinatorState> {
+    const value = await this.readJson(path.join(this.root, "global.json"));
+    return GlobalCoordinatorStateSchema.parse(
+      value ?? {
+        enabled: false,
+        agentId: null,
+        projectId: null,
+        workspaceId: null,
+        trustLevel: "observe",
+      },
+    );
+  }
+
+  async saveGlobal(
+    state: import("@getpaseo/protocol/messages").GlobalCoordinatorState,
+  ): Promise<void> {
+    await this.queueWrite(
+      path.join(this.root, "global.json"),
+      GlobalCoordinatorStateSchema.parse(state),
+    );
   }
 
   statePath(projectId: string): string {
