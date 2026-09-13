@@ -54,6 +54,7 @@ export function buildWorkspaceStructureProjects(input: {
 
   for (const session of input.sessions) {
     for (const project of session.projects) {
+      if (project.hidden) continue;
       projectEntries.push({ serverId: session.serverId, project });
       const sharedKey = project.projectKey ?? null;
       if (sharedKey) {
@@ -83,6 +84,7 @@ export function buildWorkspaceStructureProjects(input: {
 
   for (const session of input.sessions) {
     for (const workspace of session.workspaces) {
+      if (workspace.hidden) continue;
       const viewKey = viewKeyByServerProjectId.get(session.serverId)?.get(workspace.projectId);
       if (!viewKey) continue;
       byProject.get(viewKey)?.workspaces.push({

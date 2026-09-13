@@ -132,6 +132,9 @@ import { createWorkspaceLabelService } from "./workspace-labels/index.js";
 import { createGitHubService } from "../services/github-service.js";
 import { createPaseoWorktree as createRegisteredPaseoWorktree } from "./paseo-worktree-service.js";
 import { createWorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
+import type { CoordinatorMergesDeps } from "./coordinator/merges.js";
+import { CoordinatorService } from "./coordinator/coordinator-service.js";
+import { ProjectSetupProposals } from "./coordinator/project-setup.js";
 import { createPaseoWorktreeWorkflow } from "./worktree-session.js";
 import { DownloadTokenStore } from "./file-download/token-store.js";
 import type { OpenAiSpeechProviderConfig } from "./speech/providers/openai/config.js";
@@ -140,6 +143,7 @@ import type { RequestedSpeechProviders } from "./speech/speech-types.js";
 import { createSpeechService } from "./speech/speech-runtime.js";
 import { AgentManager } from "./agent/agent-manager.js";
 import { AgentStorage } from "./agent/agent-storage.js";
+import { LifecycleBus } from "./agent/lifecycle-bus.js";
 import { attachAgentStoragePersistence } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
 import {
@@ -469,6 +473,7 @@ export interface PaseoDaemonConfig {
 }
 
 export interface PaseoDaemon {
+  coordinatorService: CoordinatorService;
   config: PaseoDaemonConfig;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
@@ -482,6 +487,9 @@ export interface PaseoDaemon {
 }
 
 export interface PaseoDaemonDependencies {
+  /** Clock for durable coordinator decision/digest scheduling in isolated hosts. */
+  coordinatorNow?: () => number;
+  coordinatorMergeForge?: CoordinatorMergesDeps["resolveForge"];
   accountBackend?: ConstructorParameters<typeof ProviderAccountService>[1];
   accountClient?: NonNullable<ConstructorParameters<typeof AgentManager>[0]["createAccountClient"]>;
   accountStoreOptions?: ProviderAccountStoreOptions;
@@ -622,6 +630,9 @@ export async function createPaseoDaemon(
     managedSources: new ManagedPluginSources(config.paseoHome),
     settingsDirectory: path.join(config.paseoHome, "plugin-settings"),
   });
+  // In-process lifecycle fan-out: the same events pluginRuntime ships to plugin
+  // subprocesses, for daemon-internal subscribers (the coordinator service).
+  const lifecycleBus = new LifecycleBus(logger);
 
   const serverId = getOrCreateServerId(config.paseoHome, { logger });
   const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, logger);
@@ -892,13 +903,14 @@ export async function createPaseoDaemon(
   });
   workspaceRegistry.subscribeToMutations((mutation) => {
     if (mutation.kind === "archive" && mutation.workspace) {
-      pluginRuntime.emit("workspace.archived", {
-        workspace: describeHookWorkspace(mutation.workspace),
-      });
+      const hookWorkspace = describeHookWorkspace(mutation.workspace);
+      pluginRuntime.emit("workspace.archived", { workspace: hookWorkspace });
+      lifecycleBus.emit("workspace.archived", { workspace: hookWorkspace });
     }
   });
   const workspaceProvisioning = createWorkspaceProvisioningService({
     lifecycle: pluginRuntime,
+    lifecycleBus,
     serverId,
     projectRegistry,
     workspaceRegistry,
@@ -957,6 +969,7 @@ export async function createPaseoDaemon(
         providerSnapshotManager.createAccountClient.bind(providerSnapshotManager)
       )(provider, context),
     pluginLifecycle: pluginRuntime,
+    lifecycleBus,
     clients: initialAgentManagerState.clients,
     providerDefinitions: initialAgentManagerState.providerDefinitions,
     registry: agentStorage,
@@ -1024,6 +1037,40 @@ export async function createPaseoDaemon(
     getWorkspace: (id) => workspaceRegistry.get(id),
   });
   agentManager.continuations = continuations;
+
+  // Project coordinators are ordinary persisted agents with role labels; the
+  // service reconciles records, keeps them resident, and derives the board.
+  const coordinatorService: CoordinatorService = new CoordinatorService({
+    now: dependencies.coordinatorNow,
+    agentManager,
+    agentStorage,
+    projectRegistry,
+    workspaceRegistry,
+    createWorkspaceForDirectory: (cwd, title, projectId) =>
+      workspaceProvisioning.createWorkspaceForDirectory(cwd, title, projectId),
+    lifecycleBus,
+    workspaceGitService,
+    paseoHome: config.paseoHome,
+    logger,
+    sendDecision: async (input) => {
+      if (!wsServer) return;
+      await wsServer
+        .deliverCoordinatorNotification({ kind: "decision", ...input })
+        .catch((error) => logger.warn({ err: error }, "Coordinator decision push failed"));
+    },
+    sendDigest: async (input) => {
+      if (!wsServer) throw new Error("Notification delivery is not ready");
+      await wsServer.deliverCoordinatorNotification({ kind: "digest", ...input });
+    },
+    reconcileGlobalSetupProposals: (state) => projectSetupProposals.reconcile(state),
+  });
+  const projectSetupProposals = new ProjectSetupProposals({
+    paseoHome: config.paseoHome,
+    agentManager,
+    listProjects: () => projectRegistry.list(),
+    coordinatorEnabled: async (projectId) =>
+      (await coordinatorService.getProjectCoordinator(projectId))?.enabled === true,
+  });
   await continuations.initialize();
   const teardownArchivedWorkspaceRuntime = (workspaceId: string): void => {
     void continuations.cancelWorkspace(workspaceId).catch(() => {
@@ -1239,6 +1286,7 @@ export async function createPaseoDaemon(
     providerSnapshotManager,
     createPaseoWorktree: createPaseoWorktreeForTools,
     ensureWorkspaceForCreate: ensureWorkspaceForCreateAndBroadcastExternal,
+    coordinator: coordinatorService,
   };
   const createAgent = (input: Parameters<typeof createAgentCommand>[1]) =>
     createAgentCommand(createAgentCommandDependencies, input);
@@ -1399,6 +1447,8 @@ export async function createPaseoDaemon(
     );
   };
   const scheduleService = new ScheduleService({
+    runGoal: (schedule, runId) => coordinatorService.runGoalSchedule(schedule, runId),
+    isProtectedAgentTarget: (id) => coordinatorService.isRotatingAgentTarget(id),
     paseoHome: config.paseoHome,
     logger,
     agentManager,
@@ -1407,6 +1457,55 @@ export async function createPaseoDaemon(
     createDirectoryWorkspace: createScheduleLocalWorkspaceExternal,
     createPaseoWorktreeWorkspace: createSchedulePaseoWorktreeExternal,
     archiveWorkspace: archiveScheduleWorkspaceExternal,
+  });
+  const unsubscribeDecisionTick = scheduleService.subscribeTick(() =>
+    coordinatorService.tickDecisions(),
+  );
+  await coordinatorService.initializeRotation({
+    providerSnapshotManager,
+    schedules: () => scheduleService,
+  });
+  await coordinatorService.initializeMerges({
+    resolveForge: dependencies.coordinatorMergeForge,
+    archiveWorkspace: async (workspaceId) => {
+      await archiveWorkspaceByIdExternal(workspaceId, `coordinator-merge:${workspaceId}`);
+    },
+  });
+  await coordinatorService.initializeAutomation({
+    cleanupNeverStartedWorkspace: async ({ workerAgentId, workspaceId, cwd }) => {
+      const workspace = await workspaceRegistry.get(workspaceId);
+      const worker = await agentStorage.get(workerAgentId);
+      if (
+        !workspace ||
+        workspace.kind !== "worktree" ||
+        workspace.cwd !== cwd ||
+        workspace.archivedAt ||
+        !worker?.archivedAt ||
+        worker.lastUserMessageAt ||
+        worker.workspaceId !== workspaceId
+      )
+        return;
+      // Only the freshly minted, now idle workspace may be retired. Another
+      // session joining it prevents cleanup; the archive workflow checks dirtiness.
+      const others = (await agentStorage.list()).filter(
+        (agent) =>
+          agent.id !== workerAgentId && agent.workspaceId === workspaceId && !agent.archivedAt,
+      );
+      if (
+        others.length ||
+        agentManager
+          .listAgents()
+          .some((agent) => agent.id !== workerAgentId && agent.workspaceId === workspaceId)
+      )
+        return;
+      await archiveWorkspaceByIdExternal(workspaceId, `goal-never-started:${workerAgentId}`);
+    },
+    schedules: () => scheduleService,
+    createAgent,
+    resolveProfile: (name) =>
+      (daemonConfigStore.get().agentProfiles ?? []).find(
+        (profile) => profile.id === name || profile.name === name,
+      ) ?? null,
   });
   await scheduleService.start();
   agentManager.setAgentArchivedCallback(async (agentId) => {
@@ -1484,6 +1583,7 @@ export async function createPaseoDaemon(
     paseoToolPolicy:
       runtime.paseoToolPolicy ??
       (runtime.callerAgentId ? agentManager.getPaseoToolPolicy(runtime.callerAgentId) : undefined),
+    coordinator: coordinatorService,
     paseoHome: config.paseoHome,
     worktreesRoot: config.worktreesRoot,
     callerAgentId: runtime.callerAgentId,
@@ -1669,19 +1769,25 @@ export async function createPaseoDaemon(
           const logAndResolve = async () => {
             boundListenTarget = resolveBoundListenTarget(listenTarget, httpServer);
             const mcpBaseUrl = createAgentMcpBaseUrl(boundListenTarget);
-            agentMcpBaseUrl =
-              !mcpEnabled || config.mcpInjectIntoAgents === false ? null : mcpBaseUrl;
+            // The agent MCP endpoint serves requests whenever mcp.enabled; the
+            // injectIntoAgents toggle only gates default per-agent injection.
+            // Agents with `paseoTools: "required"` still need the base URL, so
+            // the URL tracks mcpEnabled alone.
+            agentMcpBaseUrl = mcpEnabled ? mcpBaseUrl : null;
             agentManager.setMcpBaseUrl(agentMcpBaseUrl);
             agentManager.setPaseoToolsEnabled(mcpEnabled && config.mcpInjectIntoAgents !== false);
             daemonConfigStore.onFieldChange("mcp.enabled", (value) => {
               mcpEnabled = value !== false;
               const inject = daemonConfigStore.get().mcp.injectIntoAgents !== false;
-              agentManager.setMcpBaseUrl(mcpEnabled && inject ? mcpBaseUrl : null);
+              agentManager.setMcpBaseUrl(mcpEnabled ? mcpBaseUrl : null);
               agentManager.setPaseoToolsEnabled(mcpEnabled && inject);
               setAgentProviderToolsEnabled(mcpEnabled && inject);
+              void coordinatorService.handleAgentMcpAvailability(mcpEnabled);
             });
+            // Required coordinator injection overrides the default injection toggle.
+            void coordinatorService.handleAgentMcpAvailability(mcpEnabled);
             daemonConfigStore.onFieldChange("mcp.injectIntoAgents", (value) => {
-              agentManager.setMcpBaseUrl(mcpEnabled && value ? mcpBaseUrl : null);
+              agentManager.setMcpBaseUrl(mcpEnabled ? mcpBaseUrl : null);
               agentManager.setPaseoToolsEnabled(mcpEnabled && value !== false);
               setAgentProviderToolsEnabled(mcpEnabled && value !== false);
             });
@@ -1787,9 +1893,13 @@ export async function createPaseoDaemon(
               orchestrationSkills,
               workspaceLabelService,
               continuations,
+              coordinatorService,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
             await pluginRuntime.start();
+            // Coordinators load through ensureAgentLoaded before the first
+            // client connects, so they are resident ahead of the first wake.
+            await coordinatorService.start();
             wsServer.beginAcceptingConnections();
             relayRuntime = createRelayRuntime({
               config: {
@@ -1856,6 +1966,9 @@ export async function createPaseoDaemon(
     // Freeze both ingress and registration before taking the agent closure snapshot.
     wsServer?.prepareForShutdown();
     agentManager.prepareForShutdown();
+    projectSetupProposals.stop();
+    unsubscribeDecisionTick();
+    await coordinatorService.stop().catch(() => undefined);
     await continuations.close();
     await providerAccounts.close();
     await closeAllAgents(logger, agentManager);
@@ -1891,6 +2004,7 @@ export async function createPaseoDaemon(
 
   return {
     config,
+    coordinatorService,
     agentManager,
     agentStorage,
     terminalManager,

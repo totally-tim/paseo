@@ -7,6 +7,7 @@ import {
 } from "./agent-manager.js";
 import type { StoredAgentRecord } from "./agent-storage.js";
 import type { AgentProviderNotice } from "./agent-sdk-types.js";
+import { stripDaemonManagedLabels } from "./daemon-managed-labels.js";
 
 export type LifecycleAgentSnapshot = Pick<ManagedAgent, "id" | "cwd" | "lifecycle">;
 
@@ -167,7 +168,12 @@ export async function updateAgentCommand(
   },
 ): Promise<UpdateAgentResult> {
   const title = input.name?.trim();
-  const labels = input.labels && Object.keys(input.labels).length > 0 ? input.labels : undefined;
+  // Lineage and coordinator stamps are daemon-owned on every channel — a
+  // caller patching paseo.role or paseo.parent-agent-id would mint itself a
+  // coordinator or fake its place in a delegation tree.
+  const strippedLabels = stripDaemonManagedLabels(input.labels);
+  const labels =
+    strippedLabels && Object.keys(strippedLabels).length > 0 ? strippedLabels : undefined;
 
   if (!title && !labels) {
     return {

@@ -1,3 +1,6 @@
+import { ConnectedPermissionPolicySheet } from "@/coordinator/automation/permission-policy-sheet";
+import { resolvePolicyNotification } from "@/coordinator/automation/permission-policy-model";
+import { handleNotificationAction } from "@/push-notifications/actions";
 import "@/styles/unistyles";
 import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
 import { PortalProvider } from "@gorhom/portal";
@@ -131,6 +134,7 @@ import {
 import { buildNotificationRoute, resolveNotificationTarget } from "@/utils/notification-routing";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { PluginCatalogSync } from "@/plugins";
+import { CoordinatorBoardSync } from "@/coordinator/board-sync";
 import {
   ensureOsNotificationPermission,
   WEB_NOTIFICATION_CLICK_EVENT,
@@ -157,6 +161,9 @@ const HostRuntimeBootstrapContext = createContext<HostRuntimeBootstrapState>({
 });
 
 function PushNotificationRouter() {
+  const [policyRequest, setPolicyRequest] =
+    useState<ReturnType<typeof resolvePolicyNotification>>(null);
+  const closePolicy = useCallback(() => setPolicyRequest(null), []);
   const router = useRouter();
   const lastHandledIdRef = useRef<string | null>(null);
   const openNotification = useStableEvent((data: Record<string, unknown> | undefined) => {
@@ -234,7 +241,12 @@ function PushNotificationRouter() {
       }),
     });
 
-    const openFromResponse = (response: Notifications.NotificationResponse) => {
+    const openFromResponse = async (response: Notifications.NotificationResponse) => {
+      try {
+        if (await handleNotificationAction(response)) return;
+      } catch {
+        // A failed background answer opens the original decision for an explicit retry.
+      }
       const identifier = response.notification.request.identifier;
       if (lastHandledIdRef.current === identifier) {
         return;
@@ -244,14 +256,18 @@ function PushNotificationRouter() {
       const data = response.notification.request.content.data as
         | Record<string, unknown>
         | undefined;
-      openNotification(data);
+      const policy = resolvePolicyNotification(response.actionIdentifier, data);
+      if (policy) setPolicyRequest(policy);
+      else openNotification(data);
     };
 
-    const subscription = Notifications.addNotificationResponseReceivedListener(openFromResponse);
+    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      void openFromResponse(response);
+    });
 
     void Notifications.getLastNotificationResponseAsync().then((response) => {
       if (response) {
-        openFromResponse(response);
+        void openFromResponse(response);
       }
       return;
     });
@@ -261,7 +277,13 @@ function PushNotificationRouter() {
     };
   }, [openNotification]);
 
-  return null;
+  return policyRequest ? (
+    <ConnectedPermissionPolicySheet
+      key={`${policyRequest.serverId}:${policyRequest.agentId}:${policyRequest.requestId}`}
+      {...policyRequest}
+      onClose={closePolicy}
+    />
+  ) : null;
 }
 
 function ManagedDaemonSession({ daemon }: { daemon: HostProfile }) {
@@ -275,6 +297,7 @@ function ManagedDaemonSession({ daemon }: { daemon: HostProfile }) {
     <SessionProvider key={daemon.serverId} serverId={daemon.serverId} client={client}>
       <LegacyFavoriteProfileMigrationBootstrap serverId={daemon.serverId} client={client} />
       <PluginCatalogSync serverId={daemon.serverId} client={client} />
+      <CoordinatorBoardSync serverId={daemon.serverId} client={client} />
     </SessionProvider>
   );
 }

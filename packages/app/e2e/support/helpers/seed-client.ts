@@ -30,7 +30,19 @@ interface SeedProjectDescriptor {
  */
 export interface SeedDaemonClient extends Pick<
   DaemonClient,
-  "setProjectGroup" | "getSidebarOrder" | "updateSidebarOrder"
+  | "setProjectGroup"
+  | "getSidebarOrder"
+  | "updateSidebarOrder"
+  | "enableProjectCoordinator"
+  | "disableProjectCoordinator"
+  | "getProjectCoordinator"
+  | "enableGlobalCoordinator"
+  | "disableGlobalCoordinator"
+  | "getGlobalCoordinator"
+  | "getCoordinatorMemory"
+  | "updateCoordinatorMemory"
+  | "observeCoordinatorBoard"
+  | "listCoordinatorGoals"
 > {
   connect(): Promise<void>;
   close(): Promise<void>;

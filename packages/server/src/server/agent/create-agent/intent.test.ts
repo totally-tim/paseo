@@ -55,6 +55,41 @@ describe("resolveCreateAgentIntent", () => {
     });
   });
 
+  it("mints a fresh workspace for a caller that asked for one, inside the caller's gate", async () => {
+    let createCount = 0;
+    const intent = await resolveCreateAgentIntent({
+      caller: { id: "parent-agent", cwd: "/parent", workspaceId: "workspace-parent" },
+      preferCreateWorkspace: true,
+      resolveWorkspace: async (workspaceId) => ({ workspaceId, cwd: "/unused" }),
+      createWorkspace: async () => {
+        createCount += 1;
+        return { workspaceId: "workspace-created", cwd: "/requested-dir" };
+      },
+    });
+
+    expect(intent.workspaceId).toBe("workspace-created");
+    expect(intent.cwd).toBe("/requested-dir");
+    expect(intent.parentAgentId).toBe("parent-agent");
+    expect(createCount).toBe(1);
+  });
+
+  it("an explicit workspace still wins over preferCreateWorkspace", async () => {
+    let createCount = 0;
+    const intent = await resolveCreateAgentIntent({
+      explicitWorkspaceId: "workspace-isolated",
+      caller: { id: "parent-agent", cwd: "/parent", workspaceId: "workspace-parent" },
+      preferCreateWorkspace: true,
+      resolveWorkspace: async (workspaceId) => ({ workspaceId, cwd: "/isolated" }),
+      createWorkspace: async () => {
+        createCount += 1;
+        return { workspaceId: "workspace-created", cwd: "/created" };
+      },
+    });
+
+    expect(intent.workspaceId).toBe("workspace-isolated");
+    expect(createCount).toBe(0);
+  });
+
   it("keeps legacy detached creation independent", async () => {
     const intent = await resolveCreateAgentIntent({
       caller: { id: "parent-agent", cwd: "/parent", workspaceId: "workspace-parent" },

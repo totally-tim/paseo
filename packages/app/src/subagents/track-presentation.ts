@@ -40,7 +40,10 @@ export function buildSubagentRowPresentationData(row: SubagentRow): SubagentRowP
     titleState: label ? "ready" : "loading",
     statusBucket: deriveSidebarStateBucket({
       status,
-      requiresAttention: false,
+      // Provider-owned children have no permission channel; managed children
+      // surface their pending requests as needs_input.
+      pendingPermissionCount: row.kind === "paseo" ? row.pendingPermissionCount : 0,
+      requiresAttention: row.requiresAttention === true,
     }),
   };
 }
@@ -72,9 +75,10 @@ export interface SubagentPillPresentation {
  * "1 failed" over a child that is still working says the fan-out has stopped. Every state present
  * gets its own mark and its own count, in the order the sidebar's status groups list them.
  *
- * It stays one line because subagent rows only ever reach three states — see
- * `buildSubagentRowPresentationData`, which reports no attention of its own — so the pill is two
- * segments at worst, and falls back to naming what it opens once nothing is happening.
+ * It stays one line because a row reports a single bucket even when several
+ * states coincide — a pending permission reads needs_input and a finished
+ * child reads attention, see `buildSubagentRowPresentationData` — and falls
+ * back to naming what it opens once nothing is happening.
  */
 export function buildSubagentPillPresentation(
   t: TFunction,

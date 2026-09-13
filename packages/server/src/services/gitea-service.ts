@@ -27,6 +27,7 @@ import {
 import type {
   CheckDetails,
   CreatePullRequestOptions,
+  CreatePullRequestCommentOptions,
   CurrentPullRequestStatus,
   DisablePullRequestAutoMergeOptions,
   EnablePullRequestAutoMergeOptions,
@@ -40,6 +41,7 @@ import type {
   ListPullRequestsOptions,
   MergePullRequestOptions,
   PullRequestChecksStatus,
+  PullRequestCommentResult,
   PullRequestCreateResult,
   PullRequestMergeable,
   PullRequestMergeResult,
@@ -52,6 +54,7 @@ import type {
   PullRequestTimelineReviewState,
   PullRequestCheck,
   PullRequestCheckoutTarget,
+  RetryPullRequestChecksOptions,
   SearchIssuesAndPrsOptions,
   SearchResult,
 } from "./forge-service.js";
@@ -144,6 +147,7 @@ export interface CreateGiteaServiceOptions {
  */
 const GiteaPrListItemSchema = z
   .object({
+    author: z.string().optional(),
     index: z.string(),
     state: z.string(),
     url: z.string(),
@@ -190,6 +194,7 @@ const GiteaUserSchema = z
 
 const GiteaPullRequestViewSchema = z
   .object({
+    author: z.string().optional(),
     index: z.number(),
     url: z.string(),
     headSha: z.string().optional(),
@@ -238,6 +243,7 @@ const GiteaPullRequestApiSchema = z
 
 const GiteaCurrentPullRequestApiSchema = z
   .object({
+    user: z.object({ login: z.string().optional() }).nullable().optional(),
     number: z.number(),
     html_url: z.string(),
     title: z.string(),
@@ -992,6 +998,7 @@ function currentPullRequestApiToListItem(item: GiteaCurrentPullRequestApi): Gite
   const head =
     headOwner && headOwner !== baseOwner ? `${headOwner}:${item.head.ref}` : item.head.ref;
   return {
+    ...(item.user?.login ? { author: item.user.login } : {}),
     index: String(item.number),
     state: item.merged ? "merged" : item.state,
     url: item.html_url,
@@ -1008,6 +1015,7 @@ function currentPullRequestApiToListItem(item: GiteaCurrentPullRequestApi): Gite
 function toPullRequestSummary(item: GiteaPrListItem): PullRequestSummary {
   const { owner, name } = parseGiteaRepoFromUrl(item.url);
   return {
+    ...(item.author ? { author: item.author } : {}),
     number: parseGiteaInt(item.index) ?? 0,
     title: item.title,
     url: item.url,
@@ -1024,6 +1032,7 @@ function toPullRequestSummary(item: GiteaPrListItem): PullRequestSummary {
 function viewToPullRequestSummary(view: GiteaPullRequestView): PullRequestSummary {
   const { owner, name } = parseGiteaRepoFromUrl(view.url);
   return {
+    ...(view.author ? { author: view.author } : {}),
     number: view.index,
     title: view.title,
     url: view.url,
@@ -1158,8 +1167,9 @@ function parseIndexFromUrl(url: string): number | null {
 
 // Flags whose values carry user/generated content (a PR title or body may
 // contain a secret). The value that follows any of these in argv is replaced
-// before argv is embedded in a client-facing error.
-const TEA_SENSITIVE_FLAGS = new Set(["--title", "--description", "--body"]);
+// before argv is embedded in a client-facing error. `-f` is the tea api
+// string-field flag — `body=<content>` rides in its value.
+const TEA_SENSITIVE_FLAGS = new Set(["--title", "--description", "--body", "-f"]);
 const TEA_REDACTED_VALUE = "<redacted>";
 
 /**
@@ -2068,7 +2078,48 @@ export function createGiteaService(options: CreateGiteaServiceOptions = {}): For
       return { url, number };
     },
 
+    async createPullRequestComment(
+      input: CreatePullRequestCommentOptions,
+    ): Promise<PullRequestCommentResult> {
+      // The repo path resolves offline from the remote; the {owner}/{repo}
+      // placeholders cover remotes whose URL this parser can't read.
+      const identity = await resolveCurrentRepoIdentity(input.cwd);
+      const repoPath = identity
+        ? `repos/${encodeURIComponent(identity.owner)}/${encodeURIComponent(identity.name)}`
+        : "repos/{owner}/{repo}";
+      const comment = await runJson(
+        [
+          "api",
+          "--method",
+          "POST",
+          `${repoPath}/issues/${input.prNumber}/comments`,
+          "-f",
+          `body=${input.body}`,
+        ],
+        { cwd: input.cwd },
+        z.object({ id: z.number(), html_url: z.string().optional() }).passthrough(),
+      );
+      if (comment.html_url) {
+        return { url: comment.html_url };
+      }
+      const summary = await this.getPullRequest({
+        cwd: input.cwd,
+        number: input.prNumber,
+      });
+      return { url: `${summary.url}#issuecomment-${comment.id}` };
+    },
+
+    // Gitea Actions run re-runs exist only on newer servers (the rerun
+    // endpoints shipped after the first Actions release) and Forgejo exposes a
+    // different shape; there is no version floor the daemon can detect, so the
+    // honest answer is an explicit unsupported error.
+    retryPullRequestChecks(_input: RetryPullRequestChecksOptions): never {
+      return notSupported("retryPullRequestChecks");
+    },
+
     async mergePullRequest(input: MergePullRequestOptions): Promise<PullRequestMergeResult> {
+      if (input.expectedHeadSha !== undefined)
+        throw new Error("This forge does not support head-guarded merging");
       assertGiteaDirectMergeReady(input);
       const args = ["pr", "merge", String(input.prNumber), "--style", input.mergeMethod];
       await run(args, { cwd: input.cwd });

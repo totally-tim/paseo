@@ -1,8 +1,15 @@
 import { revokeSubscription, startSubscription } from "./internal/subscriptions";
 import type { RevokePushNotificationsInput, StartPushNotificationsInput } from "./internal/types";
 
+import { registerNotificationClient } from "./internal/answer-client.native";
+
 export function startPushNotifications(input: StartPushNotificationsInput): () => void {
-  return startSubscription(input);
+  const unregister = registerNotificationClient(input.serverId, input.client);
+  const stop = startSubscription(input);
+  return () => {
+    unregister();
+    stop();
+  };
 }
 
 export function revokePushNotifications(input: RevokePushNotificationsInput): Promise<void> {

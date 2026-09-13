@@ -48,9 +48,16 @@ export interface OpenCodePermissionRule {
   action: "ask" | "allow" | "deny";
 }
 
+// Provider-native delegate-only restriction (docs/specs/coordinator.md).
+export const OPENCODE_DELEGATE_ONLY_PERMISSION_RULES: OpenCodePermissionRule[] = [
+  { permission: "edit", pattern: "*", action: "deny" },
+  { permission: "bash", pattern: "*", action: "deny" },
+];
+
 export function buildOpenCodePermissionRules(
   options: OpenCodeProviderOptions | undefined,
   toolPolicy: ToolPolicy | undefined,
+  delegateOnly = false,
 ): OpenCodePermissionRule[] | undefined {
   const grants =
     toolPolicy?.preapproved.map((grant) => ({
@@ -59,20 +66,29 @@ export function buildOpenCodePermissionRules(
       action: "allow" as const,
     })) ?? [];
   const permission = options?.permission;
+  let rules: OpenCodePermissionRule[] | undefined;
   if (typeof permission === "string") {
-    return [...grants, { permission: "*", pattern: "*", action: permission }];
+    rules = [...grants, { permission: "*", pattern: "*", action: permission }];
+  } else if (!permission || typeof permission !== "object" || Array.isArray(permission)) {
+    rules = grants.length > 0 ? grants : undefined;
+  } else {
+    const authored = Object.entries(permission).flatMap(([name, rule]) => {
+      if (typeof rule === "string") {
+        return [{ permission: name, pattern: "*", action: rule }];
+      }
+      if (!rule || typeof rule !== "object" || Array.isArray(rule)) return [];
+      return Object.entries(rule).flatMap(([pattern, action]) =>
+        typeof action === "string" ? [{ permission: name, pattern, action }] : [],
+      );
+    });
+    rules = [...grants, ...authored];
   }
-  if (!permission || typeof permission !== "object" || Array.isArray(permission)) {
-    return grants.length > 0 ? grants : undefined;
+  if (!delegateOnly) {
+    return rules;
   }
-  const authored = Object.entries(permission).flatMap(([name, rule]) => {
-    if (typeof rule === "string") {
-      return [{ permission: name, pattern: "*", action: rule }];
-    }
-    if (!rule || typeof rule !== "object" || Array.isArray(rule)) return [];
-    return Object.entries(rule).flatMap(([pattern, action]) =>
-      typeof action === "string" ? [{ permission: name, pattern, action }] : [],
-    );
-  });
-  return [...grants, ...authored];
+  // Delegate-only sessions (coordinators) delegate through the Paseo MCP tools
+  // and must not edit files or run shell commands themselves. OpenCode
+  // permission rules evaluate last-match-wins, so appended denies override any
+  // authored allow — including a wildcard string permission.
+  return [...(rules ?? []), ...OPENCODE_DELEGATE_ONLY_PERMISSION_RULES];
 }

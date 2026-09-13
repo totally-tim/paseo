@@ -1,3 +1,8 @@
+import {
+  coordinatorGoalsPanelRegistration,
+  coordinatorPolicyPanelRegistration,
+} from "@/coordinator/automation/panel";
+import { coordinatorMemoryPanelRegistration } from "@/coordinator/memory/panel";
 import { agentPanelRegistration } from "@/panels/agent-panel";
 import { browserPanelRegistration } from "@/desktop/browser/panel";
 import {
@@ -15,6 +20,7 @@ import { providerSubagentPanelRegistration } from "@/panels/provider-subagent-pa
 import { pullRequestPanelRegistration } from "@/panels/pull-request-panel";
 import { pluginPanelRegistration } from "@/plugins/workspace-panels/panel";
 import { newTabPanelRegistration } from "@/panels/new-tab-panel";
+import { coordinatorBoardPanelRegistration } from "@/coordinator/board/board-panel";
 
 let panelsRegistered = false;
 
@@ -36,5 +42,9 @@ export function ensurePanelsRegistered(): void {
   registerPanel(workingDiffPanelRegistration);
   registerPanel(changesTreePanelRegistration);
   registerPanel(pluginPanelRegistration);
+  registerPanel(coordinatorBoardPanelRegistration);
+  registerPanel(coordinatorMemoryPanelRegistration);
+  registerPanel(coordinatorGoalsPanelRegistration);
+  registerPanel(coordinatorPolicyPanelRegistration);
   panelsRegistered = true;
 }

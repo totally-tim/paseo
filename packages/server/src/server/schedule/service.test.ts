@@ -2656,6 +2656,54 @@ describe("ScheduleService", () => {
     await expect(service.runOnce(created.id)).rejects.toThrow("already completed");
   });
 
+  test("rotation protects orphaned targets and retargets active and paused schedules", async () => {
+    const source = "11111111-1111-4111-8111-111111111111";
+    const successor = "22222222-2222-4222-8222-222222222222";
+    let protectedTarget = true;
+    const deliveries: string[] = [];
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      isProtectedAgentTarget: () => protectedTarget,
+      runner: async (schedule) => {
+        if (schedule.target.type === "agent") deliveries.push(schedule.target.agentId);
+        return { agentId: successor, output: "ok" };
+      },
+    });
+    const active = await service.create({
+      prompt: "Heartbeat",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "agent", agentId: source },
+    });
+    const paused = await service.create({
+      prompt: "Paused",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "agent", agentId: source },
+    });
+    await service.pause(paused.id);
+    await service.start();
+    expect((await service.inspect(active.id)).status).toBe("active");
+    expect(await service.completeForAgent(source)).toBe(0);
+    now = new Date("2026-01-01T00:05:00.000Z");
+    await service.tick();
+    expect(deliveries).toEqual([]);
+    await expect(service.runOnce(active.id)).rejects.toThrow("rotating");
+    await service.retargetAgent(source, successor);
+    expect((await service.inspect(paused.id)).status).toBe("paused");
+    expect((await service.inspect(paused.id)).target).toEqual({
+      type: "agent",
+      agentId: successor,
+    });
+    protectedTarget = false;
+    await service.tick();
+    expect(deliveries).toEqual([successor]);
+    await service.stop();
+  });
+
   test("completeForAgent completes only schedules targeting that agent", async () => {
     const service = createScheduleService({
       paseoHome: tempDir,

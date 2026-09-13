@@ -4017,7 +4017,7 @@ describe("ForgeService", () => {
         "--search",
         "",
         "--json",
-        "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt",
+        "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt,author",
         "--limit",
         "20",
       ],
@@ -4091,7 +4091,7 @@ describe("ForgeService", () => {
           "--search",
           "cache",
           "--json",
-          "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt",
+          "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt,author",
           "--limit",
           "5",
         ],
@@ -4130,7 +4130,7 @@ describe("ForgeService", () => {
         "--search",
         "793",
         "--json",
-        "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt",
+        "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt,author",
         "--limit",
         "5",
       ],
@@ -4169,7 +4169,7 @@ describe("ForgeService", () => {
         "--search",
         "https://gitlab.com/getpaseo/paseo/issues/793",
         "--json",
-        "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt",
+        "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt,author",
         "--limit",
         "5",
       ],
@@ -4208,7 +4208,7 @@ describe("ForgeService", () => {
         "--search",
         "793",
         "--json",
-        "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt",
+        "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt,author",
         "--limit",
         "5",
       ],
@@ -4259,7 +4259,7 @@ describe("ForgeService", () => {
           "--search",
           "cache",
           "--json",
-          "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt",
+          "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt,author",
           "--limit",
           "5",
         ],
@@ -4650,4 +4650,163 @@ describe("ForgeService", () => {
       }),
     ).rejects.toThrow("Unable to resolve GitHub repository for pull request creation");
   });
+
+  it("posts a pull request comment and returns its html_url", async () => {
+    const runner = createRunner([
+      JSON.stringify({ owner: { login: "acme" }, name: "repo" }),
+      JSON.stringify({
+        id: 12345,
+        html_url: "https://github.com/acme/repo/pull/7#issuecomment-12345",
+      }),
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveRepoHost: async () => null,
+    });
+
+    await expect(
+      service.createPullRequestComment({
+        cwd: "/tmp/repo",
+        prNumber: 7,
+        body: "Reviewer note: missing test for the rename path",
+      }),
+    ).resolves.toEqual({
+      url: "https://github.com/acme/repo/pull/7#issuecomment-12345",
+    });
+
+    expect(runner.calls[0]?.args).toEqual(["repo", "view", "--json", "owner,name,parent"]);
+    expect(runner.calls[1]?.args).toEqual([
+      "api",
+      "-X",
+      "POST",
+      "repos/acme/repo/issues/7/comments",
+      "-f",
+      "body=Reviewer note: missing test for the rename path",
+    ]);
+  });
+
+  it("re-runs failed workflow runs and re-requests failed non-Actions check runs", async () => {
+    const runner = createScriptedRunner([
+      // slug resolution via `gh repo view`
+      JSON.stringify({ owner: { login: "acme" }, name: "repo" }),
+      // PR head sha
+      JSON.stringify({ head: { sha: "abc123" } }),
+      // workflow runs on the head sha
+      JSON.stringify({
+        workflow_runs: [
+          { id: 900, name: "CI", conclusion: "failure" },
+          { id: 901, name: "Lint", conclusion: "success" },
+          { id: 902, name: "E2E", conclusion: "timed_out" },
+        ],
+      }),
+      // rerun-failed-jobs for run 900, then run 902
+      "{}",
+      "{}",
+      // latest check runs on the head sha
+      JSON.stringify({
+        check_runs: [
+          { id: 55, name: "CI / test", conclusion: "failure", app: { slug: "github-actions" } },
+          { id: 77, name: "codecov/patch", conclusion: "failure", app: { slug: "codecov" } },
+          { id: 78, name: "license/cla", conclusion: "success", app: { slug: "cla-bot" } },
+        ],
+      }),
+      // rerequest for check run 77
+      "{}",
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveRepoHost: async () => null,
+    });
+
+    await expect(
+      service.retryPullRequestChecks({ cwd: "/tmp/repo", prNumber: 7 }),
+    ).resolves.toEqual({
+      retried: [
+        { id: 900, name: "CI" },
+        { id: 902, name: "E2E" },
+        { id: 77, name: "codecov/patch" },
+      ],
+    });
+
+    expect(runner.calls[2]?.args).toEqual([
+      "api",
+      "repos/acme/repo/actions/runs?head_sha=abc123&per_page=100",
+    ]);
+    expect(runner.calls[3]?.args).toEqual([
+      "api",
+      "-X",
+      "POST",
+      "repos/acme/repo/actions/runs/900/rerun-failed-jobs",
+    ]);
+    expect(runner.calls[4]?.args).toEqual([
+      "api",
+      "-X",
+      "POST",
+      "repos/acme/repo/actions/runs/902/rerun-failed-jobs",
+    ]);
+    expect(runner.calls[5]?.args).toEqual([
+      "api",
+      "repos/acme/repo/commits/abc123/check-runs?filter=latest&per_page=100",
+    ]);
+    expect(runner.calls[6]?.args).toEqual([
+      "api",
+      "-X",
+      "POST",
+      "repos/acme/repo/check-runs/77/rerequest",
+    ]);
+    // The Actions check run (id 55) rides along on the run rerun — no rerequest.
+    expect(runner.calls).toHaveLength(7);
+  });
+
+  it("reports an empty retried list when the head commit has no failed checks", async () => {
+    const runner = createScriptedRunner([
+      JSON.stringify({ owner: { login: "acme" }, name: "repo" }),
+      JSON.stringify({ head: { sha: "abc123" } }),
+      JSON.stringify({ workflow_runs: [{ id: 900, name: "CI", conclusion: "success" }] }),
+      JSON.stringify({
+        check_runs: [
+          { id: 77, name: "codecov/patch", conclusion: "success", app: { slug: "codecov" } },
+        ],
+      }),
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveRepoHost: async () => null,
+    });
+
+    await expect(
+      service.retryPullRequestChecks({ cwd: "/tmp/repo", prNumber: 7 }),
+    ).resolves.toEqual({ retried: [] });
+    // No rerun or rerequest POSTs ran.
+    expect(runner.calls).toHaveLength(4);
+  });
+});
+
+it("preserves GitHub PR author logins in list and get summaries", async () => {
+  const item = {
+    number: 9,
+    title: "Author rule",
+    url: "https://github.com/o/r/pull/9",
+    state: "OPEN",
+    body: null,
+    baseRefName: "main",
+    headRefName: "feature",
+    labels: [],
+    updatedAt: "2026-09-13T10:00:00Z",
+    author: { login: "alice" },
+  };
+  const calls: string[][] = [];
+  const service = createGitHubService({
+    resolveGhPath: async () => "/fake/gh",
+    resolveRepoHost: async () => null,
+    runner: async (args) => {
+      calls.push(args);
+      return { stdout: JSON.stringify(args[1] === "list" ? [item] : item), stderr: "" };
+    },
+  });
+  expect((await service.listPullRequests({ cwd: "/repo" }))[0].author).toBe("alice");
+  expect((await service.getPullRequest({ cwd: "/repo", number: 9 })).author).toBe("alice");
+  expect(
+    calls.every((args) => args[args.indexOf("--json") + 1].split(",").includes("author")),
+  ).toBe(true);
 });

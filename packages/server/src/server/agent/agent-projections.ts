@@ -353,6 +353,12 @@ export function buildSerializableConfig(
   if (config.mcpServers) {
     serializable.mcpServers = config.mcpServers;
   }
+  if (config.paseoTools) {
+    serializable.paseoTools = config.paseoTools;
+  }
+  if (config.delegateOnly) {
+    serializable.delegateOnly = config.delegateOnly;
+  }
   return Object.keys(serializable).length ? serializable : null;
 }
 

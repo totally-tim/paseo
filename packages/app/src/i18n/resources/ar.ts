@@ -1953,6 +1953,7 @@ export const ar: TranslationResources = {
       saveAccessibility: "حفظ تعليق المراجعة",
     },
   },
+  coordinator: en.coordinator,
   settings: {
     title: "إعدادات",
     loading: "جارٍ تحميل الإعدادات...",

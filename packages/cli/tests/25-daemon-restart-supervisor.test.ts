@@ -147,6 +147,9 @@ import('node:fs').then(({appendFileSync}) => {
     url: `ws://${supervisor.listen}/ws`,
     clientId: "supervisor-restart-test",
     connectTimeoutMs: 5000,
+    // Default reconnect backoff can skip from 10.5s to 22.5s, beyond this
+    // test's 20s restart deadline even when the replacement is already ready.
+    reconnect: { baseDelayMs: pollIntervalMs, maxDelayMs: 500 },
     webSocketFactory: (url) => new WebSocket(url) as unknown as WebSocketLike,
   });
   await client.connect();
@@ -228,6 +231,10 @@ import('node:fs').then(({appendFileSync}) => {
     `restart should run daemon cleanup before replacing the worker, logs:\n${capturedSupervisorLogs}`,
   );
   console.log("✓ app-style restart keeps daemon healthy and restarts worker\n");
+} catch (error) {
+  console.error(await readCapturedSupervisorLogs(paseoHome, recentSupervisorLogs));
+  console.error("Client state at failure:", client?.getConnectionState());
+  throw error;
 } finally {
   await client?.close();
   if (supervisorProcess?.pid && isProcessRunning(supervisorProcess.pid)) {

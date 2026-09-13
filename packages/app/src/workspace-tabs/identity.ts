@@ -41,6 +41,7 @@ export function normalizeWorkspaceTabTarget(
   if (value.kind === "plugin") {
     return normalizePluginTabTarget(value);
   }
+  if (value.kind.startsWith("coordinator_")) return normalizeCoordinatorTarget(value);
   return normalizeSimpleWorkspaceTabTarget(value);
 }
 
@@ -65,6 +66,10 @@ function normalizeSimpleWorkspaceTabTarget(value: WorkspaceTabTarget): Workspace
     case "setup": {
       const workspaceId = trimNonEmpty(value.workspaceId);
       return workspaceId ? { kind: "setup", workspaceId } : null;
+    }
+    case "coordinator_board": {
+      const projectId = trimNonEmpty(value.projectId);
+      return projectId ? { kind: "coordinator_board", projectId } : null;
     }
     case "commit_diff": {
       const sha = trimNonEmpty(value.sha);
@@ -132,6 +137,7 @@ export function workspaceTabTargetsEqual(
         (right.context === "agent" && left.agentId === right.agentId))
     );
   }
+  if (left.kind.startsWith("coordinator_")) return equal(left, right);
   return secondaryWorkspaceTabTargetsEqual(left, right);
 }
 
@@ -162,6 +168,9 @@ function secondaryWorkspaceTabTargetsEqual(
   }
   if (left.kind === "commit_diff" && right.kind === "commit_diff") {
     return left.sha === right.sha;
+  }
+  if (left.kind === "coordinator_board" && right.kind === "coordinator_board") {
+    return left.projectId === right.projectId;
   }
   return false;
 }
@@ -225,6 +234,15 @@ export function buildDeterministicWorkspaceTabId(target: WorkspaceTabTarget): st
   }
   if (target.kind === "commit_diff") {
     return `commit_diff_${target.sha}`;
+  }
+  if (isAutomationTarget(target)) return `${target.kind}_${target.projectId ?? "daemon"}`;
+  if (target.kind === "coordinator_memory") {
+    return target.scope === "personal"
+      ? "coordinator_memory_personal"
+      : `coordinator_memory_project_${target.projectId}`;
+  }
+  if (target.kind === "coordinator_board") {
+    return `coordinator_board_${target.projectId}`;
   }
   if (target.kind === "working_diff") {
     return "working_diff";
@@ -293,4 +311,27 @@ function trimOptionalString(value: string | null | undefined): string | null {
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeCoordinatorTarget(value: WorkspaceTabTarget): WorkspaceTabTarget | null {
+  if (value.kind === "coordinator_board") {
+    const projectId = trimNonEmpty(value.projectId);
+    return projectId ? { kind: value.kind, projectId } : null;
+  }
+  if (value.kind === "coordinator_memory") {
+    if (value.scope === "personal") return { kind: value.kind, scope: "personal" };
+    const projectId = trimNonEmpty(value.projectId);
+    return projectId ? { kind: value.kind, scope: "personal-project", projectId } : null;
+  }
+  if (value.kind === "coordinator_goals" || value.kind === "coordinator_policy") {
+    const projectId = trimNonEmpty(value.projectId);
+    return projectId ? { kind: value.kind, projectId } : { kind: value.kind };
+  }
+  return null;
+}
+
+function isAutomationTarget(
+  target: WorkspaceTabTarget,
+): target is Extract<WorkspaceTabTarget, { kind: "coordinator_goals" | "coordinator_policy" }> {
+  return target.kind === "coordinator_goals" || target.kind === "coordinator_policy";
 }

@@ -8,6 +8,11 @@ export function selectVisibleAgentIds(input: {
   tabs: WorkspaceTab[];
   routeFocused: boolean;
   focusedPaneOnly: boolean;
+  /**
+   * Resolves the coordinator session for a board's projectId. A visible board
+   * keeps the coordinator's timeline warm so the reply area streams live.
+   */
+  coordinatorAgentIdForProjectId?: (projectId: string) => string | null;
 }): string[] {
   if (!input.routeFocused || !input.layout) {
     return [];
@@ -21,7 +26,14 @@ export function selectVisibleAgentIds(input: {
       panes.flatMap((pane) => {
         const target = deriveWorkspacePaneState({ pane, tabs: input.tabs }).activeTab?.descriptor
           .target;
-        return target?.kind === "agent" ? [target.agentId] : [];
+        if (target?.kind === "agent") {
+          return [target.agentId];
+        }
+        if (target?.kind === "coordinator_board") {
+          const agentId = input.coordinatorAgentIdForProjectId?.(target.projectId) ?? null;
+          return agentId ? [agentId] : [];
+        }
+        return [];
       }),
     ),
   ].sort();
@@ -32,6 +44,7 @@ export function useVisibleAgentIds(input: {
   tabs: WorkspaceTab[];
   routeFocused: boolean;
   focusedPaneOnly: boolean;
+  coordinatorAgentIdForProjectId?: (projectId: string) => string | null;
 }): string[] {
   const nextAgentIds = selectVisibleAgentIds(input);
   const stableAgentIds = useRef<string[]>([]);

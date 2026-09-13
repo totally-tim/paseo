@@ -36,6 +36,10 @@ const SERIALIZABLE_CONFIG_SCHEMA = z
       .optional(),
     systemPrompt: z.string().nullable().optional(),
     mcpServers: z.record(z.string(), z.any()).nullable().optional(),
+    // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-12 once daemon floor >= v0.8.0.
+    paseoTools: z.literal("required").optional(),
+    // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-12 once daemon floor >= v0.8.0.
+    delegateOnly: z.boolean().optional(),
   })
   .nullable()
   .optional();
@@ -99,6 +103,8 @@ export type SerializableAgentConfig = Pick<
   | "toolPolicy"
   | "systemPrompt"
   | "mcpServers"
+  | "paseoTools"
+  | "delegateOnly"
 >;
 
 export type StoredAgentRecord = z.infer<typeof STORED_AGENT_SCHEMA>;

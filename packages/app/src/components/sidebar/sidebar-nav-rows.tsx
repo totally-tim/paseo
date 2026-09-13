@@ -1,5 +1,5 @@
 import { router, usePathname } from "expo-router";
-import { CalendarClock, History, Plus, Search } from "lucide-react-native";
+import { CalendarClock, History, Plus, Search, Kanban } from "lucide-react-native";
 import { memo, useCallback, useMemo, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import { View, type StyleProp, type ViewStyle } from "react-native";
@@ -22,6 +22,10 @@ import {
   buildSchedulesRoute,
   buildSessionsRoute,
 } from "@/utils/host-routes";
+
+import { useHosts } from "@/runtime/host-runtime";
+import { useCoordinatorBoardStore } from "@/coordinator/board-store";
+import { parseServerIdFromPathname } from "@/utils/host-routes";
 
 interface SidebarNavRowProps {
   onBeforeNavigate?: () => void;
@@ -170,9 +174,43 @@ function SidebarSchedulesRow({ onBeforeNavigate }: SidebarNavRowProps) {
   );
 }
 
+function SidebarCoordinatorRow({ onBeforeNavigate }: SidebarNavRowProps) {
+  const { t } = useTranslation();
+  const pathname = usePathname();
+  const hosts = useHosts();
+  const active = useActiveWorkspaceSelection();
+  const serverId = parseServerIdFromPathname(pathname) ?? active?.serverId ?? hosts[0]?.serverId;
+  const count = useCoordinatorBoardStore((state) => {
+    const boards = serverId ? state.hosts[serverId]?.boards : null;
+    return boards
+      ? [...boards.values()].reduce(
+          (total, board) => total + (board.enabled ? board.needsYou.length : 0),
+          0,
+        )
+      : 0;
+  });
+  const handlePress = useCallback(() => {
+    if (!serverId) return;
+    onBeforeNavigate?.();
+    router.navigate({ pathname: "/h/[serverId]/coordinator", params: { serverId } });
+  }, [serverId, onBeforeNavigate]);
+  return (
+    <SidebarHeaderRow
+      icon={Kanban}
+      label={t("coordinator.board.title")}
+      onPress={handlePress}
+      isActive={pathname.endsWith("/coordinator")}
+      badgeCount={count}
+      testID="sidebar-coordinator"
+      variant="compact"
+    />
+  );
+}
+
 const BUILTIN_ROWS: Record<BuiltinSidebarNavId, ComponentType<SidebarNavRowProps>> = {
   "new-workspace": SidebarNewWorkspaceRow,
   history: SidebarHistoryRow,
   search: SidebarSearchRow,
   schedules: SidebarSchedulesRow,
+  coordinator: SidebarCoordinatorRow,
 };

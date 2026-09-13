@@ -1985,6 +1985,7 @@ export const ru: TranslationResources = {
       saveAccessibility: "Сохранить комментарий к ревью",
     },
   },
+  coordinator: en.coordinator,
   settings: {
     title: "Настройки",
     loading: "Загрузка настроек...",

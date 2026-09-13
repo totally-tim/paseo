@@ -1,5 +1,5 @@
 import type { Agent } from "@/stores/session-store";
-import { HANDOFF_TO_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+import { HANDOFF_TO_AGENT_ID_LABEL, isCoordinatorAgent } from "@getpaseo/protocol/agent-labels";
 import type { WorkspaceTabSnapshot } from "@/stores/workspace-layout-actions";
 import { isWorkspaceRootAgent } from "@/subagents/policies";
 import { normalizeWorkspaceOpaqueId } from "@/utils/workspace-identity";
@@ -7,12 +7,50 @@ import { normalizeWorkspaceOpaqueId } from "@/utils/workspace-identity";
 export interface WorkspaceAgentVisibility {
   activeAgentIds: Set<string>;
   autoOpenAgentIds: Set<string>;
-  /** Fork: every directory/detail agent in the workspace; reconcile uses it to end continuation protection. */
-  knownAgentIds?: Set<string>;
+  knownAgentIds: Set<string>;
+  /**
+   * Coordinator sessions anywhere on the host. They are not workspace entities
+   * — the project coordinator lives at the project root workspace but belongs
+   * to the board surface — so they never count toward activity, never auto-open
+   * an agent tab, and their explicitly opened chat tabs are never pruned.
+   */
+  coordinatorAgentIds: Set<string>;
 }
 
 function agentBelongsToWorkspace(agent: Agent, workspaceId: string): boolean {
   return normalizeWorkspaceOpaqueId(agent.workspaceId) === workspaceId;
+}
+
+interface AgentVisibilityBuckets {
+  activeAgentIds: Set<string>;
+  autoOpenAgentIds: Set<string>;
+  knownAgentIds: Set<string>;
+}
+
+function collectSessionAgentVisibility(
+  agent: Agent,
+  context: {
+    workspaceId: string;
+    agentsById: Map<string, Agent>;
+    coordinatorAgentIds: Set<string>;
+    buckets: AgentVisibilityBuckets;
+  },
+): void {
+  if (context.coordinatorAgentIds.has(agent.id)) {
+    return;
+  }
+  if (!agentBelongsToWorkspace(agent, context.workspaceId)) {
+    return;
+  }
+  context.buckets.knownAgentIds.add(agent.id);
+  if (agent.archivedAt) {
+    return;
+  }
+  context.buckets.activeAgentIds.add(agent.id);
+  const parentAgent = agent.parentAgentId ? context.agentsById.get(agent.parentAgentId) : undefined;
+  if (isWorkspaceRootAgent(agent, parentAgent) && !agent.labels[HANDOFF_TO_AGENT_ID_LABEL]) {
+    context.buckets.autoOpenAgentIds.add(agent.id);
+  }
 }
 
 export function deriveWorkspaceAgentVisibility(input: {
@@ -22,41 +60,43 @@ export function deriveWorkspaceAgentVisibility(input: {
 }): WorkspaceAgentVisibility {
   const { sessionAgents, agentDetails } = input;
   const workspaceId = normalizeWorkspaceOpaqueId(input.workspaceId);
+  const buckets: AgentVisibilityBuckets = {
+    activeAgentIds: new Set<string>(),
+    autoOpenAgentIds: new Set<string>(),
+    knownAgentIds: new Set<string>(),
+  };
+  const coordinatorAgentIds = new Set<string>();
   if ((!sessionAgents && !agentDetails) || !workspaceId) {
-    return {
-      activeAgentIds: new Set<string>(),
-      autoOpenAgentIds: new Set<string>(),
-      knownAgentIds: new Set<string>(),
-    };
+    return { ...buckets, coordinatorAgentIds };
   }
 
-  const activeAgentIds = new Set<string>();
-  const autoOpenAgentIds = new Set<string>();
-  const knownAgentIds = new Set<string>();
   const agentsById = new Map<string, Agent>([
     ...(agentDetails?.entries() ?? []),
     ...(sessionAgents?.entries() ?? []),
   ]);
+  for (const agent of agentsById.values()) {
+    if (isCoordinatorAgent(agent)) {
+      coordinatorAgentIds.add(agent.id);
+    }
+  }
   for (const agent of sessionAgents?.values() ?? []) {
-    if (!agentBelongsToWorkspace(agent, workspaceId)) {
-      continue;
-    }
-    knownAgentIds.add(agent.id);
-    if (!agent.archivedAt) {
-      activeAgentIds.add(agent.id);
-      const parentAgent = agent.parentAgentId ? agentsById.get(agent.parentAgentId) : undefined;
-      if (isWorkspaceRootAgent(agent, parentAgent) && !agent.labels[HANDOFF_TO_AGENT_ID_LABEL]) {
-        autoOpenAgentIds.add(agent.id);
-      }
-    }
+    collectSessionAgentVisibility(agent, {
+      workspaceId,
+      agentsById,
+      coordinatorAgentIds,
+      buckets,
+    });
   }
   for (const agent of agentDetails?.values() ?? []) {
-    if (!agentBelongsToWorkspace(agent, workspaceId)) {
+    if (coordinatorAgentIds.has(agent.id)) {
       continue;
     }
-    knownAgentIds.add(agent.id);
+    if (agentBelongsToWorkspace(agent, workspaceId)) {
+      buckets.knownAgentIds.add(agent.id);
+    }
   }
-  return { activeAgentIds, autoOpenAgentIds, knownAgentIds };
+
+  return { ...buckets, coordinatorAgentIds };
 }
 
 export function buildWorkspaceTabSnapshot(input: {
@@ -67,16 +107,32 @@ export function buildWorkspaceTabSnapshot(input: {
   standaloneTerminalIds: Iterable<string>;
   hasActivePendingTerminalCreate: boolean;
   hasActivePendingDraftCreate: boolean;
+  coordinator?: {
+    /** This workspace's project has an enabled coordinator. */
+    projectId: string | null;
+    /** False until the host's board subscription delivers its first payload. */
+    boardsHydrated: boolean;
+  };
 }): WorkspaceTabSnapshot {
   return {
     agentsHydrated: input.agentsHydrated,
     terminalsHydrated: input.terminalsHydrated,
     activeAgentIds: input.agentVisibility.activeAgentIds,
     autoOpenAgentIds: input.agentVisibility.autoOpenAgentIds,
+    knownAgentIds: input.agentVisibility.knownAgentIds,
     knownTerminalIds: input.knownTerminalIds,
     standaloneTerminalIds: input.standaloneTerminalIds,
     hasActivePendingTerminalCreate: input.hasActivePendingTerminalCreate,
     hasActivePendingDraftCreate: input.hasActivePendingDraftCreate,
+    ...(input.coordinator
+      ? {
+          coordinator: {
+            projectId: input.coordinator.projectId,
+            boardsHydrated: input.coordinator.boardsHydrated,
+            agentIds: input.agentVisibility.coordinatorAgentIds,
+          },
+        }
+      : {}),
   };
 }
 
@@ -87,11 +143,10 @@ export function workspaceAgentVisibilityEqual(
   return (
     setsEqual(a.activeAgentIds, b.activeAgentIds) &&
     setsEqual(a.autoOpenAgentIds, b.autoOpenAgentIds) &&
-    setsEqual(a.knownAgentIds ?? EMPTY_SET, b.knownAgentIds ?? EMPTY_SET)
+    setsEqual(a.knownAgentIds, b.knownAgentIds) &&
+    setsEqual(a.coordinatorAgentIds, b.coordinatorAgentIds)
   );
 }
-
-const EMPTY_SET = new Set<string>();
 
 function setsEqual(a: Set<string>, b: Set<string>): boolean {
   if (a.size !== b.size) {

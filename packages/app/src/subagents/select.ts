@@ -16,6 +16,8 @@ export interface PaseoSubagentRow {
   subtitle: null;
   status: Agent["status"];
   turn: Agent["turn"];
+  /** Live permission requests on the child — drives the track's needs-input mark. */
+  pendingPermissionCount: number;
   requiresAttention: Agent["requiresAttention"];
   createdAt: Agent["createdAt"];
 }
@@ -62,6 +64,7 @@ function toSubagentRow(agent: Agent): SubagentRow {
     subtitle: null,
     status: agent.status,
     turn: agent.turn,
+    pendingPermissionCount: agent.pendingPermissions.length,
     requiresAttention: agent.requiresAttention,
     createdAt: agent.createdAt,
   };

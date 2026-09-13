@@ -18,6 +18,8 @@ export function normalizeForgeSearchKinds(
 }
 
 export interface PullRequestSummary {
+  /** Forge login/username, never a display name or inferred branch owner. */
+  author?: string;
   number: number;
   title: string;
   url: string;
@@ -197,10 +199,27 @@ export interface PullRequestCommandStatus {
   forgeSpecific?: ForgeSpecificStatusFacts;
 }
 
+export interface PullRequestMergeFacts {
+  headSha: string;
+  baseSha: string;
+  state: string;
+  draft: boolean;
+  mergeable: boolean;
+  mergeReady: boolean;
+  upToDate: boolean;
+  strictBaseProtection: boolean;
+  additions: number;
+  deletions: number;
+  filesComplete: boolean;
+  files: Array<{ path: string; previousPath?: string; lineCountsKnown: boolean }>;
+  checksComplete: boolean;
+  checks: Array<{ name: string; status: PullRequestCheckStatus; traits?: string[] }>;
+}
 export interface MergePullRequestOptions {
   cwd: string;
   prNumber: number;
   mergeMethod: PullRequestMergeMethod;
+  expectedHeadSha?: string;
   status?: PullRequestCommandStatus | null;
 }
 
@@ -219,6 +238,7 @@ export interface DisablePullRequestAutoMergeOptions {
 
 export interface PullRequestMergeResult {
   success: true;
+  merged?: boolean;
 }
 
 export interface PullRequestAutoMergeResult {
@@ -433,6 +453,42 @@ export interface CreatePullRequestOptions {
   body?: string;
 }
 
+export interface CreatePullRequestCommentOptions {
+  cwd: string;
+  prNumber: number;
+  body: string;
+}
+
+export interface PullRequestCommentResult {
+  /**
+   * Web URL of the created comment, including the forge's comment anchor when
+   * the adapter can resolve one.
+   */
+  url: string;
+}
+
+export interface RetryPullRequestChecksOptions {
+  cwd: string;
+  prNumber: number;
+}
+
+export interface RetriedPullRequestCheck {
+  /**
+   * Forge-side identifier of the unit that was re-run — a workflow-run id, a
+   * pipeline job id, or a check-run id depending on the forge.
+   */
+  id: number;
+  name: string;
+}
+
+export interface RetryPullRequestChecksResult {
+  /**
+   * Checks the forge actually re-ran. Empty when the head commit had no failed
+   * checks to retry — the call still succeeded.
+   */
+  retried: RetriedPullRequestCheck[];
+}
+
 export interface ForgeService {
   listPullRequests(options: ListPullRequestsOptions): Promise<PullRequestSummary[]>;
   listIssues(options: ListIssuesOptions): Promise<IssueSummary[]>;
@@ -476,6 +532,25 @@ export interface ForgeService {
   getCheckDetails(options: GetCheckDetailsOptions): Promise<CheckDetails>;
   searchIssuesAndPrs(options: SearchIssuesAndPrsOptions): Promise<SearchResult>;
   createPullRequest(options: CreatePullRequestOptions): Promise<PullRequestCreateResult>;
+  /**
+   * Post a comment on a change request. Returns the created comment's web URL.
+   */
+  createPullRequestComment(
+    options: CreatePullRequestCommentOptions,
+  ): Promise<PullRequestCommentResult>;
+  /**
+   * Re-run the failed checks on a change request's head commit. The result
+   * lists the units the forge actually re-ran; an empty `retried` array means
+   * nothing was retryable. An adapter without a re-run API throws an explicit
+   * "not supported" error rather than reporting a retry that never happened.
+   */
+  retryPullRequestChecks(
+    options: RetryPullRequestChecksOptions,
+  ): Promise<RetryPullRequestChecksResult>;
+  getPullRequestMergeFacts?(options: {
+    cwd: string;
+    prNumber: number;
+  }): Promise<PullRequestMergeFacts>;
   mergePullRequest(options: MergePullRequestOptions): Promise<PullRequestMergeResult>;
   enablePullRequestAutoMerge(
     options: EnablePullRequestAutoMergeOptions,

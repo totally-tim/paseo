@@ -204,6 +204,24 @@ export class AgentContinuationService {
     return this.snapshot(record, agentId);
   }
 
+  /** Internal notifications retain task routing and receipts without undoing Stop. */
+  async enqueueSystemInstruction(
+    agentId: string,
+    instruction: { id: string; prompt: string; holdUntilHandoff?: boolean },
+  ): Promise<void> {
+    const initial = await this.ensureRecord(agentId);
+    const active = await this.deps.agentStorage.get(initial.agentId);
+    const handoff = await this.deps.agentStorage.getHandoff(agentId);
+    if (!active || (active.archivedAt && !(handoff && initial.recovery?.status === "continuing")))
+      throw new Error("The notification target is no longer active");
+    const message = { id: instruction.id, text: instruction.prompt };
+    await this.change(initial.rootAgentId, (record) => {
+      updateQueuedMessages(record, { kind: "enqueue", message }, this.timestamp());
+      if (instruction.holdUntilHandoff && record.agentId === agentId) record.queuePaused = true;
+    });
+    this.wake(initial.agentId);
+  }
+
   async manageQueue(
     agentId: string,
     operation: AgentQueueOperation,

@@ -40,6 +40,24 @@ function workspace(id: string, projectId: string, root: string): WorkspaceDescri
 }
 
 describe("buildWorkspaceStructureProjects", () => {
+  test("omits hidden projects and workspaces from display counts without deleting source records", () => {
+    const visible = project({ id: "visible", key: null, root: "/repo" });
+    const hidden = { ...project({ id: "hidden", key: null, root: "/daemon" }), hidden: true };
+    const normalWorkspace = workspace("main", "visible", "/repo");
+    const hiddenWorkspace = { ...workspace("hidden-workspace", "visible", "/repo"), hidden: true };
+    const hiddenProjectWorkspace = workspace("daemon", "hidden", "/daemon");
+    const projects = [visible, hidden];
+    const workspaces = [normalWorkspace, hiddenWorkspace, hiddenProjectWorkspace];
+    const result = buildWorkspaceStructureProjects({
+      sessions: [{ serverId: "host", projects, workspaces }],
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0].hosts.map((host) => host.projectId)).toEqual(["visible"]);
+    expect(result[0].workspaceKeys).toEqual(["host:main"]);
+    expect(workspaces.find((entry) => entry.id === "daemon")).toBe(hiddenProjectWorkspace);
+    expect(projects).toHaveLength(2);
+  });
+
   test("groups the same project key across hosts and keeps host-local ids", () => {
     const key = "remote:github.com/acme/app";
     const result = buildWorkspaceStructureProjects({

@@ -1972,6 +1972,7 @@ export const ja: TranslationResources = {
       saveAccessibility: "レビューコメントを保存",
     },
   },
+  coordinator: en.coordinator,
   settings: {
     title: "設定",
     loading: "設定を読み込み中...",

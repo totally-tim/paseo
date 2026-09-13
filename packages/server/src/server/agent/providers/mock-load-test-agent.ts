@@ -835,6 +835,9 @@ export class MockLoadTestAgentSession implements AgentSession {
         this.scheduleSettledAssistantTurn(turn, JSON.stringify(structuredBranchName));
       } else if (settledAssistantImageMarkdown) {
         this.scheduleSettledAssistantTurn(turn, settledAssistantImageMarkdown);
+      } else if (/emit\s+(?:a\s+)?synthetic\s+tool\s+permission/i.test(promptToText(prompt))) {
+        turn.timer = setTimeout(() => this.emitToolPermissionTurn(turn), 0);
+        turn.timer.unref?.();
       } else if (shouldEmitPlanApprovalPrompt(prompt)) {
         this.schedulePlanApprovalTurn(turn);
       } else if (questionPrompt) {
@@ -981,7 +984,7 @@ export class MockLoadTestAgentSession implements AgentSession {
         turn,
         request.kind === "question"
           ? "Synthetic questions resolved"
-          : "Synthetic plan approval resolved",
+          : `Synthetic ${request.kind} approval resolved`,
       );
     }
     return undefined;
@@ -1264,6 +1267,31 @@ export class MockLoadTestAgentSession implements AgentSession {
         },
       ],
       canceled: false,
+    });
+  }
+
+  private emitToolPermissionTurn(turn: ActiveTurn): void {
+    if (this.activeTurn !== turn) return;
+    this.clearTurnTimer(turn);
+    this.emitTurnStarted(turn);
+    const request: AgentPermissionRequest = {
+      id: `mock-tool-${turn.turnId}`,
+      provider: this.provider,
+      name: "Bash",
+      kind: "tool",
+      title: "Run tests",
+      input: { command: "npm test" },
+      actions: [
+        { id: "allow", label: "Allow", behavior: "allow" },
+        { id: "deny", label: "Deny", behavior: "deny" },
+      ],
+    };
+    this.pendingPermissions.set(request.id, request);
+    this.emit({
+      type: "permission_requested",
+      provider: this.provider,
+      request,
+      turnId: turn.turnId,
     });
   }
 

@@ -1,5 +1,7 @@
+import { useHostRuntimeClient } from "@/runtime/host-runtime";
+import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store";
 import { useCallback, useState, type ReactElement } from "react";
-import { View } from "react-native";
+import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { ScheduleRow, type ScheduleRowPending } from "@/components/schedules/schedule-row";
 import { useScheduleMutations } from "@/hooks/use-schedule-mutations";
@@ -74,6 +76,8 @@ function SchedulesTableRow({
   const { schedule } = row;
   const { id, serverId } = schedule;
   const mutations = useScheduleMutations({ serverId });
+  const client = useHostRuntimeClient(serverId);
+  const [goalError, setGoalError] = useState<string | null>(null);
   const [pending, setPending] = useState<ScheduleRowPending>(NO_PENDING);
 
   const runAction = useCallback(
@@ -96,8 +100,31 @@ function SchedulesTableRow({
   );
 
   const handleEdit = useCallback(() => {
-    onEditSchedule(schedule);
-  }, [onEditSchedule, schedule]);
+    const target = schedule.target;
+    if (target.type !== "agent" || !target.goal) {
+      onEditSchedule(schedule);
+      return;
+    }
+    const projectId = target.goal.projectId;
+    setGoalError(null);
+    void (async () => {
+      if (!client) throw new Error("Reconnect to this host to open Goals.");
+      const workspaces = await client.fetchWorkspaces({
+        filter: { projectId },
+        page: { limit: 1 },
+      });
+      const workspaceId = workspaces.entries[0]?.id;
+      if (!workspaceId)
+        throw new Error("No active workspace is available for this project's Goals.");
+      navigateToWorkspace({
+        serverId,
+        workspaceId,
+        target: { kind: "coordinator_goals", projectId },
+      });
+    })().catch((error: unknown) =>
+      setGoalError(error instanceof Error ? error.message : "Couldn't open Goals. Try again."),
+    );
+  }, [onEditSchedule, schedule, client, serverId]);
 
   const handlePause = useCallback(() => {
     void runAction("pause", () => mutations.pauseSchedule(id));
@@ -128,26 +155,39 @@ function SchedulesTableRow({
   }, [runAction, mutations, id, schedule]);
 
   return (
-    <ScheduleRow
-      serverId={row.schedule.serverId}
-      schedule={schedule}
-      targetLabel={row.targetLabel}
-      provider={row.provider}
-      state={row.state}
-      serverName={row.serverName}
-      singleHost={row.singleHost}
-      isFirst={isFirst}
-      pending={pending}
-      onEdit={handleEdit}
-      onPause={handlePause}
-      onResume={handleResume}
-      onRunNow={handleRunNow}
-      onDelete={handleDelete}
-    />
+    <View>
+      <ScheduleRow
+        serverId={row.schedule.serverId}
+        schedule={schedule}
+        targetLabel={row.targetLabel}
+        provider={row.provider}
+        state={row.state}
+        serverName={row.serverName}
+        singleHost={row.singleHost}
+        isFirst={isFirst}
+        pending={pending}
+        onEdit={handleEdit}
+        onPause={handlePause}
+        onResume={handleResume}
+        onRunNow={handleRunNow}
+        onDelete={handleDelete}
+      />
+      {goalError ? (
+        <Text accessibilityRole="alert" style={styles.error}>
+          {goalError}
+        </Text>
+      ) : null}
+    </View>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
+  error: {
+    color: theme.colors.destructive,
+    fontSize: theme.fontSize.sm,
+    paddingHorizontal: theme.spacing[3],
+    paddingBottom: theme.spacing[2],
+  },
   // Full-width list padding matching the History screen.
   listContent: {
     paddingHorizontal: { xs: theme.spacing[3], md: theme.spacing[6] },

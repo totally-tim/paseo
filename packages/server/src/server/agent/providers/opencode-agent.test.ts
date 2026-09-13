@@ -2321,6 +2321,53 @@ describe("OpenCode adapter startTurn error handling", () => {
     await session.close();
   });
 
+  test("delegateOnly appends edit and bash denies after authored permission rules", async () => {
+    const promptAsync = vi.fn(async () => ({ data: {}, error: undefined }));
+    const fakeClient = {
+      global: {
+        event: vi.fn().mockImplementation(async ({ signal }: { signal: AbortSignal }) => ({
+          stream: {
+            async *[Symbol.asyncIterator](): AsyncGenerator<OpenCodeEvent> {
+              yield { type: "server.connected", properties: {} } as OpenCodeEvent;
+              await waitForAbort(signal);
+            },
+          },
+        })),
+      },
+      session: { promptAsync },
+    } as never;
+    const session = new __openCodeInternals.OpenCodeAgentSession(
+      {
+        provider: "opencode",
+        cwd: "/tmp/test",
+        delegateOnly: true,
+        // An authored allow-all must still lose to the appended denies:
+        // OpenCode permission rules evaluate last-match-wins.
+        providerOptions: { permission: "allow" },
+        toolPolicy: {
+          preapproved: [{ kind: "mcp", server: "paseo", tool: "create_agent" }],
+        },
+      },
+      fakeClient,
+      "ses_delegate_only",
+      createTestLogger(),
+    );
+
+    await session.startTurn("delegate work");
+
+    expect(promptAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        permission: [
+          { permission: "paseo_create_agent", pattern: "*", action: "allow" },
+          { permission: "*", pattern: "*", action: "allow" },
+          { permission: "edit", pattern: "*", action: "deny" },
+          { permission: "bash", pattern: "*", action: "deny" },
+        ],
+      }),
+    );
+    await session.close();
+  });
+
   test("waits for the stop abort and provider idle before starting the next prompt", async () => {
     const { parent: session, openCode } = await createParentSession("ses_unit_test");
     const retryStarted = createTestDeferred<void>();

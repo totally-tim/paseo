@@ -1289,3 +1289,278 @@ test("subagent capacity is remembered without authorizing parent recovery", asyn
   expect((await f.service.inspect(f.source.id)).continuation).toBeNull();
   expect(f.agentManager.listAgents().map((agent) => agent.id)).toEqual([f.source.id]);
 });
+
+test("coordinator rotation preserves role, children and durable queued instructions", async () => {
+  const { CoordinatorRotation } = await import("../coordinator/rotation.js");
+  const {
+    PASEO_ROLE_LABEL,
+    COORDINATOR_PROJECT_ROLE,
+    PARENT_AGENT_ID_LABEL,
+    COORDINATOR_TRUST_LABEL,
+  } = await import("@getpaseo/protocol/agent-labels");
+  const f = await setup();
+  await f.agentManager.setLabels(f.source.id, {
+    [PASEO_ROLE_LABEL]: COORDINATOR_PROJECT_ROLE,
+    [COORDINATOR_TRUST_LABEL]: "observe",
+  });
+  const child = await f.agentManager.createAgent(
+    { provider: "codex", cwd: f.directory },
+    undefined,
+    { workspaceId: "workspace", labels: { [PARENT_AGENT_ID_LABEL]: f.source.id } },
+  );
+  const moved: string[] = [];
+  let owner = f.source.id;
+  const rotation = new CoordinatorRotation({
+    ...f,
+    paseoHome: f.directory,
+    authorize: async (source, successor) => owner === source || owner === successor,
+    commitOwner: async (_source, successor) => {
+      owner = successor.id;
+    },
+    schedules: () => ({
+      retargetAgent: async (_source, successor) => {
+        moved.push(successor);
+      },
+    }),
+    retargetDecisions: async () => {
+      await f.service.enqueueSystemInstruction(f.source.id, {
+        id: "child-finished",
+        prompt: "Child completed once",
+      });
+      await f.service.enqueueSystemInstruction(f.source.id, {
+        id: "child-finished",
+        prompt: "Child completed once",
+      });
+    },
+    onRotated: async () => {},
+  });
+  await rotation.initialize();
+  await expect(handoffAgent(f, { sourceAgentId: f.source.id, provider: "codex" })).rejects.toThrow(
+    "coordinator service",
+  );
+  const successor = await rotation.rotate({
+    sourceAgentId: f.source.id,
+    profile: { provider: "codex", accountSelection: { kind: "fixed", accountId: f.b } },
+    reason: "context",
+  });
+  expect(successor.labels[PASEO_ROLE_LABEL]).toBe(COORDINATOR_PROJECT_ROLE);
+  expect(successor.labels[COORDINATOR_TRUST_LABEL]).toBe("observe");
+  expect((await f.agentStorage.get(child.id))?.labels[PARENT_AGENT_ID_LABEL]).toBe(successor.id);
+  expect(owner).toBe(successor.id);
+  expect(moved).toEqual([successor.id]);
+  expect(rotation.isProtectedAgentTarget(f.source.id)).toBe(false);
+  await f.service.flush();
+  expect(
+    f.store.forAgent(successor.id)?.queue.filter((item) => item.id === "child-finished").length,
+  ).toBeLessThanOrEqual(1);
+  expect(f.store.forAgent(successor.id)?.receipts["child-finished"]).toBeDefined();
+  await rotation.stop();
+});
+
+test("system instruction receipts preserve Stop and reject changed retry contents", async () => {
+  const f = await setup();
+  await f.service.enqueueSystemInstruction(f.source.id, { id: "event", prompt: "Child finished" });
+  await f.service.cancelExisting(f.source.id);
+  await f.service.enqueueSystemInstruction(f.source.id, { id: "event", prompt: "Child finished" });
+  expect(f.store.forAgent(f.source.id)?.queuePaused).toBe(true);
+  await expect(
+    f.service.enqueueSystemInstruction(f.source.id, { id: "event", prompt: "Changed" }),
+  ).rejects.toThrow("different content");
+});
+
+test("coordinator rotation resumes created topology journal without a second successor", async () => {
+  const { CoordinatorRotation } = await import("../coordinator/rotation.js");
+  const { PASEO_ROLE_LABEL, COORDINATOR_PROJECT_ROLE } =
+    await import("@getpaseo/protocol/agent-labels");
+  const f = await setup();
+  await f.agentManager.setLabels(f.source.id, { [PASEO_ROLE_LABEL]: COORDINATOR_PROJECT_ROLE });
+  let enabled = true;
+  let fail = true;
+  const deps = {
+    ...f,
+    paseoHome: f.directory,
+    authorize: async () => enabled,
+    commitOwner: async () => {},
+    onRotated: async () => {},
+    schedules: () => ({ retargetAgent: async () => {} }),
+    retargetDecisions: async () => {
+      await f.service.enqueueSystemInstruction(f.source.id, {
+        id: "restart-event",
+        prompt: "One child result",
+      });
+      if (fail) throw new Error("injected topology write failure");
+    },
+  };
+  const first = new CoordinatorRotation(deps);
+  await first.initialize();
+  await expect(
+    first.rotate({
+      sourceAgentId: f.source.id,
+      profile: { provider: "codex", accountSelection: { kind: "fixed", accountId: f.b } },
+      reason: "capacity",
+    }),
+  ).rejects.toThrow("topology write failure");
+  const chosen = (await f.agentStorage.getHandoff(f.source.id))!.successorAgentId;
+  expect(first.isProtectedAgentTarget(chosen)).toBe(true);
+  await first.stop();
+  const second = new CoordinatorRotation(deps);
+  await second.initialize();
+  enabled = false;
+  await second.resume();
+  expect((await f.agentStorage.getHandoff(f.source.id))?.phase).toBe("created");
+  enabled = true;
+  fail = false;
+  await second.resume();
+  expect((await f.agentStorage.getHandoff(f.source.id))?.phase).toBe("started");
+  expect((await f.agentStorage.getHandoff(f.source.id))?.successorAgentId).toBe(chosen);
+  expect((await f.agentStorage.list()).length).toBe(2);
+  expect(second.isProtectedAgentTarget(chosen)).toBe(false);
+  expect(f.store.forAgent(chosen)?.receipts["restart-event"]).toBeDefined();
+  await second.stop();
+});
+
+test("held rotation instructions cannot start the predecessor", async () => {
+  const f = await setup();
+  await f.service.enqueueSystemInstruction(f.source.id, {
+    id: "pre-handoff",
+    prompt: "Result while successor is being prepared",
+    holdUntilHandoff: true,
+  });
+  await f.service.flush();
+  expect(f.store.forAgent(f.source.id)?.queuePaused).toBe(true);
+  expect(f.starts).toEqual([]);
+});
+
+test("rotation finalization resumes after the old resident was archived", async () => {
+  const { CoordinatorRotation } = await import("../coordinator/rotation.js");
+  const { PASEO_ROLE_LABEL, COORDINATOR_PROJECT_ROLE } =
+    await import("@getpaseo/protocol/agent-labels");
+  const f = await setup();
+  await f.agentManager.setLabels(f.source.id, { [PASEO_ROLE_LABEL]: COORDINATOR_PROJECT_ROLE });
+  let fail = true;
+  const deps = {
+    ...f,
+    paseoHome: f.directory,
+    authorize: async () => true,
+    commitOwner: async () => {},
+    schedules: () => ({ retargetAgent: async () => {} }),
+    retargetDecisions: async () => {},
+    onRotated: async () => {
+      await f.agentManager.archiveSnapshot(f.source.id, new Date().toISOString());
+      if (fail) throw new Error("injected final journal failure");
+    },
+  };
+  const first = new CoordinatorRotation(deps);
+  await first.initialize();
+  await expect(
+    first.rotate({
+      sourceAgentId: f.source.id,
+      profile: { provider: "codex", accountSelection: { kind: "fixed", accountId: f.b } },
+      reason: "context",
+    }),
+  ).rejects.toThrow("final journal failure");
+  await first.stop();
+  const chosen = (await f.agentStorage.getHandoff(f.source.id))!.successorAgentId;
+  const second = new CoordinatorRotation(deps);
+  await second.initialize();
+  fail = false;
+  await second.resume();
+  expect(second.isProtectedAgentTarget(chosen)).toBe(false);
+  expect((await f.agentStorage.list()).length).toBe(2);
+  await second.stop();
+});
+
+test("complete coordinator rotations serialize through finalization and deduplicate each source", async () => {
+  const { CoordinatorRotation } = await import("../coordinator/rotation.js");
+  const { PASEO_ROLE_LABEL, COORDINATOR_PROJECT_ROLE } =
+    await import("@getpaseo/protocol/agent-labels");
+  const f = await setup();
+  await f.agentManager.setLabels(f.source.id, { [PASEO_ROLE_LABEL]: COORDINATOR_PROJECT_ROLE });
+  const other = await f.agentManager.createAgent(
+    { provider: "codex", cwd: f.directory, accountSelection: { kind: "fixed", accountId: f.b } },
+    undefined,
+    { workspaceId: "workspace", labels: { [PASEO_ROLE_LABEL]: COORDINATOR_PROJECT_ROLE } },
+  );
+  let finalizing!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    finalizing = resolve;
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const authorized: string[] = [];
+  const finished: string[] = [];
+  const rotation = new CoordinatorRotation({
+    ...f,
+    paseoHome: f.directory,
+    authorize: async (source) => {
+      authorized.push(source);
+      return true;
+    },
+    commitOwner: async () => {},
+    schedules: () => ({ retargetAgent: async () => {} }),
+    retargetDecisions: async () => {},
+    onRotated: async (record) => {
+      if (record.sourceAgentId === f.source.id) {
+        finalizing();
+        await gate;
+      }
+      finished.push(record.sourceAgentId);
+    },
+  });
+  await rotation.initialize();
+  const input = {
+    sourceAgentId: f.source.id,
+    profile: { provider: "codex", accountSelection: { kind: "fixed" as const, accountId: f.b } },
+    reason: "context" as const,
+  };
+  const first = rotation.rotate(input);
+  await entered;
+  expect(rotation.rotate(input)).toBe(first);
+  const second = rotation.rotate({ ...input, sourceAgentId: other.id });
+  try {
+    expect(authorized).not.toContain(other.id);
+  } finally {
+    release();
+    await Promise.all([first, second]);
+    await rotation.stop();
+  }
+  expect(finished).toEqual([f.source.id, other.id]);
+});
+
+test("private coordinator handoff forces unattended provider resolution and creation", async () => {
+  const { createCoordinatorHandoff } = await import("../agent/handoff-agent.js");
+  const { PASEO_ROLE_LABEL, COORDINATOR_PROJECT_ROLE } =
+    await import("@getpaseo/protocol/agent-labels");
+  const f = await setup();
+  await f.agentManager.setLabels(f.source.id, { [PASEO_ROLE_LABEL]: COORDINATOR_PROJECT_ROLE });
+  const resolution: boolean[] = [];
+  const create = vi.spyOn(f.agentManager, "createAgent");
+  const handoff = createCoordinatorHandoff(
+    {
+      ...f,
+      providerSnapshotManager: {
+        resolveCreateConfig: async (input) => {
+          resolution.push(input.unattended === true);
+          return {
+            modeId: input.unattended ? "unattended-mode" : "interactive-mode",
+            featureValues: {},
+          };
+        },
+      },
+    },
+    async () => true,
+  );
+  const successor = await handoff(
+    {
+      sourceAgentId: f.source.id,
+      provider: "codex",
+      accountSelection: { kind: "fixed", accountId: f.b },
+    },
+    { unattended: false },
+  );
+  expect(resolution).toEqual([true]);
+  expect(successor.config?.modeId).toBe("unattended-mode");
+  expect(create.mock.calls[0]?.[2]?.unattended).toBe(true);
+});

@@ -7,6 +7,8 @@ import {
   Ellipsis,
   Globe,
   Import as ImportIcon,
+  Kanban,
+  MessagesSquare,
   Settings,
   SquarePen,
 } from "lucide-react-native";
@@ -40,6 +42,8 @@ const ThemedSquarePen = withUnistyles(SquarePen);
 const ThemedGlobe = withUnistyles(Globe);
 const ThemedImport = withUnistyles(ImportIcon);
 const ThemedSettings = withUnistyles(Settings);
+const ThemedMessagesSquare = withUnistyles(MessagesSquare);
+const ThemedKanban = withUnistyles(Kanban);
 
 const mutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
@@ -49,6 +53,8 @@ const MENU_NEW_TERMINAL_ICON = <TerminalProfileIcon iconKey={undefined} size={16
 const MENU_IMPORT_ICON = <ThemedImport size={16} uniProps={mutedColorMapping} />;
 const MENU_COPY_ICON = <ThemedCopy size={16} uniProps={mutedColorMapping} />;
 const MENU_SETTINGS_ICON = <ThemedSettings size={16} uniProps={mutedColorMapping} />;
+const MENU_COORDINATOR_CHAT_ICON = <ThemedMessagesSquare size={16} uniProps={mutedColorMapping} />;
+const MENU_COORDINATOR_BOARD_ICON = <ThemedKanban size={16} uniProps={mutedColorMapping} />;
 function WorkspaceHeaderMenuTriggerIcon() {
   return (
     <ThemedEllipsis
@@ -146,10 +152,26 @@ function workspaceHeaderMenuButtonStyle({
   return iconButtonChromeStyle({ size: "large", state: { hovered, pressed, open } });
 }
 
+export interface WorkspaceHeaderMenuDesktopProps extends WorkspaceHeaderWorkspaceActions {
+  /** The workspace's project while its coordinator is enabled — unlocks the board item. */
+  coordinatorProjectId: string | null;
+  /** The project coordinator session, when one is running — unlocks the chat item. */
+  coordinatorAgentId: string | null;
+  onOpenCoordinatorBoard: () => void;
+  onOpenCoordinatorChat: () => void;
+}
+
 /**
- * Wide layouts make tabs from the tab strip's `+` menu, so this one carries workspace actions only.
+ * Wide layouts make tabs from the tab strip's `+` menu, so this one carries workspace actions
+ * plus the coordinator entries a closed board would otherwise strand.
  */
-export function WorkspaceHeaderMenuDesktop(props: WorkspaceHeaderWorkspaceActions) {
+export function WorkspaceHeaderMenuDesktop({
+  coordinatorProjectId,
+  coordinatorAgentId,
+  onOpenCoordinatorBoard,
+  onOpenCoordinatorChat,
+  ...props
+}: WorkspaceHeaderMenuDesktopProps) {
   const { t } = useTranslation();
   return (
     <DropdownMenu>
@@ -162,6 +184,24 @@ export function WorkspaceHeaderMenuDesktop(props: WorkspaceHeaderWorkspaceAction
         <WorkspaceHeaderMenuTriggerIcon />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" width={220} testID="workspace-header-menu">
+        {coordinatorProjectId ? (
+          <DropdownMenuItem
+            testID="workspace-header-open-coordinator-board"
+            leading={MENU_COORDINATOR_BOARD_ICON}
+            onSelect={onOpenCoordinatorBoard}
+          >
+            {t("coordinator.board.openBoard")}
+          </DropdownMenuItem>
+        ) : null}
+        {coordinatorAgentId ? (
+          <DropdownMenuItem
+            testID="workspace-header-open-coordinator-chat"
+            leading={MENU_COORDINATOR_CHAT_ICON}
+            onSelect={onOpenCoordinatorChat}
+          >
+            {t("coordinator.board.openChat")}
+          </DropdownMenuItem>
+        ) : null}
         <WorkspaceHeaderWorkspaceActionItems {...props} />
       </DropdownMenuContent>
     </DropdownMenu>
@@ -203,6 +243,12 @@ export interface WorkspaceHeaderMenuMobileProps extends WorkspaceHeaderWorkspace
   normalizedServerId: string;
   showCreateBrowserTab: boolean;
   createTerminalDisabled: boolean;
+  /** The project coordinator session, when one is running — unlocks the chat item. */
+  coordinatorAgentId: string | null;
+  /** The workspace's project while its coordinator is enabled — unlocks the board item. */
+  coordinatorProjectId: string | null;
+  onOpenCoordinatorChat: () => void;
+  onOpenCoordinatorBoard: () => void;
   onCreateDraftTab: () => void;
   onCreateTerminal: () => void;
   onCreateTerminalWithProfile: (profile: TerminalProfile) => void;
@@ -217,6 +263,10 @@ export function WorkspaceHeaderMenuMobile({
   normalizedServerId,
   showCreateBrowserTab,
   createTerminalDisabled,
+  coordinatorAgentId,
+  coordinatorProjectId,
+  onOpenCoordinatorChat,
+  onOpenCoordinatorBoard,
   onCreateDraftTab,
   onCreateTerminal,
   onCreateTerminalWithProfile,
@@ -266,6 +316,24 @@ export function WorkspaceHeaderMenuMobile({
             onSelect={onCreateBrowser}
           >
             {t("workspace.header.actions.newBrowser")}
+          </DropdownMenuItem>
+        ) : null}
+        {coordinatorProjectId ? (
+          <DropdownMenuItem
+            testID="workspace-header-open-coordinator-board"
+            leading={MENU_COORDINATOR_BOARD_ICON}
+            onSelect={onOpenCoordinatorBoard}
+          >
+            {t("coordinator.board.openBoard")}
+          </DropdownMenuItem>
+        ) : null}
+        {coordinatorAgentId ? (
+          <DropdownMenuItem
+            testID="workspace-header-open-coordinator-chat"
+            leading={MENU_COORDINATOR_CHAT_ICON}
+            onSelect={onOpenCoordinatorChat}
+          >
+            {t("coordinator.board.openChat")}
           </DropdownMenuItem>
         ) : null}
         <WorkspaceHeaderWorkspaceActionItems {...workspaceActions} />

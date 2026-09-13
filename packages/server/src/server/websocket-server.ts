@@ -1,3 +1,12 @@
+import { boundCoordinatorPushPayload } from "./push/coordinator-payload.js";
+import {
+  isCoordinatorAgent,
+  getCoordinatorProjectIdFromLabels,
+  getParentAgentIdFromLabels,
+} from "@getpaseo/protocol/agent-labels";
+import type { AgentPermissionRequest } from "@getpaseo/protocol/agent-types";
+import { buildNotificationActions } from "@getpaseo/protocol/notification-actions";
+import type { AgentAttentionNotificationPayload } from "@getpaseo/protocol/agent-attention-notification";
 import { SidebarOrderStore } from "./sidebar-order-store.js";
 import { AgentRequests } from "./agent/requests/index.js";
 import { WebSocket, WebSocketServer } from "ws";
@@ -52,6 +61,7 @@ import type {
 import type { GitCommandRuntimeMetricsSnapshot } from "../utils/git-command-runtime-metrics.js";
 import { snapshotGitCommandRuntimeMetrics } from "../utils/run-git-command.js";
 import { createPluginClientId, isPluginClientId } from "./plugins/plugin-session-identity.js";
+import type { CoordinatorService } from "./coordinator/coordinator-service.js";
 import type { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { deriveProjectSlug } from "./workspace-git-metadata.js";
 import {
@@ -589,6 +599,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly directorySync = new DirectorySyncService();
   private readonly pluginRuntime: SessionOptions["pluginRuntime"];
   private readonly orchestrationSkills: SessionOptions["orchestrationSkills"];
+  private readonly coordinatorService: CoordinatorService | null;
 
   constructor(
     server: HTTPServer,
@@ -637,6 +648,7 @@ export class VoiceAssistantWebSocketServer {
     orchestrationSkills?: SessionOptions["orchestrationSkills"],
     workspaceLabelService?: WorkspaceLabelService,
     continuations?: AgentContinuationService,
+    coordinatorService?: CoordinatorService,
   ) {
     this.logger = logger.child({ module: "websocket-server" });
     this.workspaceSetupRuntime = workspaceSetupRuntime;
@@ -653,6 +665,7 @@ export class VoiceAssistantWebSocketServer {
     this.hubRelationships = hubRelationships ?? null;
     this.pluginRuntime = pluginRuntime;
     this.orchestrationSkills = orchestrationSkills;
+    this.coordinatorService = coordinatorService ?? null;
     this.agentManager = agentManager;
     this.agentStorage = agentStorage;
     this.agentRequests = new AgentRequests(join(paseoHome, "agent-requests"));
@@ -1449,6 +1462,7 @@ export class VoiceAssistantWebSocketServer {
       workspaceLabelService: this.workspaceLabelService ?? undefined,
       directorySync: this.directorySync,
       scheduleService: this.scheduleService,
+      coordinatorService: this.coordinatorService ?? undefined,
       checkoutDiffManager: this.checkoutDiffManager,
       github: this.github,
       workspaceGitService: this.workspaceGitService,
@@ -1824,6 +1838,8 @@ export class VoiceAssistantWebSocketServer {
         checkoutInspection: true,
         // COMPAT(scheduleList): added in v0.8.0, remove gate after 2027-03-11 once daemon floor >= v0.8.0.
         scheduleList: true,
+        // COMPAT(coordinator): added in v0.8.0, remove gate after 2027-03-11 once daemon floor >= v0.8.0.
+        ...(this.coordinatorService ? { coordinator: true, coordinatorAutomation: true } : {}),
       },
     };
   }
@@ -2472,10 +2488,82 @@ export class VoiceAssistantWebSocketServer {
     };
   }
 
+  /** Scheduler owns timing; this boundary applies the same presence policy as ordinary attention. */
+  public async deliverCoordinatorNotification(input: {
+    kind: "decision" | "digest";
+    agentId: string;
+    title: string;
+    body: string;
+    request?: AgentPermissionRequest;
+  }): Promise<void> {
+    const agent = this.agentManager.getAgent(input.agentId);
+    if (!agent?.workspaceId || (input.kind === "decision" && !input.request)) return;
+    await this.broadcastAgentAttention({
+      agentId: input.agentId,
+      provider: agent.provider,
+      reason: input.kind === "decision" ? "permission" : "finished",
+      coordinatorNotification: {
+        title: input.title,
+        body: input.body,
+        data: {
+          serverId: this.serverId,
+          workspaceId: agent.workspaceId,
+          agentId: input.agentId,
+          reason: input.kind === "decision" ? "permission" : "finished",
+          ...(input.request
+            ? { requestId: input.request.id, ...buildNotificationActions(input.request.actions) }
+            : {}),
+        },
+      },
+    });
+  }
+
+  private isCoordinatorRelatedAgent(agentId: string): boolean {
+    const visited = new Set<string>();
+    let currentId: string | null = agentId;
+    while (currentId && !visited.has(currentId)) {
+      visited.add(currentId);
+      const current = this.agentManager.getAgent(currentId);
+      if (!current) return false;
+      if (isCoordinatorAgent(current) || getCoordinatorProjectIdFromLabels(current.labels))
+        return true;
+      currentId = getParentAgentIdFromLabels(current.labels);
+    }
+    return false;
+  }
+
+  private async shouldPushAgentAttention(
+    agentId: string,
+    reason: "finished" | "error" | "permission",
+    coordinatorNotification?: AgentAttentionNotificationPayload,
+  ): Promise<boolean> {
+    if (!isPushEligibleAttentionReason(reason)) return false;
+    if (coordinatorNotification !== undefined) return true;
+    if (reason === "permission") {
+      // Only an enabled coordinator that schedules this prompt may suppress its ordinary push.
+      return !(await this.coordinatorService?.handlesCoordinatorPermissionNotification(agentId));
+    }
+    return !this.isCoordinatorRelatedAgent(agentId);
+  }
+
+  private coordinatorPushPayload(
+    params: { agentId: string; coordinatorNotification?: AgentAttentionNotificationPayload },
+    notification: AgentAttentionNotificationPayload,
+  ) {
+    const requestId = notification.data.requestId;
+    const request = requestId
+      ? this.agentManager.getAgent(params.agentId)?.pendingPermissions.get(requestId)
+      : undefined;
+    return params.coordinatorNotification || request?.metadata?.coordinatorDecision === true
+      ? boundCoordinatorPushPayload(notification)
+      : notification;
+  }
+
   private async broadcastAgentAttention(params: {
     agentId: string;
     provider: AgentProvider;
     reason: "finished" | "error" | "permission";
+    coordinatorNotification?: AgentAttentionNotificationPayload;
   }): Promise<void> {
     const agent = this.agentManager.getAgent(params.agentId);
     if (!agent?.workspaceId) {
@@ -2505,24 +2593,31 @@ export class VoiceAssistantWebSocketServer {
     const allStates = notificationEntries.map((e) => e.state);
     const nowMs = Date.now();
     const assistantMessage = await this.agentManager.getLastAssistantMessage(params.agentId);
-    const notification = buildAgentAttentionNotificationPayload({
-      reason: params.reason,
-      serverId: this.serverId,
-      workspaceId: agent.workspaceId,
-      agentId: params.agentId,
-      assistantMessage,
-      permissionRequest: findLatestPermissionRequest(agent.pendingPermissions),
-    });
+    const notification =
+      params.coordinatorNotification ??
+      buildAgentAttentionNotificationPayload({
+        reason: params.reason,
+        serverId: this.serverId,
+        workspaceId: agent.workspaceId,
+        agentId: params.agentId,
+        assistantMessage,
+        permissionRequest: findLatestPermissionRequest(agent.pendingPermissions),
+      });
 
     const plan = computeNotificationPlan({
       allStates,
       focusTarget: { kind: "agent", id: params.agentId },
-      pushEligible: isPushEligibleAttentionReason(params.reason),
+      pushEligible: await this.shouldPushAgentAttention(
+        params.agentId,
+        params.reason,
+        params.coordinatorNotification,
+      ),
       nowMs,
     });
 
     if (plan.shouldPush) {
-      void this.pushNotificationSender.send(notification).catch((err) => {
+      const pushPayload = this.coordinatorPushPayload(params, notification);
+      void this.pushNotificationSender.send(pushPayload).catch((err) => {
         this.logger.warn({ err, agentId: params.agentId }, "Failed to send push notification");
       });
     }

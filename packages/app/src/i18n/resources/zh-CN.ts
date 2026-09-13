@@ -1932,6 +1932,7 @@ export const zhCN: TranslationResources = {
       saveAccessibility: "保存 review 评论",
     },
   },
+  coordinator: en.coordinator,
   settings: {
     title: "设置",
     loading: "正在加载设置...",

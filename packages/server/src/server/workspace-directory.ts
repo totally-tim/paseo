@@ -82,6 +82,7 @@ export interface WorkspaceDirectoryDeps {
     Array<{ cwd: string; workspaceId?: string; activity: TerminalActivity | null }>
   >;
   isProviderVisibleToClient(provider: string): boolean;
+  canDisplayHiddenWorkspaces?(): boolean;
   buildWorkspaceDescriptor(input: {
     workspace: PersistedWorkspaceRecord;
     projectRecord?: PersistedProjectRecord | null;
@@ -569,7 +570,10 @@ export class WorkspaceDirectory {
     );
     return persistedProjects
       .filter(
-        (project) => !project.archivedAt && !projectIdsWithActiveWorkspaces.has(project.projectId),
+        (project) =>
+          !project.hidden &&
+          !project.archivedAt &&
+          !projectIdsWithActiveWorkspaces.has(project.projectId),
       )
       .map((project) => ({
         projectId: project.projectId,
@@ -612,6 +616,8 @@ export class WorkspaceDirectory {
     filter: FetchWorkspacesRequestFilter | undefined;
   }): boolean {
     const { workspace, filter } = input;
+    // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13 once all clients filter hidden records.
+    if (workspace.hidden && !this.deps.canDisplayHiddenWorkspaces?.()) return false;
     if (!filter) {
       return true;
     }

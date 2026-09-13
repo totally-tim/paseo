@@ -82,6 +82,27 @@ const manifests = {
     supportedHosts: ["main"],
     resourceKey: (target) => target.workspaceId,
   },
+  coordinator_goals: {
+    kind: "coordinator_goals",
+    supportedHosts: ["main"],
+    resourceKey: (target) => target.projectId ?? "daemon",
+  },
+  coordinator_policy: {
+    kind: "coordinator_policy",
+    supportedHosts: ["main"],
+    resourceKey: (target) => target.projectId ?? "daemon",
+  },
+  coordinator_memory: {
+    kind: "coordinator_memory",
+    supportedHosts: ["main"],
+    resourceKey: (target) =>
+      target.scope === "personal" ? "personal" : `personal-project:${target.projectId}`,
+  },
+  coordinator_board: {
+    kind: "coordinator_board",
+    supportedHosts: ["main"],
+    resourceKey: (target) => target.projectId,
+  },
   commit_diff: {
     kind: "commit_diff",
     supportedHosts: ["main", "explorer"],

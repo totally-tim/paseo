@@ -451,6 +451,7 @@ export type AgentPermissionRequestKind = "tool" | "plan" | "question" | "mode" |
 export type AgentPermissionUpdate = AgentMetadata;
 
 export interface AgentPermissionAction {
+  response?: AgentPermissionResponse;
   id: string;
   label: string;
   behavior: "allow" | "deny";
@@ -472,6 +473,9 @@ export interface AgentPermissionRequest {
   metadata?: AgentMetadata;
   /** ISO 8601 timestamp set by the daemon when the request is first seen. */
   requestedAt?: string;
+  /** Deadline and daemon-owned answer for coordinator decisions. */
+  timeoutAt?: string;
+  defaultAnswer?: AgentPermissionResponse;
 }
 
 export type AgentPermissionResponse =

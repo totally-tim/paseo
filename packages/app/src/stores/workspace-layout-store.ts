@@ -62,6 +62,9 @@ import {
 import { normalizeWorkspaceTabTarget } from "@/workspace-tabs/identity";
 import { createValidatedPersistStorage } from "@/storage/validated-persist-storage";
 import { panelTargetSupportsHostForWorkspaceKey } from "@/plugins/workspace-panels/locations";
+import { useCoordinatorBoardStore } from "@/coordinator/board-store";
+import { useDraftStore } from "@/stores/draft-store";
+import { buildCoordinatorBoardDraftKey, buildWorkspaceDraftTabDraftKey } from "@/stores/draft-keys";
 
 export {
   AMBIENT_PLACEMENT,
@@ -114,7 +117,26 @@ interface WorkspaceLayoutStore {
   focusRestorationByWorkspace: Record<string, WorkspaceFocusRestorationState>;
   explorerSidebarPaneIdByWorkspace: Record<string, string | null>;
   sidePaneIdByWorkspace: Record<string, string | null>;
+  /**
+   * Draft tabs the workspace seeded as its ambient home, per workspace. Only
+   * these drafts may convert into the coordinator board — a draft the user
+   * opened is never eaten. Session-scoped on purpose: after a restart the
+   * seeded home is whatever the layout persists.
+   */
+  ambientHomeDraftTabIdsByWorkspace: Record<string, Set<string>>;
+  /**
+   * Projects whose coordinator board tab the user closed while the coordinator
+   * stayed enabled, per workspace. Session-scoped so a board that was open when
+   * the app quit still restores with the layout, while a mid-session close
+   * stops reconcile from resurrecting it.
+   */
+  closedCoordinatorBoardProjectIdsByWorkspace: Record<string, Set<string>>;
   openTab: (input: OpenWorkspaceTabInput) => string | null;
+  /**
+   * Opens the project's coordinator board, lifting any close dismissal so
+   * reconcile keeps it open. Returns the board's tab id.
+   */
+  openCoordinatorBoard: (workspaceKey: string, projectId: string) => string | null;
   /** Reveals the Explorer sidebar without selecting a view. Returns its pane id. */
   showExplorerSidebar: (workspaceKey: string) => string | null;
   hideExplorerSidebar: (workspaceKey: string) => void;
@@ -208,6 +230,17 @@ const WorkspaceTabTargetStorageSchema = z.discriminatedUnion("kind", [
   }),
   z.strictObject({ kind: z.literal("terminal"), terminalId: z.string() }),
   z.strictObject({ kind: z.literal("browser"), browserId: z.string() }),
+  z.strictObject({ kind: z.literal("coordinator_board"), projectId: z.string() }),
+  z.strictObject({ kind: z.literal("coordinator_goals"), projectId: z.string().optional() }),
+  z.strictObject({ kind: z.literal("coordinator_policy"), projectId: z.string().optional() }),
+  z.discriminatedUnion("scope", [
+    z.strictObject({ kind: z.literal("coordinator_memory"), scope: z.literal("personal") }),
+    z.strictObject({
+      kind: z.literal("coordinator_memory"),
+      scope: z.literal("personal-project"),
+      projectId: z.string(),
+    }),
+  ]),
   z.strictObject({ kind: z.literal("changes_tree") }),
   z.strictObject({ kind: z.literal("files") }),
   z.strictObject({ kind: z.literal("pull_request") }),
@@ -541,6 +574,89 @@ function removeAgentIdFromWorkspaceSet(
   };
 }
 
+function reconcileWorkspaceIdSet(
+  state: Record<string, Set<string>>,
+  workspaceKey: string,
+  nextIds: ReadonlySet<string> | null | undefined,
+): Record<string, Set<string>> {
+  const current = state[workspaceKey] ?? null;
+  const next = nextIds && nextIds.size > 0 ? nextIds : null;
+  if (
+    (!current && !next) ||
+    (current && next && current.size === next.size && [...current].every((id) => next.has(id)))
+  ) {
+    return state;
+  }
+  const nextState = { ...state };
+  if (next) {
+    nextState[workspaceKey] = new Set(next);
+  } else {
+    delete nextState[workspaceKey];
+  }
+  return nextState;
+}
+
+/**
+ * The board takes the ambient home draft's place, so its mid-edit composer
+ * text moves onto the board's draft key — the coordinator session key when one
+ * is running, the parked project key otherwise.
+ */
+function carryAmbientHomeDraftIntoBoard(input: {
+  workspaceKey: string;
+  draftId: string;
+  projectId: string;
+}): void {
+  const serverId = input.workspaceKey.slice(0, input.workspaceKey.indexOf(":"));
+  if (!serverId) {
+    return;
+  }
+  const draftStore = useDraftStore.getState();
+  const sourceKey = buildWorkspaceDraftTabDraftKey({ serverId, draftId: input.draftId });
+  const draft = draftStore.getDraftInput(sourceKey);
+  if (!draft || (draft.text.trim().length === 0 && draft.attachments.length === 0)) {
+    return;
+  }
+  const coordinatorAgentId =
+    useCoordinatorBoardStore.getState().hosts[serverId]?.boards.get(input.projectId)
+      ?.coordinatorAgentId ?? null;
+  const targetKey = buildCoordinatorBoardDraftKey({
+    serverId,
+    projectId: input.projectId,
+    coordinatorAgentId,
+  });
+  const existing = draftStore.getDraftInput(targetKey);
+  const existingHasContent =
+    !!existing && (existing.text.trim().length > 0 || existing.attachments.length > 0);
+  draftStore.saveDraftInput({
+    draftKey: targetKey,
+    draft: existingHasContent
+      ? {
+          text: existing.text.trim() ? `${existing.text}\n\n${draft.text}` : draft.text,
+          attachments: [...existing.attachments, ...draft.attachments],
+        }
+      : draft,
+  });
+  draftStore.clearDraftInput({ draftKey: sourceKey });
+}
+
+/** Tabs that went draft → coordinator_board during this reconcile. */
+function collectDraftToBoardConversions(input: {
+  previousLayout: WorkspaceLayout;
+  nextLayout: WorkspaceLayout;
+}): { draftId: string; projectId: string }[] {
+  const previousTargetsByTabId = new Map(
+    collectAllTabs(input.previousLayout.root).map((tab) => [tab.tabId, tab.target] as const),
+  );
+  const conversions: { draftId: string; projectId: string }[] = [];
+  for (const tab of collectAllTabs(input.nextLayout.root)) {
+    const previous = previousTargetsByTabId.get(tab.tabId);
+    if (previous?.kind === "draft" && tab.target.kind === "coordinator_board") {
+      conversions.push({ draftId: previous.draftId, projectId: tab.target.projectId });
+    }
+  }
+  return conversions;
+}
+
 function getWorkspaceLayout(
   state: Record<string, WorkspaceLayout>,
   workspaceKey: string,
@@ -779,6 +895,8 @@ export function createWorkspaceLayoutStore(
         focusRestorationByWorkspace: {},
         explorerSidebarPaneIdByWorkspace: {},
         sidePaneIdByWorkspace: {},
+        ambientHomeDraftTabIdsByWorkspace: {},
+        closedCoordinatorBoardProjectIdsByWorkspace: {},
         openTab: (input) => {
           const normalizedWorkspaceKey = trimNonEmpty(input.workspaceKey);
           const normalizedTarget = normalizeWorkspaceTabTarget(input.target);
@@ -852,6 +970,26 @@ export function createWorkspaceLayoutStore(
             },
           }));
           return result.tabId;
+        },
+        openCoordinatorBoard: (workspaceKey, projectId) => {
+          const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);
+          const normalizedProjectId = trimNonEmpty(projectId);
+          if (!normalizedWorkspaceKey || !normalizedProjectId) {
+            return null;
+          }
+          set((state) => ({
+            closedCoordinatorBoardProjectIdsByWorkspace: removeAgentIdFromWorkspaceSet(
+              state.closedCoordinatorBoardProjectIdsByWorkspace,
+              normalizedWorkspaceKey,
+              normalizedProjectId,
+            ),
+          }));
+          return get().openTab({
+            workspaceKey: normalizedWorkspaceKey,
+            target: { kind: "coordinator_board", projectId: normalizedProjectId },
+            intent: "reveal",
+            placement: FOCUSED_PANE_PLACEMENT,
+          });
         },
         showExplorerSidebar: (workspaceKey) => {
           const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);
@@ -1040,6 +1178,14 @@ export function createWorkspaceLayoutStore(
                 ...state.layoutByWorkspace,
                 [normalizedWorkspaceKey]: nextLayout,
               },
+              closedCoordinatorBoardProjectIdsByWorkspace:
+                closingTab?.target.kind === "coordinator_board"
+                  ? addAgentIdToWorkspaceSet(
+                      state.closedCoordinatorBoardProjectIdsByWorkspace,
+                      normalizedWorkspaceKey,
+                      closingTab.target.projectId,
+                    )
+                  : state.closedCoordinatorBoardProjectIdsByWorkspace,
             };
           });
         },
@@ -1240,6 +1386,7 @@ export function createWorkspaceLayoutStore(
             return;
           }
 
+          const convertedHomes: { draftId: string; projectId: string }[] = [];
           set((state) => {
             const rawLayout = getWorkspaceLayout(state.layoutByWorkspace, normalizedWorkspaceKey);
             const explorerSidebarPaneId = resolveExplorerSidebarPaneId(
@@ -1259,6 +1406,10 @@ export function createWorkspaceLayoutStore(
                   ...(state.continuationPendingIdsByWorkspace[normalizedWorkspaceKey] ?? []),
                 ]),
                 hiddenAgentIds: state.hiddenAgentIdsByWorkspace[normalizedWorkspaceKey] ?? null,
+                ambientHomeDraftTabIds:
+                  state.ambientHomeDraftTabIdsByWorkspace[normalizedWorkspaceKey] ?? null,
+                closedCoordinatorBoardProjectIds:
+                  state.closedCoordinatorBoardProjectIdsByWorkspace[normalizedWorkspaceKey] ?? null,
                 explorerSidebarPaneId,
               },
               snapshot,
@@ -1268,16 +1419,15 @@ export function createWorkspaceLayoutStore(
               explorerSidebarPaneId,
               currentLayout.focusedPaneId,
             );
-            let pinnedAgentIdsByWorkspace = state.pinnedAgentIdsByWorkspace;
-            for (const agentId of state.pinnedAgentIdsByWorkspace[normalizedWorkspaceKey] ?? []) {
-              if (!nextState.pinnedAgentIds?.has(agentId)) {
-                pinnedAgentIdsByWorkspace = removeAgentIdFromWorkspaceSet(
-                  pinnedAgentIdsByWorkspace,
-                  normalizedWorkspaceKey,
-                  agentId,
-                );
-              }
-            }
+            const pinnedAgentIdsByWorkspace = reconcileWorkspaceIdSet(
+              state.pinnedAgentIdsByWorkspace,
+              normalizedWorkspaceKey,
+              new Set(
+                [...(state.pinnedAgentIdsByWorkspace[normalizedWorkspaceKey] ?? [])].filter(
+                  (agentId) => nextState.pinnedAgentIds?.has(agentId),
+                ),
+              ),
+            );
             let continuationPendingIdsByWorkspace = state.continuationPendingIdsByWorkspace;
             // Protection ends when the successor arrives, and also when it is archived or
             // deleted elsewhere; otherwise its tab stays pinned to a workspace forever.
@@ -1293,23 +1443,52 @@ export function createWorkspaceLayoutStore(
                   id,
                 );
             }
+            const ambientHomeDraftTabIdsByWorkspace = reconcileWorkspaceIdSet(
+              state.ambientHomeDraftTabIdsByWorkspace,
+              normalizedWorkspaceKey,
+              nextState.ambientHomeDraftTabIds,
+            );
+            const closedCoordinatorBoardProjectIdsByWorkspace = reconcileWorkspaceIdSet(
+              state.closedCoordinatorBoardProjectIdsByWorkspace,
+              normalizedWorkspaceKey,
+              nextState.closedCoordinatorBoardProjectIds,
+            );
             if (
               nextLayout === rawLayout &&
               pinnedAgentIdsByWorkspace === state.pinnedAgentIdsByWorkspace &&
-              continuationPendingIdsByWorkspace === state.continuationPendingIdsByWorkspace
+              continuationPendingIdsByWorkspace === state.continuationPendingIdsByWorkspace &&
+              ambientHomeDraftTabIdsByWorkspace === state.ambientHomeDraftTabIdsByWorkspace &&
+              closedCoordinatorBoardProjectIdsByWorkspace ===
+                state.closedCoordinatorBoardProjectIdsByWorkspace
             ) {
               return state;
             }
 
+            convertedHomes.push(
+              ...collectDraftToBoardConversions({
+                previousLayout: currentLayout,
+                nextLayout,
+              }),
+            );
+
             return {
               pinnedAgentIdsByWorkspace,
               continuationPendingIdsByWorkspace,
+              ambientHomeDraftTabIdsByWorkspace,
+              closedCoordinatorBoardProjectIdsByWorkspace,
               layoutByWorkspace: {
                 ...state.layoutByWorkspace,
                 [normalizedWorkspaceKey]: nextLayout,
               },
             };
           });
+          for (const convertedHome of convertedHomes) {
+            carryAmbientHomeDraftIntoBoard({
+              workspaceKey: normalizedWorkspaceKey,
+              draftId: convertedHome.draftId,
+              projectId: convertedHome.projectId,
+            });
+          }
         },
         reorderTabs: (workspaceKey, tabIds) => {
           const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);
@@ -1522,12 +1701,29 @@ export function createWorkspaceLayoutStore(
               return state;
             }
 
+            const tabsByTabId = new Map(
+              collectAllTabs(layout.root).map((tab) => [tab.tabId, tab] as const),
+            );
+            let closedCoordinatorBoardProjectIdsByWorkspace =
+              state.closedCoordinatorBoardProjectIdsByWorkspace;
+            for (const closedTabId of findPaneById(layout.root, normalizedPaneId)?.tabIds ?? []) {
+              const target = tabsByTabId.get(closedTabId)?.target;
+              if (target?.kind === "coordinator_board") {
+                closedCoordinatorBoardProjectIdsByWorkspace = addAgentIdToWorkspaceSet(
+                  closedCoordinatorBoardProjectIdsByWorkspace,
+                  normalizedWorkspaceKey,
+                  target.projectId,
+                );
+              }
+            }
+
             return {
               ...withoutFocusRestoration(state, normalizedWorkspaceKey),
               layoutByWorkspace: {
                 ...state.layoutByWorkspace,
                 [normalizedWorkspaceKey]: nextLayout,
               },
+              closedCoordinatorBoardProjectIdsByWorkspace,
               sidePaneIdByWorkspace:
                 state.sidePaneIdByWorkspace[normalizedWorkspaceKey] === normalizedPaneId
                   ? {
@@ -1806,7 +2002,9 @@ export function createWorkspaceLayoutStore(
               normalizedWorkspaceKey in state.hiddenAgentIdsByWorkspace ||
               normalizedWorkspaceKey in state.focusRestorationByWorkspace ||
               normalizedWorkspaceKey in state.explorerSidebarPaneIdByWorkspace ||
-              normalizedWorkspaceKey in state.sidePaneIdByWorkspace;
+              normalizedWorkspaceKey in state.sidePaneIdByWorkspace ||
+              normalizedWorkspaceKey in state.ambientHomeDraftTabIdsByWorkspace ||
+              normalizedWorkspaceKey in state.closedCoordinatorBoardProjectIdsByWorkspace;
             if (!hasAny) {
               return state;
             }
@@ -1830,6 +2028,14 @@ export function createWorkspaceLayoutStore(
             } = state.explorerSidebarPaneIdByWorkspace;
             const { [normalizedWorkspaceKey]: _sidePane, ...sidePaneIdByWorkspace } =
               state.sidePaneIdByWorkspace;
+            const {
+              [normalizedWorkspaceKey]: _ambientHomeDrafts,
+              ...ambientHomeDraftTabIdsByWorkspace
+            } = state.ambientHomeDraftTabIdsByWorkspace;
+            const {
+              [normalizedWorkspaceKey]: _closedCoordinatorBoards,
+              ...closedCoordinatorBoardProjectIdsByWorkspace
+            } = state.closedCoordinatorBoardProjectIdsByWorkspace;
             return {
               layoutByWorkspace,
               splitSizesByWorkspace,
@@ -1839,6 +2045,8 @@ export function createWorkspaceLayoutStore(
               focusRestorationByWorkspace,
               explorerSidebarPaneIdByWorkspace,
               sidePaneIdByWorkspace,
+              ambientHomeDraftTabIdsByWorkspace,
+              closedCoordinatorBoardProjectIdsByWorkspace,
             };
           });
         },

@@ -131,6 +131,7 @@ const RECONNECT_TOAST_DELAY_MS = 1_000;
 const reconnectToastStateByServerId = new Map<string, ReconnectToastState>();
 
 interface ChatAgentSelectedState extends ChatAgentStateShape {
+  labels: Record<string, string> | null;
   archivedAt: Date | null;
   requiresAttention: boolean;
   attentionReason: Agent["attentionReason"] | null;
@@ -156,6 +157,7 @@ function readViewedTimelineError(input: {
 }
 
 const EMPTY_CHAT_AGENT_STATE: ChatAgentSelectedState = {
+  labels: null,
   serverId: null,
   id: null,
   status: null,
@@ -175,6 +177,7 @@ function selectChatAgentState(
   if (!agent) return EMPTY_CHAT_AGENT_STATE;
   return {
     serverId: agent.serverId,
+    labels: agent.labels,
     id: agent.id,
     provider: agent.provider,
     status: agent.status,
@@ -1260,6 +1263,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
     draftKey: buildDraftStoreKey({
       serverId,
       agentId,
+      labels: agentState.labels,
     }),
   });
   // Stabilize the agentInputDraft object identity so that memo(AgentComposerSection) can bail out

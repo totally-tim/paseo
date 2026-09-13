@@ -67,6 +67,8 @@ describe("buildAgentAttentionNotificationPayload", () => {
         workspaceId: "workspace-2",
         agentId: "agent-2",
         reason: "permission",
+        requestId: "perm-1",
+        categoryIdentifier: "paseo.coordinator.open",
       },
     });
   });

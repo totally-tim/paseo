@@ -1,3 +1,5 @@
+import type { CoordinatorAutomationResult } from "@getpaseo/protocol/messages";
+import type { CoordinatorMemorySnapshot } from "@getpaseo/protocol/messages";
 import type { SidebarOrderStore } from "./sidebar-order-store.js";
 import { handleContinuationRequest } from "./agent-continuation/session.js";
 import type { AgentContinuationService } from "./agent-continuation/service.js";
@@ -5,7 +7,12 @@ import { handleAccountCatalog } from "./provider-accounts/account-catalog.js";
 import { handleAccountList, handleAccountOperation } from "./provider-accounts/account-session.js";
 import type { BrowserToolsBroker } from "./browser-tools/broker.js";
 import { BrowserAutomationHostCapabilitySchema } from "@getpaseo/protocol/browser-automation/capabilities";
-import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
+import type {
+  CoordinatorBoardSnapshot,
+  ProjectCoordinatorState,
+  GlobalCoordinatorState,
+  SessionEventSubscription,
+} from "@getpaseo/protocol/messages";
 import type { AgentRequests } from "./agent/requests/index.js";
 import equal from "fast-deep-equal";
 import { SessionDelivery, type OwnedSubscription } from "./session/owned-subscriptions/index.js";
@@ -95,6 +102,7 @@ import {
   WorkspaceLabelStorageUncertainError,
   type WorkspaceLabelService,
 } from "./workspace-labels/index.js";
+import type { CoordinatorService } from "./coordinator/coordinator-service.js";
 
 import { AgentManager, AgentRunCancellationError } from "./agent/agent-manager.js";
 import { buildTimelinePromptIndex } from "./agent/timeline-prompt-index.js";
@@ -108,6 +116,7 @@ import type {
 } from "./agent/agent-manager.js";
 import { createAgentCommand } from "./agent/create-agent/create.js";
 import { resolveCreateAgentIntent, type CreateAgentIntent } from "./agent/create-agent/intent.js";
+import { stripAgentToolLabels } from "./agent/daemon-managed-labels.js";
 import {
   archiveAgentCommand,
   cancelAgentRunCommand,
@@ -477,6 +486,8 @@ export interface SessionOptions {
   workspaceLabelService?: WorkspaceLabelService;
   filesystem?: SessionFileSystem;
   scheduleService: ScheduleService;
+  /** Coordinator service; coordinator.* RPCs answer "unavailable" when absent. */
+  coordinatorService?: CoordinatorService;
   checkoutDiffManager: CheckoutDiffManager;
   github?: ForgeService;
   createAgentMcpTransport?: AgentMcpTransportFactory;
@@ -797,6 +808,12 @@ export class Session {
   private readonly workspaceScripts: WorkspaceScriptsService;
   private readonly agentRequests: Pick<AgentRequests, "create" | "send">;
   private readonly createAgentLifecycleDispatch: CreateAgentLifecycleDispatch;
+  private readonly coordinatorService: CoordinatorService | undefined;
+  private readonly coordinatorBoardSubscriptions = new Map<
+    string,
+    { owner: OwnedSubscription; projectId: string | null }
+  >();
+  private unsubscribeCoordinatorBoard: (() => void) | null = null;
 
   constructor(options: SessionOptions) {
     const {
@@ -894,6 +911,7 @@ export class Session {
       logger: this.sessionLogger,
     });
     this.agentManager = agentManager;
+    this.coordinatorService = options.coordinatorService;
     this.continuations = options.continuations;
     this.agentStorage = agentStorage;
     this.projectRegistry = projectRegistry;
@@ -1162,6 +1180,7 @@ export class Session {
       listProviderSubagentActivity: async () => this.agentManager.listProviderSubagentActivity(),
       listTerminalActivityContributions: () => this.listTerminalActivityContributions(),
       isProviderVisibleToClient: (provider) => this.isProviderVisibleToClient(provider),
+      canDisplayHiddenWorkspaces: () => this.supports(CLIENT_CAPS.coordinator),
       buildWorkspaceDescriptor: (input) => this.buildWorkspaceDescriptor(input),
     });
 
@@ -2296,6 +2315,7 @@ export class Session {
       this.dispatchPluginMessage(msg) ??
       this.dispatchTerminalMessage(msg) ??
       this.dispatchScheduleMessage(msg) ??
+      this.dispatchCoordinatorMessage(msg, source) ??
       this.dispatchMiscMessage(msg);
     if (promise) await promise;
   }
@@ -3143,6 +3163,447 @@ export class Session {
         });
         return;
     }
+  }
+
+  private async handleCoordinatorPermissionDefer(
+    msg: Extract<SessionInboundMessage, { type: "coordinator.permission.defer.request" }>,
+    source?: object,
+  ): Promise<void> {
+    let error: string | null = null;
+    try {
+      if (!this.coordinatorService) throw new Error("Coordinator service unavailable");
+      await this.coordinatorService.deferPermission(msg.agentId, msg.requestId);
+    } catch (cause) {
+      error = getErrorMessage(cause);
+    }
+    this.emitForSource(
+      {
+        type: "coordinator.permission.defer.response",
+        payload: { agentId: msg.agentId, requestId: msg.requestId, error },
+      },
+      source,
+    );
+  }
+
+  private async handleCoordinatorAutomation(
+    msg: Extract<
+      SessionInboundMessage,
+      {
+        type:
+          | "coordinator.goals.list.request"
+          | "coordinator.goal.pause.request"
+          | "coordinator.proposals.list.request"
+          | "coordinator.proposal.resolve.request"
+          | "coordinator.policy.list.request"
+          | "coordinator.policy.toggle.request"
+          | "coordinator.policy.preview.request"
+          | "coordinator.policy.allow.request";
+      }
+    >,
+    source?: object,
+  ): Promise<void> {
+    const payload: CoordinatorAutomationResult = { requestId: msg.requestId, error: null };
+    try {
+      if (!this.coordinatorService) throw new Error("Coordinator automation is unavailable");
+      switch (msg.type) {
+        case "coordinator.goals.list.request":
+          payload.goals = await this.coordinatorService.listCoordinatorGoals(msg.projectId);
+          break;
+        case "coordinator.goal.pause.request":
+          payload.goal = await this.coordinatorService.setCoordinatorGoalPaused(
+            msg.projectId,
+            msg.goalId,
+            msg.paused,
+          );
+          break;
+        case "coordinator.proposals.list.request":
+          payload.proposals = await this.coordinatorService.listCoordinatorProposals(msg.projectId);
+          break;
+        case "coordinator.proposal.resolve.request":
+          payload.proposal = await this.coordinatorService.resolveCoordinatorProposal(
+            msg.proposalId,
+            msg.action,
+          );
+          break;
+        case "coordinator.policy.list.request":
+          payload.rules = await this.coordinatorService.listCoordinatorPolicy(msg.projectId);
+          break;
+        case "coordinator.policy.toggle.request":
+          payload.rule = await this.coordinatorService.setCoordinatorPolicyEnabled(
+            msg.ruleId,
+            msg.enabled,
+          );
+          break;
+        case "coordinator.policy.preview.request":
+          payload.preview = await this.coordinatorService.getCoordinatorPermissionPolicyPreview(
+            msg.agentId,
+            msg.permissionRequestId,
+          );
+          break;
+        case "coordinator.policy.allow.request":
+          payload.rule = await this.coordinatorService.alwaysAllowCoordinatorPermission({
+            agentId: msg.agentId,
+            requestId: msg.permissionRequestId,
+            scope: msg.scope,
+            expectedPattern: msg.expectedPattern,
+          });
+          break;
+      }
+    } catch (error) {
+      payload.error = getErrorMessage(error);
+    }
+    switch (msg.type) {
+      case "coordinator.goals.list.request":
+        this.emitForSource({ type: "coordinator.goals.list.response", payload }, source);
+        return;
+      case "coordinator.goal.pause.request":
+        this.emitForSource({ type: "coordinator.goal.pause.response", payload }, source);
+        return;
+      case "coordinator.proposals.list.request":
+        this.emitForSource({ type: "coordinator.proposals.list.response", payload }, source);
+        return;
+      case "coordinator.proposal.resolve.request":
+        this.emitForSource({ type: "coordinator.proposal.resolve.response", payload }, source);
+        return;
+      case "coordinator.policy.list.request":
+        this.emitForSource({ type: "coordinator.policy.list.response", payload }, source);
+        return;
+      case "coordinator.policy.toggle.request":
+        this.emitForSource({ type: "coordinator.policy.toggle.response", payload }, source);
+        return;
+      case "coordinator.policy.preview.request":
+        this.emitForSource({ type: "coordinator.policy.preview.response", payload }, source);
+        return;
+      case "coordinator.policy.allow.request":
+        this.emitForSource({ type: "coordinator.policy.allow.response", payload }, source);
+        return;
+    }
+  }
+
+  private async handleCoordinatorMemory(
+    msg: Extract<
+      SessionInboundMessage,
+      { type: "coordinator.memory.get.request" | "coordinator.memory.update.request" }
+    >,
+    source?: object,
+  ): Promise<void> {
+    let memory: CoordinatorMemorySnapshot | null = null;
+    let error: string | null = null;
+    try {
+      if (!this.coordinatorService)
+        throw new Error("Coordinator support is not available on this daemon");
+      memory =
+        msg.type === "coordinator.memory.get.request"
+          ? await this.coordinatorService.getMemory(msg)
+          : await this.coordinatorService.updateMemory(msg);
+    } catch (cause) {
+      error = getErrorMessage(cause);
+    }
+    const payload = { requestId: msg.requestId, memory, error };
+    this.emitForSource(
+      {
+        type:
+          msg.type === "coordinator.memory.get.request"
+            ? "coordinator.memory.get.response"
+            : "coordinator.memory.update.response",
+        payload,
+      },
+      source,
+    );
+  }
+
+  private dispatchCoordinatorAutomationMessage(
+    msg: SessionInboundMessage,
+    source?: object,
+  ): Promise<void> | undefined {
+    switch (msg.type) {
+      case "coordinator.goals.list.request":
+      case "coordinator.goal.pause.request":
+      case "coordinator.proposals.list.request":
+      case "coordinator.proposal.resolve.request":
+      case "coordinator.policy.list.request":
+      case "coordinator.policy.toggle.request":
+      case "coordinator.policy.preview.request":
+      case "coordinator.policy.allow.request":
+        return this.handleCoordinatorAutomation(msg, source);
+      default:
+        return undefined;
+    }
+  }
+
+  private dispatchCoordinatorMessage(
+    msg: SessionInboundMessage,
+    source?: object,
+  ): Promise<void> | undefined {
+    const automation = this.dispatchCoordinatorAutomationMessage(msg, source);
+    if (automation) return automation;
+    switch (msg.type) {
+      case "coordinator.memory.get.request":
+      case "coordinator.memory.update.request":
+        return this.handleCoordinatorMemory(msg, source);
+      case "coordinator.permission.defer.request":
+        return this.handleCoordinatorPermissionDefer(msg, source);
+      case "coordinator.global.enable.request":
+      case "coordinator.global.disable.request":
+      case "coordinator.global.update.request":
+      case "coordinator.global.get.request":
+        return this.handleCoordinatorGlobalMessage(msg, source);
+      case "coordinator.project.enable.request":
+      case "coordinator.project.disable.request":
+      case "coordinator.project.update.request":
+      case "coordinator.project.get.request":
+        return this.handleCoordinatorProjectMessage(msg, source);
+      case "coordinator.board.subscribe.request":
+        return this.handleCoordinatorBoardSubscribe(msg, source);
+      default:
+        return undefined;
+    }
+  }
+
+  /**
+   * The four global RPCs share one result payload (`coordinator` plus `error`),
+   * so failures answer in-band rather than as rpc_error — a disabled or
+   * unconfigured coordinator is a normal outcome, not a transport fault.
+   */
+  private async handleCoordinatorGlobalMessage(
+    msg: Extract<
+      SessionInboundMessage,
+      {
+        type:
+          | "coordinator.global.enable.request"
+          | "coordinator.global.disable.request"
+          | "coordinator.global.update.request"
+          | "coordinator.global.get.request";
+      }
+    >,
+    source?: object,
+  ): Promise<void> {
+    const respond = (coordinator: GlobalCoordinatorState | null, error: string | null) => {
+      const payload = { requestId: msg.requestId, coordinator, error };
+      switch (msg.type) {
+        case "coordinator.global.enable.request":
+          this.emitForSource({ type: "coordinator.global.enable.response", payload }, source);
+          return;
+        case "coordinator.global.disable.request":
+          this.emitForSource({ type: "coordinator.global.disable.response", payload }, source);
+          return;
+        case "coordinator.global.update.request":
+          this.emitForSource({ type: "coordinator.global.update.response", payload }, source);
+          return;
+        case "coordinator.global.get.request":
+          this.emitForSource({ type: "coordinator.global.get.response", payload }, source);
+          return;
+      }
+    };
+    const service = this.coordinatorService;
+    if (!service) {
+      respond(null, "Coordinator support is not available on this daemon");
+      return;
+    }
+    try {
+      switch (msg.type) {
+        case "coordinator.global.enable.request":
+          respond(
+            await service.enableGlobalCoordinator({
+              profile: msg.profile,
+              ...(msg.trustLevel !== undefined ? { trustLevel: msg.trustLevel } : {}),
+            }),
+            null,
+          );
+          return;
+        case "coordinator.global.disable.request":
+          respond(await service.disableGlobalCoordinator(), null);
+          return;
+        case "coordinator.global.update.request":
+          respond(
+            await service.updateGlobalCoordinator({
+              ...(msg.fallbackProfile !== undefined
+                ? { fallbackProfile: msg.fallbackProfile }
+                : {}),
+              ...(msg.rotationThresholdPercent !== undefined
+                ? { rotationThresholdPercent: msg.rotationThresholdPercent }
+                : {}),
+              ...(msg.notificationSettings !== undefined
+                ? { notificationSettings: msg.notificationSettings }
+                : {}),
+              ...(msg.profile !== undefined ? { profile: msg.profile } : {}),
+              ...(msg.trustLevel !== undefined ? { trustLevel: msg.trustLevel } : {}),
+            }),
+            null,
+          );
+          return;
+        case "coordinator.global.get.request":
+          respond(await service.getGlobalCoordinator(), null);
+          return;
+      }
+    } catch (error) {
+      respond(null, getErrorMessage(error));
+    }
+  }
+
+  private async handleCoordinatorProjectMessage(
+    msg: Extract<
+      SessionInboundMessage,
+      {
+        type:
+          | "coordinator.project.enable.request"
+          | "coordinator.project.disable.request"
+          | "coordinator.project.update.request"
+          | "coordinator.project.get.request";
+      }
+    >,
+    source?: object,
+  ): Promise<void> {
+    const service = this.coordinatorService;
+    // Optional on the schema: the CI-config check rides every project RPC so
+    // the setup sheet can say the watch has nothing to poll (story 34).
+    const ciConfigured = service
+      ? await service.resolveCiConfigured(msg.projectId).catch(() => undefined)
+      : undefined;
+    const respond = (coordinator: ProjectCoordinatorState | null, error: string | null) => {
+      const payload = {
+        requestId: msg.requestId,
+        coordinator,
+        error,
+        ...(ciConfigured !== undefined ? { ciConfigured } : {}),
+      };
+      switch (msg.type) {
+        case "coordinator.project.enable.request":
+          this.emitForSource({ type: "coordinator.project.enable.response", payload }, source);
+          return;
+        case "coordinator.project.disable.request":
+          this.emitForSource({ type: "coordinator.project.disable.response", payload }, source);
+          return;
+        case "coordinator.project.update.request":
+          this.emitForSource({ type: "coordinator.project.update.response", payload }, source);
+          return;
+        case "coordinator.project.get.request":
+          this.emitForSource({ type: "coordinator.project.get.response", payload }, source);
+          return;
+      }
+    };
+    if (!service) {
+      respond(null, "Coordinator support is not available on this daemon");
+      return;
+    }
+    try {
+      switch (msg.type) {
+        case "coordinator.project.enable.request":
+          respond(
+            await service.enableProjectCoordinator({
+              projectId: msg.projectId,
+              profile: msg.profile,
+              ...(msg.profiles !== undefined ? { profiles: msg.profiles } : {}),
+              ...(msg.trustLevel !== undefined ? { trustLevel: msg.trustLevel } : {}),
+              ...(msg.scope !== undefined ? { scope: msg.scope } : {}),
+            }),
+            null,
+          );
+          return;
+        case "coordinator.project.disable.request":
+          respond(await service.disableProjectCoordinator(msg.projectId), null);
+          return;
+        case "coordinator.project.update.request":
+          respond(
+            await service.updateProjectCoordinator({
+              ...(msg.fallbackProfile !== undefined
+                ? { fallbackProfile: msg.fallbackProfile }
+                : {}),
+              ...(msg.rotationThresholdPercent !== undefined
+                ? { rotationThresholdPercent: msg.rotationThresholdPercent }
+                : {}),
+              projectId: msg.projectId,
+              ...(msg.profile !== undefined ? { profile: msg.profile } : {}),
+              ...(msg.profiles !== undefined ? { profiles: msg.profiles } : {}),
+              ...(msg.trustLevel !== undefined ? { trustLevel: msg.trustLevel } : {}),
+              ...(msg.scope !== undefined ? { scope: msg.scope } : {}),
+              ...(msg.guard !== undefined ? { guard: msg.guard } : {}),
+              ...(Object.prototype.hasOwnProperty.call(msg, "usageExpectation")
+                ? { usageExpectation: msg.usageExpectation }
+                : {}),
+            }),
+            null,
+          );
+          return;
+        case "coordinator.project.get.request":
+          respond(await service.getProjectCoordinator(msg.projectId), null);
+          return;
+      }
+    } catch (error) {
+      respond(null, getErrorMessage(error));
+    }
+  }
+
+  private async handleCoordinatorBoardSubscribe(
+    msg: Extract<SessionInboundMessage, { type: "coordinator.board.subscribe.request" }>,
+    source?: object,
+  ): Promise<void> {
+    const projectId = msg.projectId ?? null;
+    const respond = (
+      subscriptionId: string,
+      snapshots: CoordinatorBoardSnapshot[],
+      error: string | null,
+    ) =>
+      this.emitForSource(
+        {
+          type: "coordinator.board.subscribe.response",
+          payload: { requestId: msg.requestId, subscriptionId, projectId, snapshots, error },
+        },
+        source,
+      );
+    const service = this.coordinatorService;
+    if (!service) {
+      respond("", [], "Coordinator support is not available on this daemon");
+      return;
+    }
+    let owner: OwnedSubscription;
+    try {
+      owner = this.delivery.begin("coordinator-board", undefined, (id) => {
+        this.coordinatorBoardSubscriptions.delete(id);
+        this.releaseCoordinatorBoardListenerIfIdle();
+      });
+    } catch (error) {
+      respond("", [], getErrorMessage(error));
+      return;
+    }
+    this.coordinatorBoardSubscriptions.set(owner.id, { owner, projectId });
+    this.ensureCoordinatorBoardListener(service);
+    try {
+      // Register the owner before building snapshots: a board change that lands
+      // mid-subscribe reaches this owner through the listener, and the response
+      // still carries a snapshot at least as fresh as anything emitted.
+      const snapshots = await service.listBoardSnapshots(msg.projectId);
+      respond(owner.responseId, snapshots, null);
+    } catch (error) {
+      await owner.release().catch(() => undefined);
+      respond("", [], getErrorMessage(error));
+    }
+  }
+
+  /**
+   * One service-level board listener per session fans snapshots out to the
+   * session's owned subscriptions; each owner re-emits only for its project
+   * filter, so `coordinator.board.changed` stays source-owned end to end.
+   */
+  private ensureCoordinatorBoardListener(service: CoordinatorService): void {
+    if (this.unsubscribeCoordinatorBoard) return;
+    this.unsubscribeCoordinatorBoard = service.subscribeBoard((snapshot) => {
+      for (const subscription of this.coordinatorBoardSubscriptions.values()) {
+        if (subscription.projectId !== null && subscription.projectId !== snapshot.projectId) {
+          continue;
+        }
+        subscription.owner.emit({
+          type: "coordinator.board.changed",
+          payload: { projectId: snapshot.projectId, snapshot },
+        });
+      }
+    });
+  }
+
+  private releaseCoordinatorBoardListenerIfIdle(): void {
+    if (this.coordinatorBoardSubscriptions.size > 0) return;
+    this.unsubscribeCoordinatorBoard?.();
+    this.unsubscribeCoordinatorBoard = null;
   }
 
   public resetPeakInflight(): void {
@@ -4148,6 +4609,15 @@ export class Session {
         initialPrompt: trimmedPrompt,
       });
 
+      // Coordinator precheck before any worktree/workspace is minted below —
+      // a denied spawn must leave nothing behind. The authoritative check runs
+      // again inside createAgentCommand under the coordinator's spawn lock.
+      if (msg.callerAgentId && this.coordinatorService) {
+        await this.coordinatorService.assertSpawnAllowed({
+          parentAgentId: msg.callerAgentId,
+        });
+      }
+
       const firstAgentContext: FirstAgentContext = {
         ...(trimmedPrompt ? { prompt: trimmedPrompt } : {}),
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
@@ -4178,10 +4648,12 @@ export class Session {
           paseoHome: this.paseoHome,
           worktreesRoot: this.worktreesRoot,
           providerSnapshotManager: this.providerSnapshotManager,
+          ...(this.coordinatorService ? { coordinator: this.coordinatorService } : {}),
         },
         {
           kind: "session",
           agentId,
+          ...(msg.callerAgentId ? { callerAgentId: msg.callerAgentId } : {}),
           config: resolvedIntent.config,
           workspaceId: resolvedIntent.intent.workspaceId,
           worktreeName,
@@ -4250,7 +4722,7 @@ export class Session {
       caller: callerAgent
         ? { id: callerAgent.id, cwd: callerAgent.cwd, workspaceId: callerAgent.workspaceId }
         : null,
-      labels: request.labels,
+      labels: stripAgentToolLabels(request.labels),
       resolveWorkspace: async (workspaceId) => {
         if (createdWorktree?.workspace.workspaceId === workspaceId) {
           return { workspaceId, cwd: createdWorktree.workspace.cwd };
@@ -4914,13 +5386,17 @@ export class Session {
     response: AgentPermissionResponse,
   ): Promise<void> {
     try {
+      const responseAgentId =
+        (await this.coordinatorService?.resolveDecisionResponseAgent(agentId, requestId)) ??
+        agentId;
       await respondToAgentPermission({
         agentManager: this.agentManager,
-        agentId,
+        agentId: responseAgentId,
         requestId,
         response,
         logger: this.sessionLogger,
       });
+      // The manager publishes the successor event; the caller still awaits its original IDs.
       // COMPAT(ownedSubscriptions): added in v0.8.0, remove after 2027-03-09.
       // Legacy clients consume the single domain resolution; modern request outcomes
       // are independent of whether this socket (or its logical Session) observes it.
@@ -5494,6 +5970,7 @@ export class Session {
 
     return {
       id: workspace.workspaceId,
+      ...(workspace.hidden || resolvedProjectRecord?.hidden ? { hidden: true } : {}),
       projectId: workspace.projectId,
       projectDisplayName: resolvedProjectRecord
         ? resolveProjectDisplayName(resolvedProjectRecord)
@@ -5582,6 +6059,7 @@ export class Session {
     const projectRecord = await this.projectRegistry.get(result.workspace.projectId);
     return {
       id: result.workspace.workspaceId,
+      ...(result.workspace.hidden || projectRecord?.hidden ? { hidden: true } : {}),
       projectId: result.workspace.projectId,
       projectDisplayName: projectRecord
         ? resolveProjectDisplayName(projectRecord)
@@ -5763,6 +6241,7 @@ export class Session {
     const icon = await this.projectIcons.snapshot(project);
     return {
       projectId: project.projectId,
+      ...(project.hidden !== undefined ? { hidden: project.hidden } : {}),
       ...(project.projectKey ? { projectKey: project.projectKey } : {}),
       projectDisplayName: resolveProjectDisplayName(project),
       projectCustomName: project.customName ?? null,
@@ -5946,6 +6425,8 @@ export class Session {
         return;
       }
       const workspace = descriptorsByWorkspaceId.get(workspaceId);
+      // Keep client visibility out of the daemon-global directory sequence.
+      if (workspace?.hidden && !this.supports(CLIENT_CAPS.coordinator)) continue;
       const filteredWorkspace =
         workspace && this.matchesWorkspaceFilter({ workspace, filter: subscription.filter })
           ? workspace
@@ -6320,6 +6801,9 @@ export class Session {
         payload: {
           requestId: request.requestId,
           ...(synchronized ?? { projects }),
+          projects: (synchronized?.projects ?? projects).filter(
+            (project) => !project.hidden || this.supports(CLIENT_CAPS.coordinator),
+          ),
         },
       });
     } catch (error) {
@@ -6499,10 +6983,16 @@ export class Session {
         "Sequenced workspace directory reads do not support filters.",
       );
     }
-    return this.directorySync.synchronizeWorkspaces(
+    const result = this.directorySync.synchronizeWorkspaces(
       await this.workspaceDirectory.listDescriptors(),
       request.sync ?? {},
     );
+    return {
+      ...result,
+      entries: result.entries.filter((workspace) =>
+        this.matchesWorkspaceFilter({ workspace, filter: undefined }),
+      ),
+    };
   }
 
   // Build the bootstrap snapshot used by `flushBootstrappedWorkspaceUpdates`
@@ -8396,6 +8886,7 @@ export class Session {
     message: SessionOutboundMessage,
     notified: Set<object>,
   ): void {
+    if (!this.canReceiveCoordinatorRecord(message, subscription.owner.source)) return;
     if (
       message.type !== "agent_attention_required" &&
       message.type !== "terminal_attention_required"
@@ -8437,12 +8928,31 @@ export class Session {
           (!onlySource || source === onlySource) &&
           !delivered.has(source) &&
           !this.delivery.isModern(source) &&
+          this.canReceiveCoordinatorRecord(message, source) &&
           this.wantsEvent(event, source)
         )
           this.onMessageToSource(source, this.workspaceSetupMessageForClient(message, source));
       }
-    } else if (delivered.size === 0 && this.wantsEvent(event)) this.onMessage(message);
+    } else if (
+      delivered.size === 0 &&
+      this.wantsEvent(event) &&
+      this.canReceiveCoordinatorRecord(message)
+    )
+      this.onMessage(message);
     return true;
+  }
+
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13 once all clients filter hidden records.
+  private canReceiveCoordinatorRecord(message: SessionOutboundMessage, source?: object): boolean {
+    if (
+      message.type !== "project.update" ||
+      message.payload.kind !== "upsert" ||
+      !message.payload.project.hidden
+    )
+      return true;
+    return source
+      ? this.supportsForSource(CLIENT_CAPS.coordinator, source)
+      : this.supports(CLIENT_CAPS.coordinator);
   }
 
   private emit(msg: SessionOutboundMessage): void {
@@ -8546,6 +9056,9 @@ export class Session {
     this.unsubscribeProjectMutations = null;
     this.unsubscribePluginChanges?.();
     this.unsubscribePluginChanges = null;
+    this.unsubscribeCoordinatorBoard?.();
+    this.unsubscribeCoordinatorBoard = null;
+    this.coordinatorBoardSubscriptions.clear();
     this.unsubscribeWorkspaceMutations?.();
     this.unsubscribeWorkspaceMutations = null;
     this.agentUpdates.dispose();

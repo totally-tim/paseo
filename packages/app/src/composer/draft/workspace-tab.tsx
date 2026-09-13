@@ -19,6 +19,8 @@ import type { CreateAgentInitialValues } from "@/hooks/use-agent-form-state";
 import { useDraftAgentCreateFlow, type DraftCreateAttempt } from "@/composer/draft/create-flow";
 import { resolveTurnPresentation, TURN_LIVENESS_IDLE } from "@/timeline/turn-liveness";
 import { useHostRuntimeClient } from "@/runtime/host-runtime";
+
+import { CoordinatorSetupRow } from "@/coordinator/setup-row";
 import { buildWorkspaceDraftAgentConfig } from "@/screens/workspace/workspace-draft-agent-config";
 import { buildDraftStoreKey } from "@/stores/draft-keys";
 import { useCreateFlowStore } from "@/stores/create-flow-store";
@@ -357,8 +359,10 @@ export function WorkspaceDraftAgentTab({
   const workspaceFields = useWorkspaceFields(serverId, workspaceId, (w) => ({
     workspaceDirectory: w.workspaceDirectory,
     id: w.id,
+    projectId: w.projectId,
   }));
   const workspaceDirectory = workspaceFields?.workspaceDirectory || null;
+  const workspaceProjectId = workspaceFields?.projectId ?? null;
   const draftSetup = initialSetup ?? null;
   const draftWorkingDirectory = resolveDraftWorkingDirectory({
     workspaceDirectory,
@@ -668,6 +672,11 @@ export function WorkspaceDraftAgentTab({
         ) : (
           <ScrollView style={styles.scrollView} contentContainerStyle={styles.configScrollContent}>
             <View style={styles.configSection}>
+              <CoordinatorSetupRow
+                serverId={serverId}
+                projectId={workspaceProjectId}
+                cwd={draftWorkingDirectory}
+              />
               {formErrorMessage ? (
                 <View style={styles.errorContainer}>
                   <Text style={styles.errorText}>{formErrorMessage}</Text>

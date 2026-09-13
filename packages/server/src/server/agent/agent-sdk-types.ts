@@ -515,6 +515,7 @@ export type AgentPermissionRequestKind = "tool" | "plan" | "question" | "mode" |
 export type AgentPermissionUpdate = AgentMetadata;
 
 export interface AgentPermissionAction {
+  response?: AgentPermissionResponse;
   id: string;
   label: string;
   behavior: "allow" | "deny";
@@ -536,6 +537,8 @@ export interface AgentPermissionRequest {
   metadata?: AgentMetadata;
   /** ISO 8601 timestamp set by the daemon when the request is first seen. */
   requestedAt?: string;
+  timeoutAt?: string;
+  defaultAnswer?: AgentPermissionResponse;
 }
 
 export type AgentPermissionResponse =
@@ -662,6 +665,22 @@ export interface AgentSessionConfig {
    * They are used for ephemeral system tasks like commit/PR generation.
    */
   internal?: boolean;
+  /**
+   * Daemon-internal launch option: always inject the Paseo MCP tools for this
+   * agent, regardless of the daemon-wide `mcp.injectIntoAgents` toggle. Set by
+   * the coordinator service and inherited by subagents spawned through
+   * `create_agent`. Not part of the public create_agent input. Distinct from
+   * {@link AgentLaunchContext.paseoTools}, which carries the runtime catalog.
+   */
+  paseoTools?: "required";
+  /**
+   * Daemon-internal launch option: restrict the session to delegate-only
+   * operation — no file edits or shell execution — enforced through
+   * provider-native restrictions. Only providers with a native mechanism are
+   * eligible (Claude, Codex, OpenCode); launching any other provider with this
+   * flag is rejected. See docs/specs/coordinator.md.
+   */
+  delegateOnly?: boolean;
 }
 
 export interface AgentLaunchContext {

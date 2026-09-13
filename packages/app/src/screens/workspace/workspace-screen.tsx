@@ -182,7 +182,7 @@ import {
   classifyBulkClosableTabs,
   closeBulkWorkspaceTabs,
 } from "@/screens/workspace/workspace-bulk-close";
-import { resolveCloseAgentTabPolicy } from "@/subagents";
+import { resolveCloseAgentTabPolicy, type CloseAgentTabPolicy } from "@/subagents";
 import {
   getPanelInstanceAttributes,
   useModifiedPanelTabIds,
@@ -208,6 +208,12 @@ import {
 import { RenderProfile } from "@/utils/render-profiler";
 import { useWorkspaceCheckoutStatus } from "@/screens/workspace/use-workspace-checkout-status";
 import { useHasPullRequest } from "@/panels/pull-request";
+import { useHostFeature } from "@/runtime/host-features";
+import {
+  useCoordinatorBoardSnapshot,
+  useCoordinatorBoardStore,
+  useCoordinatorBoardsHydrated,
+} from "@/coordinator/board-store";
 
 const WORKSPACE_FLOATING_PANEL_PORTAL_HOST_PREFIX = "workspace-floating-panels";
 const EMPTY_UI_TABS: WorkspaceTab[] = [];
@@ -314,6 +320,7 @@ function getFallbackTabOptionLabel(
     changes: string;
     files: string;
     pullRequest: string;
+    coordinator: string;
   },
 ): string {
   if (tab.target.kind === "new_tab") {
@@ -324,6 +331,12 @@ function getFallbackTabOptionLabel(
   }
   if (tab.target.kind === "setup") {
     return labels.setup;
+  }
+  if (tab.target.kind === "coordinator_goals") return "Goals";
+  if (tab.target.kind === "coordinator_policy") return "Policy";
+  if (tab.target.kind === "coordinator_memory") return "Personal memory";
+  if (tab.target.kind === "coordinator_board") {
+    return labels.coordinator;
   }
   if (tab.target.kind === "terminal") {
     return labels.terminal;
@@ -361,6 +374,7 @@ function getFallbackTabOptionDescription(
     changes: string;
     files: string;
     pullRequest: string;
+    coordinator: string;
   },
 ): string {
   if (tab.target.kind === "new_tab") {
@@ -371,6 +385,12 @@ function getFallbackTabOptionDescription(
   }
   if (tab.target.kind === "setup") {
     return labels.workspaceSetup;
+  }
+  if (tab.target.kind === "coordinator_goals") return "Goals";
+  if (tab.target.kind === "coordinator_policy") return "Policy";
+  if (tab.target.kind === "coordinator_memory") return "Personal memory";
+  if (tab.target.kind === "coordinator_board") {
+    return labels.coordinator;
   }
   if (tab.target.kind === "agent") {
     return labels.agent;
@@ -605,6 +625,7 @@ function MobileWorkspaceTabOption({
       changes: t("panels.diff.changesLabel"),
       files: t("panels.files.label"),
       pullRequest: t("panels.pullRequest.label"),
+      coordinator: t("coordinator.board.title"),
     }),
     [t],
   );
@@ -973,6 +994,10 @@ interface WorkspaceHeaderTitleBarProps {
   createTerminalDisabled: boolean;
   importAgentDisabled: boolean;
   copyPathDisabled: boolean;
+  coordinatorAgentId: string | null;
+  coordinatorProjectId: string | null;
+  onOpenCoordinatorChat: () => void;
+  onOpenCoordinatorBoard: () => void;
   onCreateDraftTab: () => void;
   onCreateTerminal: () => void;
   onCreateTerminalWithProfile: (profile: TerminalProfile) => void;
@@ -1002,6 +1027,10 @@ function WorkspaceHeaderTitleBar({
   createTerminalDisabled,
   importAgentDisabled,
   copyPathDisabled,
+  coordinatorAgentId,
+  coordinatorProjectId,
+  onOpenCoordinatorChat,
+  onOpenCoordinatorBoard,
   onCreateDraftTab,
   onCreateTerminal,
   onCreateTerminalWithProfile,
@@ -1040,6 +1069,10 @@ function WorkspaceHeaderTitleBar({
             createTerminalDisabled={createTerminalDisabled}
             importAgentDisabled={importAgentDisabled}
             copyPathDisabled={copyPathDisabled}
+            coordinatorAgentId={coordinatorAgentId}
+            coordinatorProjectId={coordinatorProjectId}
+            onOpenCoordinatorChat={onOpenCoordinatorChat}
+            onOpenCoordinatorBoard={onOpenCoordinatorBoard}
             onCreateDraftTab={onCreateDraftTab}
             onCreateTerminal={onCreateTerminal}
             onCreateTerminalWithProfile={onCreateTerminalWithProfile}
@@ -1059,6 +1092,10 @@ function WorkspaceHeaderTitleBar({
             onCopyWorkspacePath={onCopyWorkspacePath}
             onCopyBranchName={onCopyBranchName}
             onOpenSetupTab={onOpenSetupTab}
+            coordinatorProjectId={coordinatorProjectId}
+            coordinatorAgentId={coordinatorAgentId}
+            onOpenCoordinatorBoard={onOpenCoordinatorBoard}
+            onOpenCoordinatorChat={onOpenCoordinatorChat}
           />
         )}
         {isMobile && workspaceScripts.length > 0 ? (
@@ -1544,6 +1581,68 @@ function useLastMainPane(input: {
   return lastMainPaneRef;
 }
 
+interface WorkspaceCoordinatorState {
+  /** The host advertises the coordinator feature. */
+  supported: boolean;
+  /** False until the host's board subscription delivers its first payload. */
+  boardsHydrated: boolean;
+  /** This workspace's project has an enabled coordinator. */
+  projectId: string | null;
+  /** The project's coordinator session, when enabled. */
+  coordinatorAgentId: string | null;
+}
+
+function useWorkspaceCoordinator(
+  serverId: string | null,
+  workspaceDescriptor: WorkspaceDescriptor | null | undefined,
+): WorkspaceCoordinatorState {
+  const workspaceProjectId = workspaceDescriptor?.projectId ?? null;
+  const supported = useHostFeature(serverId, "coordinator");
+  const boardsHydrated = useCoordinatorBoardsHydrated(serverId);
+  const board = useCoordinatorBoardSnapshot(serverId, workspaceProjectId);
+  const projectId = supported && board?.enabled === true ? workspaceProjectId : null;
+  return {
+    supported,
+    boardsHydrated,
+    projectId,
+    coordinatorAgentId: board?.coordinatorAgentId ?? null,
+  };
+}
+
+type ClearOpenAgentTabLabelOutcome =
+  | { status: "cleared"; closePolicy: CloseAgentTabPolicy }
+  | { status: "client-unavailable" }
+  | { status: "failed" };
+
+// Subagents and coordinator sessions close "layout-only": clear the open-tab
+// label so the daemon stops treating the tab as explicitly opened, then
+// re-resolve the close policy in case the agent's shape changed mid-write.
+async function clearOpenAgentTabLabel(input: {
+  serverId: string;
+  agentId: string;
+}): Promise<ClearOpenAgentTabLabelOutcome> {
+  const sessionClient = useSessionStore.getState().sessions[input.serverId]?.client;
+  if (!sessionClient) {
+    return { status: "client-unavailable" };
+  }
+  try {
+    const clientId = await getOrCreateClientId();
+    await sessionClient.updateAgent(input.agentId, {
+      labels: { [getOpenAgentTabLabel(clientId)]: "false" },
+    });
+    const session = useSessionStore.getState().sessions[input.serverId];
+    const latestAgent =
+      session?.agents?.get(input.agentId) ?? session?.agentDetails?.get(input.agentId) ?? null;
+    return { status: "cleared", closePolicy: resolveCloseAgentTabPolicy(latestAgent) };
+  } catch (error) {
+    console.error("[WorkspaceScreen] Failed to close subagent tab", {
+      error,
+      agentId: input.agentId,
+    });
+    return { status: "failed" };
+  }
+}
+
 function WorkspaceScreenContent({
   serverId,
   workspaceId,
@@ -1696,6 +1795,10 @@ function WorkspaceScreenContent({
       }),
     workspaceAgentVisibilityEqual,
   );
+
+  // Coordinator board seeding state. The home slot waits on boardsHydrated only
+  // when the host can serve boards; an unsupported host seeds the draft pane.
+  const workspaceCoordinator = useWorkspaceCoordinator(normalizedServerId, workspaceDescriptor);
 
   const {
     handleTerminalCreated,
@@ -1939,11 +2042,19 @@ function WorkspaceScreenContent({
     () => isMobile || isFocusModeEnabled || !supportsDesktopPaneSplits(),
     [isFocusModeEnabled, isMobile],
   );
+  const coordinatorBoards = useCoordinatorBoardStore(
+    (state) => state.hosts[normalizedServerId]?.boards ?? null,
+  );
+  const coordinatorAgentIdForProjectId = useCallback(
+    (projectId: string) => coordinatorBoards?.get(projectId)?.coordinatorAgentId ?? null,
+    [coordinatorBoards],
+  );
   const visibleAgentIds = useVisibleAgentIds({
     layout: workspaceLayout,
     tabs: uiTabs,
     routeFocused: isRouteFocused,
     focusedPaneOnly: syncFocusedPaneOnly,
+    coordinatorAgentIdForProjectId,
   });
   useEffect(() => {
     for (const agentId of visibleAgentIds) {
@@ -2063,6 +2174,14 @@ function WorkspaceScreenContent({
         hasActivePendingTerminalCreate:
           createTerminalMutation.isPending || pendingTerminalCreateInput !== null,
         hasActivePendingDraftCreate: hasActivePendingDraftCreateInWorkspace,
+        // Only gate the home seed on board hydration when the host can serve
+        // boards at all; on an unsupported host there is nothing to wait for.
+        coordinator: workspaceCoordinator.supported
+          ? {
+              projectId: workspaceCoordinator.projectId,
+              boardsHydrated: workspaceCoordinator.boardsHydrated,
+            }
+          : undefined,
       }),
       knownAgentIds: workspaceAgentVisibility.knownAgentIds,
     });
@@ -2082,6 +2201,9 @@ function WorkspaceScreenContent({
     terminalsQuery.isSuccess,
     uiTabs,
     workspaceAgentVisibility,
+    workspaceCoordinator.supported,
+    workspaceCoordinator.projectId,
+    workspaceCoordinator.boardsHydrated,
   ]);
 
   const activeTabId = focusedPaneTabState.activeTabId;
@@ -2134,6 +2256,39 @@ function WorkspaceScreenContent({
     },
     [navigateToTabId, openWorkspaceTabFocused, persistenceKey],
   );
+
+  // The coordinator session keeps its ordinary agent tab; on compact the only
+  // way into it is this header-menu action (the board's Chat button is the
+  // desktop entry point).
+  const coordinatorAgentId = workspaceCoordinator.coordinatorAgentId;
+  const handleOpenCoordinatorChat = useCallback(() => {
+    if (!coordinatorAgentId || !persistenceKey) {
+      return;
+    }
+    const tabId = openWorkspaceTabFocused(
+      persistenceKey,
+      { kind: "agent", agentId: coordinatorAgentId },
+      FOCUSED_PANE_PLACEMENT,
+    );
+    if (tabId) {
+      navigateToTabId(tabId);
+    }
+  }, [coordinatorAgentId, navigateToTabId, openWorkspaceTabFocused, persistenceKey]);
+
+  // The board is reopenable on compact through the header menu; the store
+  // action lifts the close dismissal so reconcile does not retarget it back to
+  // the ambient draft.
+  const coordinatorProjectId = workspaceCoordinator.projectId;
+  const openCoordinatorBoard = useWorkspaceLayoutStore((state) => state.openCoordinatorBoard);
+  const handleOpenCoordinatorBoard = useCallback(() => {
+    if (!coordinatorProjectId || !persistenceKey) {
+      return;
+    }
+    const tabId = openCoordinatorBoard(persistenceKey, coordinatorProjectId);
+    if (tabId) {
+      navigateToTabId(tabId);
+    }
+  }, [coordinatorProjectId, navigateToTabId, openCoordinatorBoard, persistenceKey]);
 
   useEffect(() => {
     if (!isRouteFocused) {
@@ -2378,6 +2533,7 @@ function WorkspaceScreenContent({
       changes: t("panels.diff.changesLabel"),
       files: t("panels.files.label"),
       pullRequest: t("panels.pullRequest.label"),
+      coordinator: t("coordinator.board.title"),
     }),
     [t],
   );
@@ -2561,8 +2717,8 @@ function WorkspaceScreenContent({
           return;
         }
 
-        const agent =
-          useSessionStore.getState().sessions[normalizedServerId]?.agents?.get(agentId) ?? null;
+        const session = useSessionStore.getState().sessions[normalizedServerId];
+        const agent = session?.agents?.get(agentId) ?? session?.agentDetails?.get(agentId) ?? null;
         let closePolicy = resolveCloseAgentTabPolicy(agent);
         const isRunning = agent?.status === "running";
 
@@ -2580,24 +2736,19 @@ function WorkspaceScreenContent({
         }
 
         if (closePolicy.kind === "layout-only") {
-          const sessionClient = useSessionStore.getState().sessions[normalizedServerId]?.client;
-          if (!sessionClient) {
-            toast.error(t("common.errors.daemonClientUnavailable"));
+          const outcome = await clearOpenAgentTabLabel({
+            serverId: normalizedServerId,
+            agentId,
+          });
+          if (outcome.status !== "cleared") {
+            toast.error(
+              outcome.status === "client-unavailable"
+                ? t("common.errors.daemonClientUnavailable")
+                : t("workspace.tabs.toasts.failedToCloseAgent"),
+            );
             return;
           }
-          try {
-            const clientId = await getOrCreateClientId();
-            await sessionClient.updateAgent(agentId, {
-              labels: { [getOpenAgentTabLabel(clientId)]: "false" },
-            });
-            const latestAgent =
-              useSessionStore.getState().sessions[normalizedServerId]?.agents?.get(agentId) ?? null;
-            closePolicy = resolveCloseAgentTabPolicy(latestAgent);
-          } catch (error) {
-            console.error("[WorkspaceScreen] Failed to close subagent tab", { error, agentId });
-            toast.error(t("workspace.tabs.toasts.failedToCloseAgent"));
-            return;
-          }
+          closePolicy = outcome.closePolicy;
         }
 
         setHoveredCloseTabKey((current) => (current === tabId ? null : current));
@@ -2845,7 +2996,8 @@ function WorkspaceScreenContent({
       }
 
       const groups = classifyBulkClosableTabs(tabsToClose, (agentId) => {
-        const agent = useSessionStore.getState().sessions[normalizedServerId]?.agents?.get(agentId);
+        const session = useSessionStore.getState().sessions[normalizedServerId];
+        const agent = session?.agents?.get(agentId) ?? session?.agentDetails?.get(agentId);
         return resolveCloseAgentTabPolicy(agent).kind === "layout-only" ? "layout-only" : "archive";
       });
       const modifiedCount = tabsToClose.filter(
@@ -3914,6 +4066,10 @@ function WorkspaceScreenContent({
                 createTerminalDisabled={createTerminalDisabled}
                 importAgentDisabled={!canOpenImportSheet}
                 copyPathDisabled={!workspaceDirectory}
+                coordinatorAgentId={coordinatorAgentId}
+                coordinatorProjectId={coordinatorProjectId}
+                onOpenCoordinatorChat={handleOpenCoordinatorChat}
+                onOpenCoordinatorBoard={handleOpenCoordinatorBoard}
                 onCreateDraftTab={handleCreateDraftTab}
                 onCreateTerminal={handleCreateTerminal}
                 onCreateTerminalWithProfile={handleCreateTerminalWithProfile}
@@ -3933,6 +4089,8 @@ function WorkspaceScreenContent({
       ) : null,
     [
       canOpenImportSheet,
+      coordinatorAgentId,
+      coordinatorProjectId,
       createTerminalDisabled,
       currentBranchName,
       handleCopyBranchName,
@@ -3941,6 +4099,8 @@ function WorkspaceScreenContent({
       handleCreateDraftTab,
       handleCreateTerminal,
       handleCreateTerminalWithProfile,
+      handleOpenCoordinatorBoard,
+      handleOpenCoordinatorChat,
       handleOpenSetupTab,
       handleOpenUrlInBrowserTab,
       handleScriptTerminalStarted,

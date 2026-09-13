@@ -1,4 +1,9 @@
 import {
+  CoordinatorGoalSchema,
+  CoordinatorProposalSchema,
+  CoordinatorPolicyRuleSchema,
+} from "./coordinator-goals.js";
+import {
   AgentContinuationPolicySchema,
   AgentContinuationStatusSchema,
 } from "./agent-continuation.js";
@@ -522,14 +527,6 @@ const AgentSessionConfigSchema = z.object({
 });
 
 const AgentPermissionUpdateSchema = z.record(z.string(), z.unknown());
-const AgentPermissionActionSchema = z.object({
-  id: z.string(),
-  label: z.string(),
-  behavior: z.enum(["allow", "deny"]),
-  variant: z.enum(["primary", "secondary", "danger"]).optional(),
-  intent: z.enum(["implement", "implement_resume", "dismiss"]).optional(),
-});
-
 export const AgentPermissionResponseSchema: z.ZodType<AgentPermissionResponse> =
   z.discriminatedUnion("behavior", [
     z.object({
@@ -546,6 +543,16 @@ export const AgentPermissionResponseSchema: z.ZodType<AgentPermissionResponse> =
     }),
   ]);
 
+const AgentPermissionActionSchema = z.object({
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+  response: AgentPermissionResponseSchema.optional(),
+  id: z.string(),
+  label: z.string(),
+  behavior: z.enum(["allow", "deny"]),
+  variant: z.enum(["primary", "secondary", "danger"]).optional(),
+  intent: z.enum(["implement", "implement_resume", "dismiss"]).optional(),
+});
+
 export const AgentPermissionRequestPayloadSchema: z.ZodType<AgentPermissionRequest, unknown> =
   z.object({
     id: z.string(),
@@ -560,6 +567,9 @@ export const AgentPermissionRequestPayloadSchema: z.ZodType<AgentPermissionReque
     actions: z.array(AgentPermissionActionSchema).optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
     requestedAt: z.string().optional(),
+    // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+    timeoutAt: z.string().datetime().optional(),
+    defaultAnswer: AgentPermissionResponseSchema.optional(),
   });
 
 const UnknownValueSchema = z.union([
@@ -855,6 +865,18 @@ export const AgentStreamEventPayloadSchema = z.discriminatedUnion("type", [
           workspaceId: z.string().optional(),
           agentId: z.string(),
           reason: z.enum(["finished", "error", "permission"]),
+          // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+          requestId: z.string().optional(),
+          categoryIdentifier: z.string().optional(),
+          actions: z
+            .array(
+              z.object({
+                id: z.string(),
+                label: z.string(),
+                response: AgentPermissionResponseSchema,
+              }),
+            )
+            .optional(),
         }),
       })
       .optional(),
@@ -3322,6 +3344,554 @@ export const SubscriptionReleaseResponseSchema = z.object({
   payload: z.object({ requestId: z.string(), subscriptionId: z.string() }),
 });
 
+// ============================================================================
+// Coordinator Messages
+// ============================================================================
+
+/**
+ * What a wake may do without asking. Each level is a strict superset of the one
+ * below; milestone 1 daemons only run coordinators at `observe`.
+ */
+export const CoordinatorTrustLevelSchema = z.enum(["observe", "propose", "ship", "autopilot"]);
+export type CoordinatorTrustLevel = z.infer<typeof CoordinatorTrustLevelSchema>;
+
+/** What a project coordinator watches: its repository plus (everything) or excluding (project) your own sessions. */
+export const CoordinatorScopeSchema = z.enum(["everything", "project"]);
+export type CoordinatorScope = z.infer<typeof CoordinatorScopeSchema>;
+
+/**
+ * A provider-plus-selections launch bundle, fielded the way `AgentSessionConfig`
+ * carries them. Used for the coordinator session itself (`profile`) and for each
+ * named delegate profile (`profiles`).
+ */
+export const CoordinatorProfileSelectionSchema = z.object({
+  provider: AgentProviderSchema,
+  accountSelection: AccountSelectionSchema.optional(),
+  model: z.string().optional(),
+  modeId: z.string().optional(),
+  thinkingOptionId: z.string().optional(),
+  featureValues: z.record(z.string(), z.unknown()).optional(),
+});
+export type CoordinatorProfileSelection = z.infer<typeof CoordinatorProfileSelectionSchema>;
+
+/**
+ * Delegate launch selections by role name (investigator, implementer, reviewer,
+ * fallback). Open record on purpose: compiled goal rules reference profiles by
+ * name, and later milestones add roles without a schema change.
+ */
+export const CoordinatorProfilesSchema = z.record(z.string(), CoordinatorProfileSelectionSchema);
+export type CoordinatorProfiles = z.infer<typeof CoordinatorProfilesSchema>;
+
+/** Soft monthly numbers per project; crossing one writes a board row and pauses nothing. */
+export const CoordinatorUsageExpectationSchema = z.object({
+  monthlySpawns: z.number().int().positive().optional(),
+  monthlyTokens: z.number().int().positive().optional(),
+});
+export type CoordinatorUsageExpectation = z.infer<typeof CoordinatorUsageExpectationSchema>;
+
+/** This month's actuals against the expectation, on the board snapshot. */
+export const CoordinatorUsageSchema = z.object({
+  monthlySpawns: z.number().int().nonnegative(),
+  monthlyTokens: z.number().int().nonnegative(),
+});
+export type CoordinatorUsage = z.infer<typeof CoordinatorUsageSchema>;
+
+/** Hard spawn limits for every agent under a coordinator. */
+export const CoordinatorGuardSchema = z.object({
+  maxConcurrentSubagents: z.number().int().positive().optional(),
+  maxSpawnDepth: z.number().int().positive().optional(),
+});
+export type CoordinatorGuard = z.infer<typeof CoordinatorGuardSchema>;
+
+export const CoordinatorDecisionBoardRowSchema = z.object({
+  setupProjectId: z.string().optional(),
+  kind: z.literal("decision"),
+  id: z.string(),
+  projectId: z.string(),
+  /** The session asking. */
+  agentId: z.string(),
+  /** The permission request this row resolves through. */
+  requestId: z.string(),
+  question: z.string(),
+  askedAt: z.string(),
+  /**
+   * The raising request's kind. Question-kind requests carry options, not
+   * actions, so the row states it explicitly — the answer buttons render and
+   * respond correctly even before the live request reaches the client.
+   */
+  requestKind: z.string().optional(),
+  /** Question-kind answer key (the question's header) for `updatedInput.answers`. */
+  questionHeader: z.string().optional(),
+  /**
+   * Number of questions on a question-kind request. Rows with more than one
+   * question can't be answered with a single tap — the client should route the
+   * user to the session's chat, where the full question form renders.
+   */
+  questionCount: z.number().int().positive().optional(),
+  /**
+   * Text the composer quotes when a `composerQuote` action is tapped — the
+   * proposal body being corrected, not the bare question line. Falls back to
+   * `question` when absent.
+   */
+  quoteText: z.string().optional(),
+  /**
+   * Renderable answers; the id maps to the permission request's action id for
+   * actioned kinds, or indexes the question's options for question-kind.
+   * `behavior`/`variant` mirror the request action so a deny stays a deny when
+   * the live request has not landed yet. `composerQuote` marks the spec's
+   * Correct-it/Edit path: the tap still resolves the request and also focuses
+   * the composer with the row's context quoted for a free-text correction.
+   */
+  actions: z.array(
+    z.object({
+      id: z.string(),
+      label: z.string(),
+      behavior: z.enum(["allow", "deny"]).optional(),
+      variant: z.string().optional(),
+      composerQuote: z.boolean().optional(),
+      // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+      operation: z.enum(["defer", "policy"]).optional(),
+      // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+      response: AgentPermissionResponseSchema.optional(),
+    }),
+  ),
+  /** The answer the daemon applies when `dueAt` passes. Decision timers ship in a later milestone. */
+  defaultAnswerLabel: z.string().optional(),
+  dueAt: z.string().optional(),
+  waitingMs: z.number().int().nonnegative().optional(),
+});
+export type CoordinatorDecisionBoardRow = z.infer<typeof CoordinatorDecisionBoardRowSchema>;
+
+export const CoordinatorWorkingBoardRowSchema = z.object({
+  kind: z.literal("working"),
+  id: z.string(),
+  projectId: z.string(),
+  agentId: z.string(),
+  /** First line of the session's goal or your first message. */
+  goal: z.string(),
+  startedAt: z.string(),
+  provider: z.string(),
+  /** True for your own sessions under `everything` scope. */
+  yours: z.boolean(),
+});
+export type CoordinatorWorkingBoardRow = z.infer<typeof CoordinatorWorkingBoardRowSchema>;
+
+export const CoordinatorDoneBoardRowLinkSchema = z.object({
+  url: z.string().optional(),
+  agentId: z.string().optional(),
+  filePath: z.string().optional(),
+});
+export type CoordinatorDoneBoardRowLink = z.infer<typeof CoordinatorDoneBoardRowLinkSchema>;
+
+export const CoordinatorDoneBoardRowSchema = z.object({
+  kind: z.literal("done"),
+  id: z.string(),
+  projectId: z.string(),
+  /** Verb-first outcome line. */
+  text: z.string(),
+  at: z.string(),
+  link: CoordinatorDoneBoardRowLinkSchema.optional(),
+});
+export type CoordinatorDoneBoardRow = z.infer<typeof CoordinatorDoneBoardRowSchema>;
+
+/** One per project; the daemon keeps the latest wake only. */
+export const CoordinatorWakeBoardRowSchema = z.object({
+  kind: z.literal("wake"),
+  id: z.string(),
+  projectId: z.string(),
+  text: z.string(),
+  level: CoordinatorTrustLevelSchema,
+  at: z.string(),
+});
+export type CoordinatorWakeBoardRow = z.infer<typeof CoordinatorWakeBoardRowSchema>;
+
+export const CoordinatorBoardRowSchema = z.discriminatedUnion("kind", [
+  CoordinatorDecisionBoardRowSchema,
+  CoordinatorWorkingBoardRowSchema,
+  CoordinatorDoneBoardRowSchema,
+  CoordinatorWakeBoardRowSchema,
+]);
+export type CoordinatorBoardRow = z.infer<typeof CoordinatorBoardRowSchema>;
+
+/**
+ * One coordinator's board. `done` arrives capped and sorted server-side.
+ * An unfiltered subscription includes the global and project snapshots.
+ */
+export const CoordinatorBoardSnapshotSchema = z.object({
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13 once daemon floor >= v0.8.0.
+  tier: z.enum(["global", "project"]).optional(),
+  projectId: z.string(),
+  projectName: z.string().optional(),
+  needsYou: z.array(CoordinatorDecisionBoardRowSchema),
+  working: z.array(CoordinatorWorkingBoardRowSchema),
+  done: z.array(CoordinatorDoneBoardRowSchema),
+  wake: CoordinatorWakeBoardRowSchema.nullable(),
+  /** The live coordinator session; null while none is running. */
+  coordinatorAgentId: z.string().nullable(),
+  trustLevel: CoordinatorTrustLevelSchema,
+  scope: CoordinatorScopeSchema,
+  enabled: z.boolean(),
+  /** This month's spawn and token actuals; feeds the trust-pill meter. */
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-12 once daemon floor >= v0.8.0.
+  usage: CoordinatorUsageSchema.optional(),
+});
+export type CoordinatorBoardSnapshot = z.infer<typeof CoordinatorBoardSnapshotSchema>;
+
+/** The canonical coordinator record returned by every `coordinator.project.*` response. */
+export const ProjectCoordinatorStateSchema = z.object({
+  projectId: z.string(),
+  /** The coordinator session; null while none is running (disabled or not yet created). */
+  agentId: z.string().nullable(),
+  enabled: z.boolean(),
+  trustLevel: CoordinatorTrustLevelSchema,
+  scope: CoordinatorScopeSchema,
+  /** The coordinator session's own launch bundle. */
+  profile: CoordinatorProfileSelectionSchema.optional(),
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+  fallbackProfile: CoordinatorProfileSelectionSchema.optional(),
+  rotationThresholdPercent: z.number().int().min(1).max(100).optional(),
+  profiles: CoordinatorProfilesSchema.optional(),
+  usageExpectation: CoordinatorUsageExpectationSchema.optional(),
+  /** Hard spawn limits; daemon defaults 8 concurrent, depth 2. */
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-12 once daemon floor >= v0.8.0.
+  guard: CoordinatorGuardSchema.optional(),
+});
+export type ProjectCoordinatorState = z.infer<typeof ProjectCoordinatorStateSchema>;
+
+export const CoordinatorNotificationSettingsSchema = z.object({
+  decisionTimeoutMinutes: z.number().int().positive().max(43_200),
+  digestEnabled: z.boolean(),
+  digestHour: z.number().int().min(0).max(23),
+  quietStartHour: z.number().int().min(0).max(23),
+  quietEndHour: z.number().int().min(0).max(23),
+});
+export type CoordinatorNotificationSettings = z.infer<typeof CoordinatorNotificationSettingsSchema>;
+
+export const GlobalCoordinatorStateSchema = z.object({
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+  notificationSettings: CoordinatorNotificationSettingsSchema.optional(),
+  enabled: z.boolean(),
+  agentId: z.string().nullable(),
+  workspaceId: z.string().nullable(),
+  projectId: z.string().nullable(),
+  trustLevel: CoordinatorTrustLevelSchema,
+  profile: CoordinatorProfileSelectionSchema.optional(),
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+  fallbackProfile: CoordinatorProfileSelectionSchema.optional(),
+  rotationThresholdPercent: z.number().int().min(1).max(100).optional(),
+});
+export type GlobalCoordinatorState = z.infer<typeof GlobalCoordinatorStateSchema>;
+
+export const CoordinatorGlobalEnableRequestSchema = z.object({
+  type: z.literal("coordinator.global.enable.request"),
+  requestId: z.string(),
+  profile: CoordinatorProfileSelectionSchema,
+  trustLevel: CoordinatorTrustLevelSchema.optional(),
+});
+export type CoordinatorGlobalEnableRequest = z.infer<typeof CoordinatorGlobalEnableRequestSchema>;
+
+export const CoordinatorGlobalDisableRequestSchema = z.object({
+  type: z.literal("coordinator.global.disable.request"),
+  requestId: z.string(),
+});
+export type CoordinatorGlobalDisableRequest = z.infer<typeof CoordinatorGlobalDisableRequestSchema>;
+
+export const CoordinatorGlobalUpdateRequestSchema = z.object({
+  type: z.literal("coordinator.global.update.request"),
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+  notificationSettings: CoordinatorNotificationSettingsSchema.partial().optional(),
+  requestId: z.string(),
+  profile: CoordinatorProfileSelectionSchema.optional(),
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+  fallbackProfile: CoordinatorProfileSelectionSchema.nullable().optional(),
+  rotationThresholdPercent: z.number().int().min(1).max(100).optional(),
+  trustLevel: CoordinatorTrustLevelSchema.optional(),
+});
+export type CoordinatorGlobalUpdateRequest = z.infer<typeof CoordinatorGlobalUpdateRequestSchema>;
+
+// COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+export const CoordinatorAutomationResultSchema = z.object({
+  requestId: z.string(),
+  error: z.string().nullable(),
+  goals: z.array(CoordinatorGoalSchema).optional(),
+  goal: CoordinatorGoalSchema.nullable().optional(),
+  proposals: z.array(CoordinatorProposalSchema).optional(),
+  proposal: CoordinatorProposalSchema.nullable().optional(),
+  rules: z.array(CoordinatorPolicyRuleSchema).optional(),
+  rule: CoordinatorPolicyRuleSchema.nullable().optional(),
+  preview: z
+    .object({ pattern: z.string(), projectId: z.string().nullable() })
+    .nullable()
+    .optional(),
+});
+export type CoordinatorAutomationResult = z.infer<typeof CoordinatorAutomationResultSchema>;
+export const CoordinatorGoalsListRequestSchema = z.object({
+  type: z.literal("coordinator.goals.list.request"),
+  requestId: z.string(),
+  projectId: z.string().optional(),
+});
+export const CoordinatorGoalsListResponseSchema = z.object({
+  type: z.literal("coordinator.goals.list.response"),
+  payload: CoordinatorAutomationResultSchema,
+});
+export const CoordinatorGoalPauseRequestSchema = z.object({
+  type: z.literal("coordinator.goal.pause.request"),
+  requestId: z.string(),
+  projectId: z.string(),
+  goalId: z.string(),
+  paused: z.boolean(),
+});
+export const CoordinatorGoalPauseResponseSchema = z.object({
+  type: z.literal("coordinator.goal.pause.response"),
+  payload: CoordinatorAutomationResultSchema,
+});
+export const CoordinatorProposalsListRequestSchema = z.object({
+  type: z.literal("coordinator.proposals.list.request"),
+  requestId: z.string(),
+  projectId: z.string().optional(),
+});
+export const CoordinatorProposalsListResponseSchema = z.object({
+  type: z.literal("coordinator.proposals.list.response"),
+  payload: CoordinatorAutomationResultSchema,
+});
+export const CoordinatorProposalResolveRequestSchema = z.object({
+  type: z.literal("coordinator.proposal.resolve.request"),
+  requestId: z.string(),
+  proposalId: z.string(),
+  action: z.enum(["approve", "ignore"]),
+});
+export const CoordinatorProposalResolveResponseSchema = z.object({
+  type: z.literal("coordinator.proposal.resolve.response"),
+  payload: CoordinatorAutomationResultSchema,
+});
+export const CoordinatorPolicyListRequestSchema = z.object({
+  type: z.literal("coordinator.policy.list.request"),
+  requestId: z.string(),
+  projectId: z.string().optional(),
+});
+export const CoordinatorPolicyListResponseSchema = z.object({
+  type: z.literal("coordinator.policy.list.response"),
+  payload: CoordinatorAutomationResultSchema,
+});
+export const CoordinatorPolicyToggleRequestSchema = z.object({
+  type: z.literal("coordinator.policy.toggle.request"),
+  requestId: z.string(),
+  ruleId: z.string(),
+  enabled: z.boolean(),
+});
+export const CoordinatorPolicyToggleResponseSchema = z.object({
+  type: z.literal("coordinator.policy.toggle.response"),
+  payload: CoordinatorAutomationResultSchema,
+});
+export const CoordinatorPolicyPreviewRequestSchema = z.object({
+  type: z.literal("coordinator.policy.preview.request"),
+  requestId: z.string(),
+  agentId: z.string(),
+  permissionRequestId: z.string(),
+});
+export const CoordinatorPolicyPreviewResponseSchema = z.object({
+  type: z.literal("coordinator.policy.preview.response"),
+  payload: CoordinatorAutomationResultSchema,
+});
+export const CoordinatorPolicyAllowRequestSchema = z.object({
+  type: z.literal("coordinator.policy.allow.request"),
+  requestId: z.string(),
+  agentId: z.string(),
+  permissionRequestId: z.string(),
+  scope: z.enum(["daemon", "project"]),
+  expectedPattern: z.string(),
+});
+export const CoordinatorPolicyAllowResponseSchema = z.object({
+  type: z.literal("coordinator.policy.allow.response"),
+  payload: CoordinatorAutomationResultSchema,
+});
+
+export const CoordinatorMemoryTargetSchema = z.object({
+  scope: z.enum(["personal", "personal-project"]),
+  projectId: z.string().optional(),
+});
+export type CoordinatorMemoryTarget = z.infer<typeof CoordinatorMemoryTargetSchema>;
+export const CoordinatorMemoryUpdateSchema = CoordinatorMemoryTargetSchema.extend({
+  content: z.string(),
+  expectedRevision: z.string(),
+});
+export type CoordinatorMemoryUpdate = z.infer<typeof CoordinatorMemoryUpdateSchema>;
+export const CoordinatorMemorySnapshotSchema = z.object({
+  filePath: z.string(),
+  content: z.string(),
+  revision: z.string(),
+});
+export type CoordinatorMemorySnapshot = z.infer<typeof CoordinatorMemorySnapshotSchema>;
+export const CoordinatorMemoryGetRequestSchema = CoordinatorMemoryTargetSchema.extend({
+  type: z.literal("coordinator.memory.get.request"),
+  requestId: z.string(),
+});
+export const CoordinatorMemoryUpdateRequestSchema = CoordinatorMemoryUpdateSchema.extend({
+  type: z.literal("coordinator.memory.update.request"),
+  requestId: z.string(),
+});
+const CoordinatorMemoryResultSchema = z.object({
+  requestId: z.string(),
+  memory: CoordinatorMemorySnapshotSchema.nullable(),
+  error: z.string().nullable(),
+});
+export const CoordinatorMemoryGetResponseSchema = z.object({
+  type: z.literal("coordinator.memory.get.response"),
+  payload: CoordinatorMemoryResultSchema,
+});
+export const CoordinatorMemoryUpdateResponseSchema = z.object({
+  type: z.literal("coordinator.memory.update.response"),
+  payload: CoordinatorMemoryResultSchema,
+});
+
+export const CoordinatorPermissionDeferRequestSchema = z.object({
+  type: z.literal("coordinator.permission.defer.request"),
+  agentId: z.string(),
+  requestId: z.string(),
+});
+export const CoordinatorPermissionDeferResponseSchema = z.object({
+  type: z.literal("coordinator.permission.defer.response"),
+  payload: z.object({ agentId: z.string(), requestId: z.string(), error: z.string().nullable() }),
+});
+
+export const CoordinatorGlobalGetRequestSchema = z.object({
+  type: z.literal("coordinator.global.get.request"),
+  requestId: z.string(),
+});
+export type CoordinatorGlobalGetRequest = z.infer<typeof CoordinatorGlobalGetRequestSchema>;
+
+const CoordinatorGlobalStateResultSchema = z.object({
+  requestId: z.string(),
+  coordinator: GlobalCoordinatorStateSchema.nullable(),
+  error: z.string().nullable(),
+});
+
+export const CoordinatorGlobalEnableResponseSchema = z.object({
+  type: z.literal("coordinator.global.enable.response"),
+  payload: CoordinatorGlobalStateResultSchema,
+});
+export const CoordinatorGlobalDisableResponseSchema = z.object({
+  type: z.literal("coordinator.global.disable.response"),
+  payload: CoordinatorGlobalStateResultSchema,
+});
+export const CoordinatorGlobalUpdateResponseSchema = z.object({
+  type: z.literal("coordinator.global.update.response"),
+  payload: CoordinatorGlobalStateResultSchema,
+});
+export const CoordinatorGlobalGetResponseSchema = z.object({
+  type: z.literal("coordinator.global.get.response"),
+  payload: CoordinatorGlobalStateResultSchema,
+});
+
+export const CoordinatorProjectEnableRequestSchema = z.object({
+  type: z.literal("coordinator.project.enable.request"),
+  requestId: z.string(),
+  projectId: z.string(),
+  /** Launch bundle for the coordinator session itself. */
+  profile: CoordinatorProfileSelectionSchema,
+  profiles: CoordinatorProfilesSchema.optional(),
+  /** Both default server-side: trust to `observe`, scope to `everything`. */
+  trustLevel: CoordinatorTrustLevelSchema.optional(),
+  scope: CoordinatorScopeSchema.optional(),
+});
+export type CoordinatorProjectEnableRequest = z.infer<typeof CoordinatorProjectEnableRequestSchema>;
+
+export const CoordinatorProjectDisableRequestSchema = z.object({
+  type: z.literal("coordinator.project.disable.request"),
+  requestId: z.string(),
+  projectId: z.string(),
+});
+export type CoordinatorProjectDisableRequest = z.infer<
+  typeof CoordinatorProjectDisableRequestSchema
+>;
+
+export const CoordinatorProjectUpdateRequestSchema = z.object({
+  type: z.literal("coordinator.project.update.request"),
+  requestId: z.string(),
+  projectId: z.string(),
+  profile: CoordinatorProfileSelectionSchema.optional(),
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+  fallbackProfile: CoordinatorProfileSelectionSchema.nullable().optional(),
+  rotationThresholdPercent: z.number().int().min(1).max(100).optional(),
+  profiles: CoordinatorProfilesSchema.optional(),
+  trustLevel: CoordinatorTrustLevelSchema.optional(),
+  scope: CoordinatorScopeSchema.optional(),
+  /** Null clears the expectation. */
+  usageExpectation: CoordinatorUsageExpectationSchema.nullable().optional(),
+  /** Partial guard override; absent keys keep daemon defaults. */
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-12 once daemon floor >= v0.8.0.
+  guard: CoordinatorGuardSchema.optional(),
+});
+export type CoordinatorProjectUpdateRequest = z.infer<typeof CoordinatorProjectUpdateRequestSchema>;
+
+export const CoordinatorProjectGetRequestSchema = z.object({
+  type: z.literal("coordinator.project.get.request"),
+  requestId: z.string(),
+  projectId: z.string(),
+});
+export type CoordinatorProjectGetRequest = z.infer<typeof CoordinatorProjectGetRequestSchema>;
+
+const CoordinatorProjectStateResultSchema = z.object({
+  requestId: z.string(),
+  coordinator: ProjectCoordinatorStateSchema.nullable(),
+  /** False when the project repository has no CI config; drives the setup-sheet note. */
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-12 once daemon floor >= v0.8.0.
+  ciConfigured: z.boolean().optional(),
+  error: z.string().nullable(),
+});
+
+export const CoordinatorProjectEnableResponseSchema = z.object({
+  type: z.literal("coordinator.project.enable.response"),
+  payload: CoordinatorProjectStateResultSchema,
+});
+export const CoordinatorProjectDisableResponseSchema = z.object({
+  type: z.literal("coordinator.project.disable.response"),
+  payload: CoordinatorProjectStateResultSchema,
+});
+export const CoordinatorProjectUpdateResponseSchema = z.object({
+  type: z.literal("coordinator.project.update.response"),
+  payload: CoordinatorProjectStateResultSchema,
+});
+export const CoordinatorProjectGetResponseSchema = z.object({
+  type: z.literal("coordinator.project.get.response"),
+  payload: CoordinatorProjectStateResultSchema,
+});
+
+/**
+ * Subscribing creates an owned subscription: the response carries the initial
+ * snapshots and later `coordinator.board.changed` messages arrive with the same
+ * `subscriptionId`. `projectId` absent means every project on the daemon.
+ */
+export const CoordinatorBoardSubscribeRequestSchema = z.object({
+  type: z.literal("coordinator.board.subscribe.request"),
+  requestId: z.string(),
+  projectId: z.string().optional(),
+});
+export type CoordinatorBoardSubscribeRequest = z.infer<
+  typeof CoordinatorBoardSubscribeRequestSchema
+>;
+
+export const CoordinatorBoardSubscribeResponseSchema = z.object({
+  type: z.literal("coordinator.board.subscribe.response"),
+  payload: z.object({
+    requestId: z.string(),
+    subscriptionId: z.string(),
+    /** Echoes the request filter; null when subscribed to every project. */
+    projectId: z.string().nullable(),
+    snapshots: z.array(CoordinatorBoardSnapshotSchema),
+    error: z.string().nullable(),
+  }),
+});
+
+export const CoordinatorBoardChangedSchema = z.object({
+  type: z.literal("coordinator.board.changed"),
+  payload: z.object({
+    subscriptionId: z.string().optional(),
+    projectId: z.string(),
+    snapshot: CoordinatorBoardSnapshotSchema,
+  }),
+});
+
 export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   BrowserHostRegisterRequestSchema,
   SubscriptionReleaseRequestSchema,
@@ -3534,6 +4104,26 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   LoopInspectRequestSchema,
   LoopLogsRequestSchema,
   LoopStopRequestSchema,
+  CoordinatorGlobalEnableRequestSchema,
+  CoordinatorGlobalDisableRequestSchema,
+  CoordinatorGlobalUpdateRequestSchema,
+  CoordinatorGlobalGetRequestSchema,
+  CoordinatorPermissionDeferRequestSchema,
+  CoordinatorGoalsListRequestSchema,
+  CoordinatorGoalPauseRequestSchema,
+  CoordinatorProposalsListRequestSchema,
+  CoordinatorProposalResolveRequestSchema,
+  CoordinatorPolicyListRequestSchema,
+  CoordinatorPolicyToggleRequestSchema,
+  CoordinatorPolicyPreviewRequestSchema,
+  CoordinatorPolicyAllowRequestSchema,
+  CoordinatorMemoryGetRequestSchema,
+  CoordinatorMemoryUpdateRequestSchema,
+  CoordinatorProjectEnableRequestSchema,
+  CoordinatorProjectDisableRequestSchema,
+  CoordinatorProjectUpdateRequestSchema,
+  CoordinatorProjectGetRequestSchema,
+  CoordinatorBoardSubscribeRequestSchema,
 ]);
 
 export type SessionInboundMessage = z.infer<typeof SessionInboundMessageSchema>;
@@ -3879,6 +4469,10 @@ export const ServerInfoStatusPayloadSchema = z
         checkoutInspection: z.boolean().optional(),
         // COMPAT(scheduleList): added in v0.8.0, remove gate after 2027-03-11 once daemon floor >= v0.8.0. The daemon serves schedule/list.
         scheduleList: z.boolean().optional(),
+        // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-11. The daemon serves coordinator.project.* and coordinator.board.* and pushes coordinator.board.changed.
+        coordinator: z.boolean().optional(),
+        // COMPAT(coordinator-automation): added in v0.8.0, remove after 2027-03-13 once daemon floor supports automation.
+        coordinatorAutomation: z.boolean().optional(),
       })
       .optional(),
   })
@@ -4152,6 +4746,8 @@ export const WorkspaceGitHubRuntimePayloadSchema = z
 
 export const WorkspaceDescriptorPayloadSchema = z
   .object({
+    // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13 once daemon floor >= v0.8.0.
+    hidden: z.boolean().optional(),
     id: z.string(),
     projectId: z.string(),
     projectDisplayName: z.string(),
@@ -4353,6 +4949,8 @@ export const FetchRecentProviderSessionsResponseMessageSchema = z.object({
 // project row with a new-workspace child so projects persist after their last
 // workspace is archived.
 export const WorkspaceProjectDescriptorPayloadSchema = z.object({
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13 once daemon floor >= v0.8.0.
+  hidden: z.boolean().optional(),
   projectId: z.string(),
   // COMPAT(projectKey): added in v0.2.4 on 2026-07-28; remove optional after 2027-01-28.
   projectKey: z.string().optional(),
@@ -4929,6 +5527,18 @@ export const AgentAttentionRequiredMessageSchema = z.object({
           workspaceId: z.string().optional(),
           agentId: z.string(),
           reason: z.enum(["finished", "error", "permission"]),
+          // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+          requestId: z.string().optional(),
+          categoryIdentifier: z.string().optional(),
+          actions: z
+            .array(
+              z.object({
+                id: z.string(),
+                label: z.string(),
+                response: AgentPermissionResponseSchema,
+              }),
+            )
+            .optional(),
         }),
       })
       .optional(),
@@ -7100,6 +7710,27 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   LoopStopResponseSchema,
   DaemonUpdateProgressMessageSchema,
   DaemonUpdateResponseSchema,
+  CoordinatorGlobalEnableResponseSchema,
+  CoordinatorGlobalDisableResponseSchema,
+  CoordinatorGlobalUpdateResponseSchema,
+  CoordinatorGlobalGetResponseSchema,
+  CoordinatorPermissionDeferResponseSchema,
+  CoordinatorGoalsListResponseSchema,
+  CoordinatorGoalPauseResponseSchema,
+  CoordinatorProposalsListResponseSchema,
+  CoordinatorProposalResolveResponseSchema,
+  CoordinatorPolicyListResponseSchema,
+  CoordinatorPolicyToggleResponseSchema,
+  CoordinatorPolicyPreviewResponseSchema,
+  CoordinatorPolicyAllowResponseSchema,
+  CoordinatorMemoryGetResponseSchema,
+  CoordinatorMemoryUpdateResponseSchema,
+  CoordinatorProjectEnableResponseSchema,
+  CoordinatorProjectDisableResponseSchema,
+  CoordinatorProjectUpdateResponseSchema,
+  CoordinatorProjectGetResponseSchema,
+  CoordinatorBoardSubscribeResponseSchema,
+  CoordinatorBoardChangedSchema,
 ]);
 
 export type SessionOutboundMessage = z.infer<typeof SessionOutboundMessageSchema>;
