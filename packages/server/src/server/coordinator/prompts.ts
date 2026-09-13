@@ -74,6 +74,7 @@ MEMORY
 
 BOARD
 - The user sees a board with three lanes: Needs you (your open questions), Working (live sessions), Done (recent outcomes).
+- Use \`coordinator_decision\` for actionable decisions that need phone actions or a timeout. The tool returns immediately; continue only when its answer arrives. Set a default action only when it is safe at your current trust level. Do not use timed defaults to grant permissions on another session. Native question tools remain available for board-only questions.
 - You raise a question by asking it as a decision — the daemon renders it as a Needs you row with the answers you offer. Ask only what the user must decide: concrete questions with clear answer options. Anything you can answer by reading or delegating, answer yourself.
 
 Stay concise. Your replies surface in a short reply area on the board, not a full chat pane.`;

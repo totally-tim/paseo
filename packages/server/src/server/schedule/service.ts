@@ -551,7 +551,23 @@ export class ScheduleService {
     return this.inspect(id);
   }
 
+  private readonly tickSubscribers = new Set<() => Promise<void>>();
+
+  subscribeTick(listener: () => Promise<void>): () => void {
+    this.tickSubscribers.add(listener);
+    return () => {
+      this.tickSubscribers.delete(listener);
+    };
+  }
+
   async tick(): Promise<void> {
+    for (const listener of this.tickSubscribers) {
+      try {
+        await listener();
+      } catch (error) {
+        this.logger.warn({ err: error }, "Schedule tick subscriber failed");
+      }
+    }
     const now = this.now();
     const schedules = await this.store.list();
     for (const schedule of schedules) {

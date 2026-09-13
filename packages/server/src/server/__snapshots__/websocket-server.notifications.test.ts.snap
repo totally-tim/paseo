@@ -1,0 +1,16 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`coordinator delivery > holds coordinator finishes for the digest but delivers the explicit digest 1`] = `
+[
+  {
+    "body": "Opened #43. Merged #41.",
+    "data": {
+      "agentId": "agent",
+      "reason": "finished",
+      "serverId": "srv-test",
+      "workspaceId": "workspace-1",
+    },
+    "title": "Daily digest",
+  },
+]
+`;

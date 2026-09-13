@@ -256,7 +256,7 @@ export function formatSystemNotificationPrompt(reason: string): string {
  * `</paseo-system >`).
  */
 const PROMPT_TAG_PATTERN =
-  /<\/?(untrusted-wake-details|untrusted-projects|untrusted-project|untrusted-forge-data|untrusted-git-data|wake-context|paseo-system|agent-response|permission-request)(?=[\s/>"'`])[^>]*>/gi;
+  /<\/?(untrusted-decision-answer|untrusted-wake-details|untrusted-projects|untrusted-project|untrusted-forge-data|untrusted-git-data|wake-context|paseo-system|agent-response|permission-request)(?=[\s/>"'`])[^>]*>/gi;
 
 export function sanitizeUntrustedText(text: string): string {
   return text.replace(PROMPT_TAG_PATTERN, (match) =>

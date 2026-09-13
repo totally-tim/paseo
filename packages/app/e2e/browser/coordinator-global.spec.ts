@@ -1,8 +1,46 @@
+import type { Page } from "@playwright/test";
 import { expect, test } from "../support/fixtures";
 import { gotoWorkspace } from "../support/helpers/launcher";
+import { daemonWsRoutePattern } from "../support/helpers/daemon-port";
 import { seedWorkspace } from "../support/helpers/seed-client";
 
 const GLOBAL_REPLY = "Paseo is watching token refresh. I have the project summary.";
+
+async function interceptSettingsSaveFailure(page: Page) {
+  let failNextSave = false;
+  await page.routeWebSocket(daemonWsRoutePattern(), (browser) => {
+    const server = browser.connectToServer();
+    browser.onMessage((message) => {
+      if (typeof message === "string") {
+        const envelope = JSON.parse(message) as {
+          message?: { type?: string; requestId?: string };
+        };
+        if (failNextSave && envelope.message?.type === "coordinator.global.update.request") {
+          failNextSave = false;
+          browser.send(
+            JSON.stringify({
+              type: "session",
+              message: {
+                type: "coordinator.global.update.response",
+                payload: {
+                  requestId: envelope.message.requestId,
+                  coordinator: null,
+                  error: "Injected settings save failure",
+                },
+              },
+            }),
+          );
+          return;
+        }
+      }
+      server.send(message);
+    });
+    server.onMessage((message) => browser.send(message));
+  });
+  return () => {
+    failNextSave = true;
+  };
+}
 
 test.describe("Global coordinator", () => {
   test.setTimeout(120_000);
@@ -70,6 +108,86 @@ test.describe("Global coordinator", () => {
       await expect(page.getByTestId("coordinator-reply").filter({ visible: true })).toContainText(
         GLOBAL_REPLY,
       );
+    } finally {
+      await workspace.client.disableGlobalCoordinator();
+      if (hiddenProjectId) await workspace.client.removeProject(hiddenProjectId);
+      await workspace.cleanup();
+    }
+  });
+
+  test("notification settings load defaults, persist edits, and retain drafts after validation or save failure", async ({
+    page,
+  }) => {
+    const workspace = await seedWorkspace({ repoPrefix: "global-notifications-" });
+    let hiddenProjectId: string | null = null;
+    const failNextSave = await interceptSettingsSaveFailure(page);
+    try {
+      await workspace.client.disableGlobalCoordinator();
+      await gotoWorkspace(page, workspace.workspaceId);
+      await page.getByTestId("sidebar-coordinator").click();
+      const global = await workspace.client.enableGlobalCoordinator({
+        profile: { provider: "mock", featureValues: { mockAssistantResponse: GLOBAL_REPLY } },
+      });
+      hiddenProjectId = global.projectId;
+      const notifications = page.getByTestId("coordinator-notifications").filter({ visible: true });
+      await expect(notifications).toBeVisible({ timeout: 30_000 });
+      await notifications.click();
+      const sheet = page.getByTestId("coordinator-notification-settings").filter({ visible: true });
+      const timeout = sheet.getByTestId("notification-decisionTimeoutMinutes");
+      const digest = sheet.getByTestId("notification-digestHour");
+      const quietStart = sheet.getByTestId("notification-quietStartHour");
+      const quietEnd = sheet.getByTestId("notification-quietEndHour");
+      await expect(timeout).toHaveValue("120");
+      await expect(digest).toHaveValue("8");
+      await expect(quietStart).toHaveValue("22");
+      await expect(quietEnd).toHaveValue("7");
+      await timeout.fill("60");
+      await digest.fill("9");
+      await quietStart.fill("21");
+      await quietEnd.fill("6");
+      await sheet.getByTestId("notification-settings-save").click();
+      await expect(sheet).toHaveCount(0);
+      expect((await workspace.client.getGlobalCoordinator()).notificationSettings).toEqual({
+        decisionTimeoutMinutes: 60,
+        digestEnabled: true,
+        digestHour: 9,
+        quietStartHour: 21,
+        quietEndHour: 6,
+      });
+      await notifications.click();
+      await expect(timeout).toHaveValue("60");
+      await expect(digest).toHaveValue("9");
+      await expect(quietStart).toHaveValue("21");
+      await expect(quietEnd).toHaveValue("6");
+      await timeout.fill("43201");
+      await sheet.getByTestId("notification-settings-save").click();
+      await expect(
+        sheet.getByText("Enter a timeout from 1 to 43,200 minutes.", { exact: true }),
+      ).toBeVisible();
+      expect(
+        (await workspace.client.getGlobalCoordinator()).notificationSettings
+          ?.decisionTimeoutMinutes,
+      ).toBe(60);
+      await timeout.fill("90");
+      failNextSave();
+      await sheet.getByTestId("notification-settings-save").click();
+      await expect(
+        sheet.getByText("Couldn't save notification settings. Try again.", { exact: true }),
+      ).toBeVisible();
+      await expect(timeout).toHaveValue("90");
+      expect(
+        (await workspace.client.getGlobalCoordinator()).notificationSettings
+          ?.decisionTimeoutMinutes,
+      ).toBe(60);
+      await sheet.getByTestId("notification-settings-save").click();
+      await expect(sheet).toHaveCount(0);
+      expect(
+        (await workspace.client.getGlobalCoordinator()).notificationSettings
+          ?.decisionTimeoutMinutes,
+      ).toBe(90);
+      await notifications.click();
+      await expect(timeout).toHaveValue("90");
+      await page.keyboard.press("Escape");
     } finally {
       await workspace.client.disableGlobalCoordinator();
       if (hiddenProjectId) await workspace.client.removeProject(hiddenProjectId);

@@ -1,3 +1,6 @@
+import type { AgentPermissionAction } from "./agent-types.js";
+import { buildNotificationActions, type NotificationAnswerAction } from "./notification-actions.js";
+
 const NOTIFICATION_PREVIEW_LIMIT = 220;
 
 export type AgentAttentionReason = "finished" | "error" | "permission";
@@ -8,6 +11,9 @@ export interface AgentAttentionNotificationData {
   workspaceId?: string;
   agentId: string;
   reason: AgentAttentionReason;
+  requestId?: string;
+  categoryIdentifier?: string;
+  actions?: NotificationAnswerAction[];
 }
 
 export interface AgentAttentionNotificationPayload {
@@ -34,6 +40,7 @@ export interface NotificationPermissionRequest {
   description?: string;
   input?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  actions?: AgentPermissionAction[];
 }
 
 export type AssistantTimelineItem =
@@ -208,6 +215,12 @@ export function buildAgentAttentionNotificationPayload(
       workspaceId: input.workspaceId,
       agentId: input.agentId,
       reason: input.reason,
+      ...(input.reason === "permission" && input.permissionRequest
+        ? {
+            requestId: input.permissionRequest.id,
+            ...buildNotificationActions(input.permissionRequest.actions),
+          }
+        : {}),
     },
   };
 }

@@ -60,6 +60,7 @@ import {
   type CoordinatorSpawnDecision,
 } from "./coordinator-service.js";
 import { CoordinatorStore } from "./persistence.js";
+import { DEFAULT_DECISION_SETTINGS } from "./decisions.js";
 import { SPAWN_ISOLATION_ENV } from "./spawn-isolation.js";
 import { CoordinatorToolDeniedError } from "./tool-policy.js";
 
@@ -314,6 +315,8 @@ interface Harness {
 type HarnessOptions = Partial<
   Pick<
     CoordinatorServiceDeps,
+    | "sendDecision"
+    | "sendDecisionAnswer"
     | "reconcileGlobalSetupProposals"
     | "workspaceGitService"
     | "changeRequestPollIntervalMs"
@@ -3648,3 +3651,133 @@ function deferredSignal(): { promise: Promise<void>; resolve: () => void } {
   });
   return { promise, resolve };
 }
+
+test("decision recovery cannot reopen a disabled global coordinator", async () => {
+  let recovery: Parameters<
+    NonNullable<CoordinatorServiceDeps["sendDecisionAnswer"]>
+  >[0]["backgroundRecovery"];
+  await reinitHarness({
+    sendDecisionAnswer: async (input) => {
+      recovery = input.backgroundRecovery;
+      return { disposition: "turn_started" };
+    },
+  });
+  await harness.service.start();
+  const global = await harness.service.enableGlobalCoordinator({ profile: CODEX_PROFILE });
+  await harness.service.updateGlobalCoordinator({
+    notificationSettings: { quietStartHour: 0, quietEndHour: 0, digestEnabled: false },
+  });
+  await vi.waitFor(() => expect(harness.agentManager.hasInFlightRun(global.agentId!)).toBe(false));
+  const { requestId } = await harness.service.raiseDecision({
+    callerAgentId: global.agentId!,
+    question: "Investigate CI?",
+    actions: [{ id: "investigate", label: "Investigate", response: { behavior: "allow" } }],
+  });
+  await harness.agentManager.respondToPermission(global.agentId!, requestId, {
+    behavior: "allow",
+    selectedActionId: "investigate",
+  });
+  await harness.service.tickDecisions();
+  expect(typeof recovery).toBe("function");
+  await harness.service.disableGlobalCoordinator();
+  let reopened = false;
+  await recovery!(async () => {
+    reopened = true;
+    return (async function* () {})();
+  });
+  expect(reopened).toBe(false);
+  expect(harness.agentManager.getAgent(global.agentId!)).toBeNull();
+});
+
+test("a new global coordinator exposes notification defaults before any update", async () => {
+  const state = await harness.service.getGlobalCoordinator();
+  expect(state.notificationSettings).toEqual(DEFAULT_DECISION_SETTINGS);
+});
+
+test("legacy global state receives notification defaults on first load", async () => {
+  const store = new CoordinatorStore(harness.paseoHome, logger);
+  await store.saveGlobal({
+    enabled: false,
+    agentId: null,
+    projectId: null,
+    workspaceId: null,
+    trustLevel: "observe",
+  });
+  const state = await harness.service.getGlobalCoordinator();
+  expect(state.notificationSettings).toEqual(DEFAULT_DECISION_SETTINGS);
+});
+
+test("delegated permissions wait through quiet hours and notify immediately in active hours", async () => {
+  let now = new Date(2026, 8, 13, 23).getTime();
+  const pushes: string[] = [];
+  await reinitHarness({
+    now: () => now,
+    sendDecision: async (input) => {
+      pushes.push(input.request.id);
+    },
+  });
+  const coordinator = await harness.service.enableProjectCoordinator(enableInput());
+  await harness.service.start();
+  await coordinatorIdle(coordinator.agentId!);
+  const child = await harness.agentManager.createAgent(
+    { provider: "codex", cwd: harness.projectDir, title: "Delegated job" },
+    undefined,
+    {
+      workspaceId: harness.workspace.workspaceId,
+      labels: { [PARENT_AGENT_ID_LABEL]: coordinator.agentId! },
+    },
+  );
+  const session = harness.client.sessions.at(-1)!;
+  session.push({
+    type: "permission_requested",
+    provider: "codex",
+    request: {
+      id: "night",
+      provider: "codex",
+      name: "Bash",
+      kind: "tool",
+      requestedAt: new Date(now).toISOString(),
+    },
+  });
+  await vi.waitFor(() =>
+    expect(harness.agentManager.getAgent(child.id)?.pendingPermissions.has("night")).toBe(true),
+  );
+  await harness.service.tickDecisions();
+  expect(pushes).toEqual([]);
+  now = new Date(2026, 8, 14, 7).getTime();
+  await harness.service.tickDecisions();
+  expect(pushes).toEqual(["night"]);
+  now = new Date(2026, 8, 14, 8).getTime();
+  session.push({
+    type: "permission_requested",
+    provider: "codex",
+    request: {
+      id: "day",
+      provider: "codex",
+      name: "Bash",
+      kind: "tool",
+      requestedAt: new Date(now).toISOString(),
+    },
+  });
+  await vi.waitFor(() =>
+    expect(harness.agentManager.getAgent(child.id)?.pendingPermissions.has("day")).toBe(true),
+  );
+  await harness.service.tickDecisions();
+  expect(pushes).toEqual(["night", "day"]);
+});
+
+test("disabled coordinator descendants remain eligible for ordinary permission notifications", async () => {
+  const coordinator = await harness.service.enableProjectCoordinator(enableInput());
+  await coordinatorIdle(coordinator.agentId!);
+  const child = await harness.agentManager.createAgent(
+    { provider: "codex", cwd: harness.projectDir },
+    undefined,
+    {
+      workspaceId: harness.workspace.workspaceId,
+      labels: { [PARENT_AGENT_ID_LABEL]: coordinator.agentId! },
+    },
+  );
+  expect(await harness.service.handlesCoordinatorPermissionNotification(child.id)).toBe(true);
+  await harness.service.disableProjectCoordinator(PROJECT_ID);
+  expect(await harness.service.handlesCoordinatorPermissionNotification(child.id)).toBe(false);
+});

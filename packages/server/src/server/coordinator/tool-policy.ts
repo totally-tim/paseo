@@ -69,6 +69,7 @@ const OBSERVE_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   "inspect_provider",
   "read_agent_handoff",
   "remember",
+  "coordinator_decision",
 ]);
 
 /**

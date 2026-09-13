@@ -7,6 +7,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet } from "react-native-unistyles";
 import type {
   GlobalCoordinatorState,
+  CoordinatorNotificationSettings,
   CoordinatorTrustLevel,
   CoordinatorBoardSnapshot,
   CoordinatorDecisionBoardRow,
@@ -51,6 +52,7 @@ import {
 } from "./global-board-model";
 import { lastAssistantLine } from "./timeline-text";
 import { buildComposerQuoteText } from "./decisions";
+import { NotificationSettingsSheet } from "./notification-settings-sheet";
 
 const EMPTY_PERMISSIONS: ReadonlyMap<string, PendingPermission> = new Map();
 const EMPTY_STREAM: never[] = [];
@@ -77,6 +79,16 @@ function ConnectedGlobalCoordinator({ serverId }: { serverId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const openNotifications = useCallback(() => setNotificationsOpen(true), []);
+  const closeNotifications = useCallback(() => setNotificationsOpen(false), []);
+  const saveNotifications = useCallback(
+    async (notificationSettings: CoordinatorNotificationSettings) => {
+      if (!client) throw new Error("Host disconnected");
+      setCoordinator(await client.updateGlobalCoordinator({ notificationSettings }));
+    },
+    [client],
+  );
   const boards = useCoordinatorBoardStore((state) => state.hosts[serverId]?.boards);
   const ownBoard = useMemo(
     () => [...(boards?.values() ?? [])].find((board) => board.tier === "global"),
@@ -124,6 +136,7 @@ function ConnectedGlobalCoordinator({ serverId }: { serverId: string }) {
         workspaceId={coordinator.workspaceId}
         agentId={ownBoard.coordinatorAgentId}
         onSelectTrust={applyTrust}
+        onOpenNotifications={openNotifications}
       />
     );
   } else if (error) {
@@ -154,6 +167,14 @@ function ConnectedGlobalCoordinator({ serverId }: { serverId: string }) {
   return (
     <KeyboardDock style={styles.root}>
       {content}
+      {coordinator?.notificationSettings ? (
+        <NotificationSettingsSheet
+          visible={notificationsOpen}
+          snapshot={coordinator.notificationSettings}
+          onClose={closeNotifications}
+          onSave={saveNotifications}
+        />
+      ) : null}
       <GlobalEnableSheet
         serverId={serverId}
         visible={sheetOpen}
@@ -365,6 +386,7 @@ function GlobalBoardContent({
   workspaceId,
   agentId,
   onSelectTrust,
+  onOpenNotifications,
 }: {
   serverId: string;
   coordinator: GlobalCoordinatorState;
@@ -372,6 +394,7 @@ function GlobalBoardContent({
   workspaceId: string;
   agentId: string;
   onSelectTrust: (level: CoordinatorTrustLevel) => Promise<void>;
+  onOpenNotifications: () => void;
 }) {
   const { t } = useTranslation();
   const client = useHostRuntimeClient(serverId);
@@ -472,13 +495,31 @@ function GlobalBoardContent({
   );
   const filter = useMemo(
     () => (
-      <GlobalProjectFilter
-        projects={projects}
-        projectId={selectedProjectId}
-        onSelect={setProjectId}
-      />
+      <View style={styles.notificationToolbar}>
+        <GlobalProjectFilter
+          projects={projects}
+          projectId={selectedProjectId}
+          onSelect={setProjectId}
+        />
+        {coordinator.notificationSettings ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onPress={onOpenNotifications}
+            testID="coordinator-notifications"
+          >
+            Notifications
+          </Button>
+        ) : null}
+      </View>
     ),
-    [projects, selectedProjectId, setProjectId],
+    [
+      projects,
+      selectedProjectId,
+      setProjectId,
+      coordinator.notificationSettings,
+      onOpenNotifications,
+    ],
   );
   return (
     <FileDropZone style={styles.root}>
@@ -551,6 +592,12 @@ const styles = StyleSheet.create((theme) => ({
   title: { fontSize: theme.fontSize.base, color: theme.colors.foreground },
   muted: { fontSize: theme.fontSize.sm, color: theme.colors.foregroundMuted },
   error: { fontSize: theme.fontSize.sm, color: theme.colors.destructive },
+  notificationToolbar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingRight: theme.spacing[4],
+  },
   filter: {
     paddingHorizontal: theme.spacing[4],
     paddingBottom: theme.spacing[3],

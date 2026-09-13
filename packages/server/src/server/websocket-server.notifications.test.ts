@@ -363,3 +363,190 @@ describe("VoiceAssistantWebSocketServer notification payloads", () => {
     expect(pushNotifications.sent).toEqual([]);
   });
 });
+
+describe("coordinator delivery", () => {
+  it("holds coordinator finishes for the digest but delivers the explicit digest", async () => {
+    const { server, pushNotifications } = createServer({
+      getAgent: vi.fn(() => ({
+        workspaceId: WORKSPACE_ID,
+        provider: "codex",
+        labels: { "paseo.role": "coordinator.global" },
+        pendingPermissions: new Map(),
+      })),
+    });
+    await asInternals<WebSocketServerInternals>(server).broadcastAgentAttention({
+      agentId: "agent",
+      reason: "finished",
+    });
+    expect(pushNotifications.sent).toEqual([]);
+    await server.deliverCoordinatorNotification({
+      kind: "digest",
+      agentId: "agent",
+      title: "Daily digest",
+      body: "Opened #43. Merged #41.",
+    });
+    expect(pushNotifications.sent).toMatchSnapshot();
+  });
+  it("suppresses digest pushes when a client is present", async () => {
+    const { server, pushNotifications } = createServer();
+    connectClient(server, {
+      deviceType: "mobile",
+      focusedAgentId: null,
+      lastActivityAt: new Date(),
+      appVisible: true,
+    });
+    await server.deliverCoordinatorNotification({
+      kind: "digest",
+      agentId: "agent",
+      title: "Daily digest",
+      body: "Opened #43.",
+    });
+    expect(pushNotifications.sent).toEqual([]);
+  });
+});
+
+describe("coordinator descendants", () => {
+  it("holds nested worker finish pushes for the digest", async () => {
+    const { server, pushNotifications } = createServer({
+      getAgent: vi.fn((id: string) => ({
+        workspaceId: WORKSPACE_ID,
+        labels:
+          id === "coordinator"
+            ? { "paseo.role": "coordinator.project" }
+            : { "paseo.parent-agent-id": "coordinator" },
+        pendingPermissions: new Map(),
+      })),
+    });
+    await asInternals<WebSocketServerInternals>(server).broadcastAgentAttention({
+      agentId: "worker",
+      reason: "finished",
+    });
+    expect(pushNotifications.sent).toEqual([]);
+  });
+});
+
+describe("coordinator push size boundary", () => {
+  it("bounds explicit digests before handing them to push transport", async () => {
+    const { server, pushNotifications } = createServer();
+    await server.deliverCoordinatorNotification({
+      kind: "digest",
+      agentId: "agent",
+      title: "Digest",
+      body: "🐑".repeat(5000),
+    });
+    expect(pushNotifications.sent).toHaveLength(1);
+    expect(
+      Buffer.byteLength(JSON.stringify(pushNotifications.sent[0]), "utf8"),
+    ).toBeLessThanOrEqual(3072);
+    expect(pushNotifications.sent[0]?.body).toContain("More in Coordinator");
+  });
+  it("bounds oversized responses on automatic managed decisions", async () => {
+    const request = {
+      id: "r",
+      provider: "codex",
+      name: "Decision",
+      kind: "question",
+      metadata: { coordinatorDecision: true },
+      actions: [
+        {
+          id: "retry",
+          label: "Retry",
+          behavior: "allow",
+          response: { behavior: "allow", updatedInput: { value: "🐑".repeat(5000) } },
+        },
+        { id: "investigate", label: "Investigate", behavior: "allow" },
+        { id: "ignore", label: "Ignore", behavior: "deny" },
+      ],
+    };
+    const { server, pushNotifications } = createServer({
+      getAgent: vi.fn(() => ({
+        workspaceId: WORKSPACE_ID,
+        pendingPermissions: new Map([["r", request]]),
+      })),
+    });
+    await asInternals<WebSocketServerInternals>(server).broadcastAgentAttention({
+      agentId: "agent",
+      reason: "permission",
+    });
+    expect(pushNotifications.sent[0]?.data?.actions).toBeUndefined();
+    expect(pushNotifications.sent[0]?.data?.categoryIdentifier).toBe("paseo.coordinator.open");
+  });
+});
+
+describe("coordinator permission scheduling", () => {
+  const permission = { id: "permission", provider: "codex", name: "Bash", kind: "tool" as const };
+  function createBlockedCoordinatorChild() {
+    const context = createServer({
+      getAgent: vi.fn((id: string) => ({
+        workspaceId: WORKSPACE_ID,
+        provider: "codex",
+        labels:
+          id === "parent"
+            ? { "paseo.role": "coordinator.project" }
+            : { "paseo.parent-agent-id": "parent" },
+        pendingPermissions: new Map([[permission.id, permission]]),
+      })),
+    });
+    asInternals<{
+      coordinatorService: {
+        handlesCoordinatorPermissionNotification: (agentId: string) => Promise<boolean>;
+      };
+    }>(context.server).coordinatorService = {
+      handlesCoordinatorPermissionNotification: async () => true,
+    };
+    return context;
+  }
+  it("leaves related-agent permission pushes to the quiet-aware scheduler", async () => {
+    const { server, pushNotifications } = createBlockedCoordinatorChild();
+    await asInternals<WebSocketServerInternals>(server).broadcastAgentAttention({
+      agentId: "child",
+      reason: "permission",
+    });
+    expect(pushNotifications.sent).toEqual([]);
+    await server.deliverCoordinatorNotification({
+      kind: "decision",
+      agentId: "child",
+      title: "Permission needed",
+      body: "Run tests?",
+      request: permission,
+    });
+    expect(pushNotifications.sent).toHaveLength(1);
+  });
+  it("still applies presence policy to scheduled permission delivery", async () => {
+    const { server, pushNotifications } = createBlockedCoordinatorChild();
+    connectClient(server, {
+      deviceType: "mobile",
+      focusedAgentId: "child",
+      lastActivityAt: new Date(),
+      appVisible: true,
+    });
+    await server.deliverCoordinatorNotification({
+      kind: "decision",
+      agentId: "child",
+      title: "Permission needed",
+      body: "Run tests?",
+      request: permission,
+    });
+    expect(pushNotifications.sent).toEqual([]);
+  });
+});
+
+it("keeps ordinary permission pushes for a child whose coordinator is disabled", async () => {
+  const { server, pushNotifications } = createServer({
+    getAgent: vi.fn(() => ({
+      workspaceId: WORKSPACE_ID,
+      labels: { "paseo.parent-agent-id": "disabled-coordinator" },
+      pendingPermissions: new Map(),
+    })),
+  });
+  asInternals<{
+    coordinatorService: {
+      handlesCoordinatorPermissionNotification: (agentId: string) => Promise<boolean>;
+    };
+  }>(server).coordinatorService = { handlesCoordinatorPermissionNotification: async () => false };
+  await asInternals<WebSocketServerInternals>(server).broadcastAgentAttention({
+    agentId: "child",
+    reason: "permission",
+  });
+  expect(pushNotifications.sent).toHaveLength(1);
+});

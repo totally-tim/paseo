@@ -1,3 +1,4 @@
+import { handleNotificationAction } from "@/push-notifications/actions";
 import "@/styles/unistyles";
 import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
 import { PortalProvider } from "@gorhom/portal";
@@ -235,7 +236,12 @@ function PushNotificationRouter() {
       }),
     });
 
-    const openFromResponse = (response: Notifications.NotificationResponse) => {
+    const openFromResponse = async (response: Notifications.NotificationResponse) => {
+      try {
+        if (await handleNotificationAction(response)) return;
+      } catch {
+        // A failed background answer opens the original decision for an explicit retry.
+      }
       const identifier = response.notification.request.identifier;
       if (lastHandledIdRef.current === identifier) {
         return;
@@ -248,11 +254,13 @@ function PushNotificationRouter() {
       openNotification(data);
     };
 
-    const subscription = Notifications.addNotificationResponseReceivedListener(openFromResponse);
+    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      void openFromResponse(response);
+    });
 
     void Notifications.getLastNotificationResponseAsync().then((response) => {
       if (response) {
-        openFromResponse(response);
+        void openFromResponse(response);
       }
       return;
     });

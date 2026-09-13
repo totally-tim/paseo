@@ -4,6 +4,7 @@ export interface PushPayload {
   title: string;
   body: string;
   data?: Record<string, unknown>;
+  categoryId?: string;
 }
 
 interface ExpoPushMessage {
@@ -11,6 +12,7 @@ interface ExpoPushMessage {
   title: string;
   body: string;
   data?: Record<string, unknown>;
+  categoryId?: string;
   sound?: "default";
 }
 
@@ -48,6 +50,9 @@ export class PushService {
       body: payload.body,
       data: payload.data,
       sound: "default",
+      ...((payload.categoryId ?? payload.data?.categoryIdentifier)
+        ? { categoryId: payload.categoryId ?? String(payload.data?.categoryIdentifier) }
+        : {}),
     }));
 
     // Batch tokens (max 100 per request per Expo limits)

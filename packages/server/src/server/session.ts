@@ -3162,11 +3162,33 @@ export class Session {
     }
   }
 
+  private async handleCoordinatorPermissionDefer(
+    msg: Extract<SessionInboundMessage, { type: "coordinator.permission.defer.request" }>,
+    source?: object,
+  ): Promise<void> {
+    let error: string | null = null;
+    try {
+      if (!this.coordinatorService) throw new Error("Coordinator service unavailable");
+      await this.coordinatorService.deferPermission(msg.agentId, msg.requestId);
+    } catch (cause) {
+      error = getErrorMessage(cause);
+    }
+    this.emitForSource(
+      {
+        type: "coordinator.permission.defer.response",
+        payload: { agentId: msg.agentId, requestId: msg.requestId, error },
+      },
+      source,
+    );
+  }
+
   private dispatchCoordinatorMessage(
     msg: SessionInboundMessage,
     source?: object,
   ): Promise<void> | undefined {
     switch (msg.type) {
+      case "coordinator.permission.defer.request":
+        return this.handleCoordinatorPermissionDefer(msg, source);
       case "coordinator.global.enable.request":
       case "coordinator.global.disable.request":
       case "coordinator.global.update.request":
@@ -3241,6 +3263,9 @@ export class Session {
         case "coordinator.global.update.request":
           respond(
             await service.updateGlobalCoordinator({
+              ...(msg.notificationSettings !== undefined
+                ? { notificationSettings: msg.notificationSettings }
+                : {}),
               ...(msg.profile !== undefined ? { profile: msg.profile } : {}),
               ...(msg.trustLevel !== undefined ? { trustLevel: msg.trustLevel } : {}),
             }),

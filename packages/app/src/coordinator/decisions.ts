@@ -1,3 +1,4 @@
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import type { CoordinatorDecisionBoardRow } from "@getpaseo/protocol/messages";
 import type { PendingPermission } from "@/types/shared";
@@ -39,6 +40,8 @@ export interface BoardAction {
   composerQuote: boolean;
   /** Spec: the first renderable answer renders as the primary action. */
   primary: boolean;
+  response?: AgentPermissionResponse;
+  operation?: "defer" | "policy";
 }
 
 /** Setup proposals use question options: Ignore is also an allowed answer. */
@@ -79,6 +82,8 @@ export function resolveBoardActions(
       variant,
       composerQuote: action.composerQuote === true,
       primary: false,
+      response: requestAction?.response ?? action.response,
+      operation: action.operation,
     };
   });
   const hasPrimary = resolved.some((action) => action.variant === "primary");
@@ -108,8 +113,9 @@ export function isMultiQuestionRow(
  */
 export function buildBoardActionResponse(
   row: Pick<CoordinatorDecisionBoardRow, "requestKind" | "questionHeader" | "questionCount">,
-  action: Pick<BoardAction, "id" | "label" | "behavior">,
+  action: Pick<BoardAction, "id" | "label" | "behavior" | "response">,
 ): AgentPermissionResponse {
+  if (action.response) return action.response;
   if (action.behavior === "deny") {
     return { behavior: "deny", selectedActionId: action.id, message: "Denied by user" };
   }
@@ -142,4 +148,34 @@ export function buildComposerQuoteText(question: string): string {
     .map((line) => (line.trim().length > 0 ? `> ${line}` : ">"))
     .join("\n");
   return `${quoted}\n\n`;
+}
+
+export async function performBoardDecisionAction(input: {
+  row: Pick<
+    CoordinatorDecisionBoardRow,
+    "agentId" | "requestId" | "requestKind" | "questionHeader" | "questionCount"
+  >;
+  action: BoardAction;
+  client: Pick<DaemonClient, "respondToPermissionAndWait" | "deferCoordinatorPermission"> | null;
+  onOpenAgent: (agentId: string) => void;
+  timeout: number;
+}): Promise<"opened" | "deferred" | "answered"> {
+  const { row, action, client } = input;
+  if (action.operation === "policy") {
+    // M6 owns policy creation. Opening the original prompt does not grant permission.
+    input.onOpenAgent(row.agentId);
+    return "opened";
+  }
+  if (!client) throw new Error("Host disconnected");
+  if (action.operation === "defer") {
+    await client.deferCoordinatorPermission(row.agentId, row.requestId);
+    return "deferred";
+  }
+  await client.respondToPermissionAndWait(
+    row.agentId,
+    row.requestId,
+    buildBoardActionResponse(row, action),
+    input.timeout,
+  );
+  return "answered";
 }

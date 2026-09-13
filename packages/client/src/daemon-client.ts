@@ -582,6 +582,7 @@ export interface EnableGlobalCoordinatorOptions {
 }
 
 export interface UpdateGlobalCoordinatorOptions {
+  notificationSettings?: Partial<NonNullable<GlobalCoordinatorState["notificationSettings"]>>;
   profile?: CoordinatorProfileSelection;
   trustLevel?: CoordinatorTrustLevel;
   requestId?: string;
@@ -3038,6 +3039,9 @@ export class DaemonClient {
         requestId: options.requestId,
         message: {
           type: "coordinator.global.update.request",
+          ...(options.notificationSettings !== undefined
+            ? { notificationSettings: options.notificationSettings }
+            : {}),
           ...(options.profile !== undefined ? { profile: options.profile } : {}),
           ...(options.trustLevel !== undefined ? { trustLevel: options.trustLevel } : {}),
         },
@@ -3046,6 +3050,16 @@ export class DaemonClient {
       throw new Error(payload.error ?? "updateGlobalCoordinator rejected");
     }
     return payload.coordinator;
+  }
+
+  async deferCoordinatorPermission(agentId: string, requestId: string): Promise<void> {
+    this.requireCoordinatorSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.permission.defer.response">({
+        requestId,
+        message: { type: "coordinator.permission.defer.request", agentId },
+      });
+    if (payload.error) throw new Error(payload.error);
   }
 
   async getGlobalCoordinator(requestId?: string): Promise<GlobalCoordinatorState> {

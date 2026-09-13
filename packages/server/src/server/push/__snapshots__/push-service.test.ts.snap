@@ -1,0 +1,49 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`Expo carries the registered category and exact responses in the decision payload 1`] = `
+[
+  {
+    "body": "CI failed on #41",
+    "categoryId": "paseo.coordinator.retry",
+    "data": {
+      "actions": [
+        {
+          "id": "retry",
+          "label": "Retry",
+          "response": {
+            "behavior": "allow",
+            "updatedInput": {
+              "choice": "retry",
+            },
+          },
+        },
+        {
+          "id": "investigate",
+          "label": "Investigate",
+          "response": {
+            "behavior": "allow",
+            "selectedActionId": "b",
+          },
+        },
+        {
+          "id": "ignore",
+          "label": "Ignore",
+          "response": {
+            "behavior": "deny",
+            "selectedActionId": "c",
+          },
+        },
+      ],
+      "agentId": "agent",
+      "categoryIdentifier": "paseo.coordinator.retry",
+      "reason": "permission",
+      "requestId": "request",
+      "serverId": "server",
+      "workspaceId": "workspace",
+    },
+    "sound": "default",
+    "title": "Agent needs permission",
+    "to": "ExponentPushToken[test]",
+  },
+]
+`;

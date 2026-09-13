@@ -4,6 +4,7 @@ import type { CoordinatorDecisionBoardRow } from "@getpaseo/protocol/messages";
 import type { PendingPermission } from "@/types/shared";
 import {
   buildBoardActionResponse,
+  performBoardDecisionAction,
   shouldOpenProjectSetup,
   buildComposerQuoteText,
   isMultiQuestionRow,
@@ -241,6 +242,21 @@ describe("resolveBoardActions", () => {
 });
 
 describe("buildBoardActionResponse", () => {
+  it("preserves an explicit provider response instead of rebuilding it from the display label", () => {
+    const response = {
+      behavior: "allow" as const,
+      selectedActionId: "retry-ci",
+      updatedInput: { answers: { next: "retry-ci" } },
+    };
+    expect(
+      buildBoardActionResponse(makeRow({ agentId: "agent-1", requestId: "req-1" }), {
+        id: "retry",
+        label: "Retry",
+        behavior: "allow",
+        response,
+      }),
+    ).toEqual(response);
+  });
   it("allows with the selected action id", () => {
     expect(
       buildBoardActionResponse(makeRow({ agentId: "agent-1", requestId: "req-1" }), {
@@ -385,5 +401,54 @@ describe("project setup answers", () => {
     });
     expect(shouldOpenProjectSetup({}, setup)).toBe(false);
     expect(shouldOpenProjectSetup(row, { ...setup, behavior: "deny" })).toBe(false);
+  });
+});
+
+describe("board permission operations", () => {
+  it("defers the originating request without answering it", async () => {
+    const row = makeRow({
+      agentId: "own-agent",
+      requestId: "pending-request",
+      actions: [{ id: "leave", label: "Leave it", operation: "defer" }],
+    });
+    const [action] = resolveBoardActions(row, null);
+    const deferred: string[][] = [];
+    const result = await performBoardDecisionAction({
+      row,
+      action: action!,
+      timeout: 100,
+      client: {
+        deferCoordinatorPermission: async (...ids) => {
+          deferred.push(ids);
+        },
+        respondToPermissionAndWait: async () => {
+          throw new Error("must not answer");
+        },
+      },
+      onOpenAgent: () => {
+        throw new Error("must not open");
+      },
+    });
+    expect(result).toBe("deferred");
+    expect(deferred).toEqual([["own-agent", "pending-request"]]);
+  });
+  it("opens policy actions in the original agent even while disconnected, without granting permission", async () => {
+    const row = makeRow({
+      agentId: "own-agent",
+      requestId: "pending-request",
+      actions: [{ id: "policy", label: "Always allow this", operation: "policy" }],
+    });
+    const [action] = resolveBoardActions(row, null);
+    const opened: string[] = [];
+    expect(
+      await performBoardDecisionAction({
+        row,
+        action: action!,
+        timeout: 100,
+        client: null,
+        onOpenAgent: (id) => opened.push(id),
+      }),
+    ).toBe("opened");
+    expect(opened).toEqual(["own-agent"]);
   });
 });

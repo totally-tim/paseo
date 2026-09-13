@@ -522,14 +522,6 @@ const AgentSessionConfigSchema = z.object({
 });
 
 const AgentPermissionUpdateSchema = z.record(z.string(), z.unknown());
-const AgentPermissionActionSchema = z.object({
-  id: z.string(),
-  label: z.string(),
-  behavior: z.enum(["allow", "deny"]),
-  variant: z.enum(["primary", "secondary", "danger"]).optional(),
-  intent: z.enum(["implement", "implement_resume", "dismiss"]).optional(),
-});
-
 export const AgentPermissionResponseSchema: z.ZodType<AgentPermissionResponse> =
   z.discriminatedUnion("behavior", [
     z.object({
@@ -546,6 +538,16 @@ export const AgentPermissionResponseSchema: z.ZodType<AgentPermissionResponse> =
     }),
   ]);
 
+const AgentPermissionActionSchema = z.object({
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+  response: AgentPermissionResponseSchema.optional(),
+  id: z.string(),
+  label: z.string(),
+  behavior: z.enum(["allow", "deny"]),
+  variant: z.enum(["primary", "secondary", "danger"]).optional(),
+  intent: z.enum(["implement", "implement_resume", "dismiss"]).optional(),
+});
+
 export const AgentPermissionRequestPayloadSchema: z.ZodType<AgentPermissionRequest, unknown> =
   z.object({
     id: z.string(),
@@ -560,6 +562,9 @@ export const AgentPermissionRequestPayloadSchema: z.ZodType<AgentPermissionReque
     actions: z.array(AgentPermissionActionSchema).optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
     requestedAt: z.string().optional(),
+    // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+    timeoutAt: z.string().datetime().optional(),
+    defaultAnswer: AgentPermissionResponseSchema.optional(),
   });
 
 const UnknownValueSchema = z.union([
@@ -855,6 +860,18 @@ export const AgentStreamEventPayloadSchema = z.discriminatedUnion("type", [
           workspaceId: z.string().optional(),
           agentId: z.string(),
           reason: z.enum(["finished", "error", "permission"]),
+          // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+          requestId: z.string().optional(),
+          categoryIdentifier: z.string().optional(),
+          actions: z
+            .array(
+              z.object({
+                id: z.string(),
+                label: z.string(),
+                response: AgentPermissionResponseSchema,
+              }),
+            )
+            .optional(),
         }),
       })
       .optional(),
@@ -3427,6 +3444,10 @@ export const CoordinatorDecisionBoardRowSchema = z.object({
       behavior: z.enum(["allow", "deny"]).optional(),
       variant: z.string().optional(),
       composerQuote: z.boolean().optional(),
+      // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+      operation: z.enum(["defer", "policy"]).optional(),
+      // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+      response: AgentPermissionResponseSchema.optional(),
     }),
   ),
   /** The answer the daemon applies when `dueAt` passes. Decision timers ship in a later milestone. */
@@ -3529,7 +3550,18 @@ export const ProjectCoordinatorStateSchema = z.object({
 });
 export type ProjectCoordinatorState = z.infer<typeof ProjectCoordinatorStateSchema>;
 
+export const CoordinatorNotificationSettingsSchema = z.object({
+  decisionTimeoutMinutes: z.number().int().positive().max(43_200),
+  digestEnabled: z.boolean(),
+  digestHour: z.number().int().min(0).max(23),
+  quietStartHour: z.number().int().min(0).max(23),
+  quietEndHour: z.number().int().min(0).max(23),
+});
+export type CoordinatorNotificationSettings = z.infer<typeof CoordinatorNotificationSettingsSchema>;
+
 export const GlobalCoordinatorStateSchema = z.object({
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+  notificationSettings: CoordinatorNotificationSettingsSchema.optional(),
   enabled: z.boolean(),
   agentId: z.string().nullable(),
   workspaceId: z.string().nullable(),
@@ -3555,11 +3587,24 @@ export type CoordinatorGlobalDisableRequest = z.infer<typeof CoordinatorGlobalDi
 
 export const CoordinatorGlobalUpdateRequestSchema = z.object({
   type: z.literal("coordinator.global.update.request"),
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+  notificationSettings: CoordinatorNotificationSettingsSchema.partial().optional(),
   requestId: z.string(),
   profile: CoordinatorProfileSelectionSchema.optional(),
   trustLevel: CoordinatorTrustLevelSchema.optional(),
 });
 export type CoordinatorGlobalUpdateRequest = z.infer<typeof CoordinatorGlobalUpdateRequestSchema>;
+
+// COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+export const CoordinatorPermissionDeferRequestSchema = z.object({
+  type: z.literal("coordinator.permission.defer.request"),
+  agentId: z.string(),
+  requestId: z.string(),
+});
+export const CoordinatorPermissionDeferResponseSchema = z.object({
+  type: z.literal("coordinator.permission.defer.response"),
+  payload: z.object({ agentId: z.string(), requestId: z.string(), error: z.string().nullable() }),
+});
 
 export const CoordinatorGlobalGetRequestSchema = z.object({
   type: z.literal("coordinator.global.get.request"),
@@ -3912,6 +3957,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   CoordinatorGlobalDisableRequestSchema,
   CoordinatorGlobalUpdateRequestSchema,
   CoordinatorGlobalGetRequestSchema,
+  CoordinatorPermissionDeferRequestSchema,
   CoordinatorProjectEnableRequestSchema,
   CoordinatorProjectDisableRequestSchema,
   CoordinatorProjectUpdateRequestSchema,
@@ -5318,6 +5364,18 @@ export const AgentAttentionRequiredMessageSchema = z.object({
           workspaceId: z.string().optional(),
           agentId: z.string(),
           reason: z.enum(["finished", "error", "permission"]),
+          // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+          requestId: z.string().optional(),
+          categoryIdentifier: z.string().optional(),
+          actions: z
+            .array(
+              z.object({
+                id: z.string(),
+                label: z.string(),
+                response: AgentPermissionResponseSchema,
+              }),
+            )
+            .optional(),
         }),
       })
       .optional(),
@@ -7493,6 +7551,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   CoordinatorGlobalDisableResponseSchema,
   CoordinatorGlobalUpdateResponseSchema,
   CoordinatorGlobalGetResponseSchema,
+  CoordinatorPermissionDeferResponseSchema,
   CoordinatorProjectEnableResponseSchema,
   CoordinatorProjectDisableResponseSchema,
   CoordinatorProjectUpdateResponseSchema,

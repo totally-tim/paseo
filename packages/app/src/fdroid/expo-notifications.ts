@@ -38,3 +38,14 @@ export function addNotificationResponseReceivedListener() {
 export async function getLastNotificationResponseAsync() {
   return null;
 }
+
+export async function registerTaskAsync() {
+  return null;
+}
+export async function setNotificationCategoryAsync() {
+  return null;
+}
+
+export async function scheduleNotificationAsync() {
+  return "";
+}

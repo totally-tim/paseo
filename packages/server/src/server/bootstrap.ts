@@ -472,6 +472,7 @@ export interface PaseoDaemonConfig {
 }
 
 export interface PaseoDaemon {
+  coordinatorService: CoordinatorService;
   config: PaseoDaemonConfig;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
@@ -485,6 +486,8 @@ export interface PaseoDaemon {
 }
 
 export interface PaseoDaemonDependencies {
+  /** Clock for durable coordinator decision/digest scheduling in isolated hosts. */
+  coordinatorNow?: () => number;
   accountBackend?: ConstructorParameters<typeof ProviderAccountService>[1];
   accountClient?: NonNullable<ConstructorParameters<typeof AgentManager>[0]["createAccountClient"]>;
   accountStoreOptions?: ProviderAccountStoreOptions;
@@ -1036,6 +1039,7 @@ export async function createPaseoDaemon(
   // Project coordinators are ordinary persisted agents with role labels; the
   // service reconciles records, keeps them resident, and derives the board.
   const coordinatorService: CoordinatorService = new CoordinatorService({
+    now: dependencies.coordinatorNow,
     agentManager,
     agentStorage,
     projectRegistry,
@@ -1046,6 +1050,16 @@ export async function createPaseoDaemon(
     workspaceGitService,
     paseoHome: config.paseoHome,
     logger,
+    sendDecision: async (input) => {
+      if (!wsServer) return;
+      await wsServer
+        .deliverCoordinatorNotification({ kind: "decision", ...input })
+        .catch((error) => logger.warn({ err: error }, "Coordinator decision push failed"));
+    },
+    sendDigest: async (input) => {
+      if (!wsServer) throw new Error("Notification delivery is not ready");
+      await wsServer.deliverCoordinatorNotification({ kind: "digest", ...input });
+    },
     reconcileGlobalSetupProposals: (state) => projectSetupProposals.reconcile(state),
   });
   const projectSetupProposals = new ProjectSetupProposals({
@@ -1440,6 +1454,9 @@ export async function createPaseoDaemon(
     createPaseoWorktreeWorkspace: createSchedulePaseoWorktreeExternal,
     archiveWorkspace: archiveScheduleWorkspaceExternal,
   });
+  const unsubscribeDecisionTick = scheduleService.subscribeTick(() =>
+    coordinatorService.tickDecisions(),
+  );
   await scheduleService.start();
   agentManager.setAgentArchivedCallback(async (agentId) => {
     try {
@@ -1915,6 +1932,7 @@ export async function createPaseoDaemon(
     wsServer?.prepareForShutdown();
     agentManager.prepareForShutdown();
     projectSetupProposals.stop();
+    unsubscribeDecisionTick();
     await coordinatorService.stop().catch(() => undefined);
     await continuations.close();
     await providerAccounts.close();
@@ -1951,6 +1969,7 @@ export async function createPaseoDaemon(
 
   return {
     config,
+    coordinatorService,
     agentManager,
     agentStorage,
     terminalManager,

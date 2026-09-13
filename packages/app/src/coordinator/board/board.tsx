@@ -21,7 +21,7 @@ import type { PendingPermission } from "@/types/shared";
 import { formatCompactTimeAgo, formatDuration } from "@/utils/time";
 import { openExternalUrl } from "@/utils/open-external-url";
 import {
-  buildBoardActionResponse,
+  performBoardDecisionAction,
   shouldOpenProjectSetup,
   resolveComposerQuoteSource,
   resolveDecisionPermission,
@@ -403,7 +403,7 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
         handlers.onSetupProject(row, action);
         return;
       }
-      if (!client) {
+      if (!client && action.operation !== "policy") {
         setDecisionStates((current) => ({
           ...current,
           [rowId]: { pendingActionId: null, error: t("workspace.terminal.hostDisconnected") },
@@ -415,12 +415,17 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
         [rowId]: { pendingActionId: action.id, error: null },
       }));
       try {
-        await client.respondToPermissionAndWait(
-          row.agentId,
-          row.requestId,
-          buildBoardActionResponse(row, action),
-          RESPOND_TIMEOUT_MS,
-        );
+        const result = await performBoardDecisionAction({
+          row,
+          action,
+          client,
+          onOpenAgent: handlers.onOpenAgent,
+          timeout: RESPOND_TIMEOUT_MS,
+        });
+        if (result !== "answered") {
+          setDecisionStates((current) => ({ ...current, [rowId]: IDLE_DECISION_STATE }));
+          return;
+        }
         if (action.composerQuote) {
           handlers.onComposerQuote(resolveComposerQuoteSource(row));
         }

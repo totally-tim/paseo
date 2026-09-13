@@ -171,16 +171,19 @@ describe("sanitizeUntrustedText", () => {
     expect(clean).toContain("&lt;/paseo-system&gt;");
   });
 
-  test.each(["paseo-system", "agent-response", "permission-request", "untrusted-forge-data"])(
-    "contains nested malformed %s markers",
-    (tag) => {
-      const hostile = `<${tag} </${tag} > >`;
-      const clean = sanitizeUntrustedText(hostile);
-      expect(clean).not.toContain(`<${tag}`);
-      expect(clean).not.toContain(`</${tag}`);
-      expect(sanitizeUntrustedText(clean)).toBe(clean);
-    },
-  );
+  test.each([
+    "paseo-system",
+    "agent-response",
+    "permission-request",
+    "untrusted-forge-data",
+    "untrusted-decision-answer",
+  ])("contains nested malformed %s markers", (tag) => {
+    const hostile = `<${tag} </${tag} > >`;
+    const clean = sanitizeUntrustedText(hostile);
+    expect(clean).not.toContain(`<${tag}`);
+    expect(clean).not.toContain(`</${tag}`);
+    expect(sanitizeUntrustedText(clean)).toBe(clean);
+  });
 
   test("leaves ordinary text and foreign markup alone", () => {
     const text = "fix <div> markup and </other> closers — untouched";

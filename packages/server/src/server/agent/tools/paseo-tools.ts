@@ -113,6 +113,10 @@ import type {
   CoordinatorSpawnDecision,
   CoordinatorSpawnGateInput,
 } from "../../coordinator/coordinator-service.js";
+import type {
+  CoordinatorDecisionInput,
+  CoordinatorDecisionResult,
+} from "../../coordinator/decisions.js";
 import type { CoordinatorProfileSelection } from "@getpaseo/protocol/messages";
 import {
   COORDINATOR_SUBAGENT_KINDS,
@@ -167,6 +171,7 @@ export interface PaseoToolHostDependencies {
    */
   coordinator?: {
     remember(input: CoordinatorRememberInput): Promise<CoordinatorRememberResult>;
+    raiseDecision?(input: CoordinatorDecisionInput): Promise<CoordinatorDecisionResult>;
     /**
      * Change-request writes stay with the coordinator: delegated subagents in
      * its tree are denied (they report upward; the coordinator posts under its
@@ -3976,6 +3981,42 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         content: [],
         structuredContent: ensureValidJson(result),
       };
+    },
+  );
+
+  registerTool(
+    "coordinator_decision",
+    {
+      title: "Ask a coordinator decision",
+      description:
+        "Post an actionable question on the coordinator board and phone. Returns immediately; " +
+        "the chosen answer arrives in a later system notification. Each action maps to the " +
+        "answer your own session receives; it grants no permission to another agent. " +
+        "Provide defaultActionId only when taking that answer automatically is appropriate " +
+        "within your current trust level. Quiet hours delay delivery and the timeout together.",
+      inputSchema: {
+        question: z.string().trim().min(1).max(2000),
+        actions: z
+          .array(
+            z.object({
+              id: z.string().trim().min(1).max(80),
+              label: z.string().trim().min(1).max(80),
+              response: AgentPermissionResponseSchema,
+            }),
+          )
+          .min(1)
+          .max(4),
+        defaultActionId: z.string().optional(),
+        timeoutMinutes: z.number().int().min(1).max(10080).optional(),
+      },
+      outputSchema: { requestId: z.string() },
+    },
+    async (input) => {
+      if (!callerAgentId) throw new Error("coordinator_decision requires an agent caller");
+      const bridge = requireCoordinatorBridge();
+      if (!bridge.raiseDecision) throw new Error("Coordinator decisions are not available");
+      const result = await bridge.raiseDecision({ ...input, callerAgentId });
+      return { content: [], structuredContent: ensureValidJson(result) };
     },
   );
 
