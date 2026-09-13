@@ -39,6 +39,8 @@ export type PluginWorkspaceTabTarget =
 export type WorkspaceTabTarget =
   | { kind: "new_tab" }
   | { kind: "draft"; draftId: string; setup?: WorkspaceDraftTabSetup }
+  | { kind: "coordinator_goals"; projectId?: string }
+  | { kind: "coordinator_policy"; projectId?: string }
   | { kind: "coordinator_board"; projectId: string }
   | { kind: "coordinator_memory"; scope: "personal" }
   | { kind: "coordinator_memory"; scope: "personal-project"; projectId: string }

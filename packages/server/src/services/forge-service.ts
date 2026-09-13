@@ -18,6 +18,8 @@ export function normalizeForgeSearchKinds(
 }
 
 export interface PullRequestSummary {
+  /** Forge login/username, never a display name or inferred branch owner. */
+  author?: string;
   number: number;
   title: string;
   url: string;

@@ -1445,6 +1445,7 @@ export async function createPaseoDaemon(
     );
   };
   const scheduleService = new ScheduleService({
+    runGoal: (schedule, runId) => coordinatorService.runGoalSchedule(schedule, runId),
     isProtectedAgentTarget: (id) => coordinatorService.isRotatingAgentTarget(id),
     paseoHome: config.paseoHome,
     logger,
@@ -1461,6 +1462,42 @@ export async function createPaseoDaemon(
   await coordinatorService.initializeRotation({
     providerSnapshotManager,
     schedules: () => scheduleService,
+  });
+  await coordinatorService.initializeAutomation({
+    cleanupNeverStartedWorkspace: async ({ workerAgentId, workspaceId, cwd }) => {
+      const workspace = await workspaceRegistry.get(workspaceId);
+      const worker = await agentStorage.get(workerAgentId);
+      if (
+        !workspace ||
+        workspace.kind !== "worktree" ||
+        workspace.cwd !== cwd ||
+        workspace.archivedAt ||
+        !worker?.archivedAt ||
+        worker.lastUserMessageAt ||
+        worker.workspaceId !== workspaceId
+      )
+        return;
+      // Only the freshly minted, now idle workspace may be retired. Another
+      // session joining it prevents cleanup; the archive workflow checks dirtiness.
+      const others = (await agentStorage.list()).filter(
+        (agent) =>
+          agent.id !== workerAgentId && agent.workspaceId === workspaceId && !agent.archivedAt,
+      );
+      if (
+        others.length ||
+        agentManager
+          .listAgents()
+          .some((agent) => agent.id !== workerAgentId && agent.workspaceId === workspaceId)
+      )
+        return;
+      await archiveWorkspaceByIdExternal(workspaceId, `goal-never-started:${workerAgentId}`);
+    },
+    schedules: () => scheduleService,
+    createAgent,
+    resolveProfile: (name) =>
+      (daemonConfigStore.get().agentProfiles ?? []).find(
+        (profile) => profile.id === name || profile.name === name,
+      ) ?? null,
   });
   await scheduleService.start();
   agentManager.setAgentArchivedCallback(async (agentId) => {

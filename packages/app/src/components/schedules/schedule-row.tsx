@@ -1,6 +1,12 @@
 import { MoreVertical, Pause, Pencil, Play, RotateCw, Trash2 } from "lucide-react-native";
 import { useCallback, useState, type ReactElement } from "react";
-import { Pressable, Text, View, type PressableStateCallbackType } from "react-native";
+import {
+  Pressable,
+  Text,
+  View,
+  type GestureResponderEvent,
+  type PressableStateCallbackType,
+} from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import {
   DropdownMenu,
@@ -9,6 +15,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { getProviderIcon } from "@/components/provider-icons";
 import { isNative } from "@/constants/platform";
@@ -165,6 +172,14 @@ export function ScheduleRow({
   const handlePointerEnter = useCallback(() => setIsHovered(true), []);
   const handlePointerLeave = useCallback(() => setIsHovered(false), []);
 
+  const openGoal = useCallback(
+    (event: GestureResponderEvent) => {
+      event.stopPropagation();
+      onEdit();
+    },
+    [onEdit],
+  );
+  const goalOwned = schedule.target.type === "agent" && Boolean(schedule.target.goal);
   const title = resolveScheduleTitle(schedule);
   const productName = scheduleProductName(schedule);
   const badge = stateBadge(state);
@@ -192,7 +207,9 @@ export function ScheduleRow({
         style={rowStyle}
         onPress={onEdit}
         accessibilityRole="button"
-        accessibilityLabel={`Edit ${productName.toLowerCase()} ${title}`}
+        accessibilityLabel={
+          goalOwned ? `Manage goal ${title}` : `Edit ${productName.toLowerCase()} ${title}`
+        }
         testID={`schedule-row-${schedule.id}`}
       >
         <View style={styles.main}>
@@ -209,21 +226,30 @@ export function ScheduleRow({
             <Text style={settingsStyles.rowHint} numberOfLines={1}>
               {meta}
             </Text>
+            {goalOwned ? (
+              <Text style={settingsStyles.rowHint}>Managed in Goals · schedule is read-only</Text>
+            ) : null}
           </View>
         </View>
 
         <View style={styles.trailing}>
           <StatusBadge label={badge.label} variant={badge.variant} />
-          <ScheduleKebabMenu
-            schedule={schedule}
-            canRun={canRun}
-            pending={pending}
-            onEdit={onEdit}
-            onPause={onPause}
-            onResume={onResume}
-            onRunNow={onRunNow}
-            onDelete={onDelete}
-          />
+          {goalOwned ? (
+            <Button size="sm" variant="ghost" onPress={openGoal}>
+              Open Goals
+            </Button>
+          ) : (
+            <ScheduleKebabMenu
+              schedule={schedule}
+              canRun={canRun}
+              pending={pending}
+              onEdit={onEdit}
+              onPause={onPause}
+              onResume={onResume}
+              onRunNow={onRunNow}
+              onDelete={onDelete}
+            />
+          )}
         </View>
       </Pressable>
     </View>

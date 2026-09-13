@@ -35,6 +35,24 @@ function outboundMessage(type: SessionOutboundMessage["type"]): SessionOutboundM
 }
 
 describe("SessionAuthorization", () => {
+  test("coordinator automation configuration requires automation management", () => {
+    const writer = new SessionAuthorization(["workspace.write"]);
+    const automation = new SessionAuthorization(["automation.manage"]);
+    for (const type of [
+      "coordinator.goal.pause.request",
+      "coordinator.proposal.resolve.request",
+      "coordinator.policy.toggle.request",
+      "coordinator.policy.allow.request",
+    ] as const) {
+      expect(writer.allowsInbound(inboundMessage(type)), type).toBe(false);
+      expect(automation.allowsInbound(inboundMessage(type)), type).toBe(true);
+    }
+    expect(writer.allowsInbound(inboundMessage("agent_permission_response"))).toBe(true);
+    const reader = new SessionAuthorization(["workspace.read"]);
+    expect(reader.allowsInbound(inboundMessage("coordinator.project.get.request"))).toBe(true);
+    expect(reader.allowsInbound(inboundMessage("coordinator.global.get.request"))).toBe(true);
+  });
+
   test("owner authority covers every session operation", () => {
     const authorization = new SessionAuthorization(OWNER_PERMISSIONS);
 

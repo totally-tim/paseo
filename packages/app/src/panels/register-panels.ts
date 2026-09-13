@@ -1,3 +1,7 @@
+import {
+  coordinatorGoalsPanelRegistration,
+  coordinatorPolicyPanelRegistration,
+} from "@/coordinator/automation/panel";
 import { coordinatorMemoryPanelRegistration } from "@/coordinator/memory/panel";
 import { agentPanelRegistration } from "@/panels/agent-panel";
 import { browserPanelRegistration } from "@/desktop/browser/panel";
@@ -40,5 +44,7 @@ export function ensurePanelsRegistered(): void {
   registerPanel(pluginPanelRegistration);
   registerPanel(coordinatorBoardPanelRegistration);
   registerPanel(coordinatorMemoryPanelRegistration);
+  registerPanel(coordinatorGoalsPanelRegistration);
+  registerPanel(coordinatorPolicyPanelRegistration);
   panelsRegistered = true;
 }

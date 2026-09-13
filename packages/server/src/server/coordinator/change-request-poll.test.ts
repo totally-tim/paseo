@@ -86,6 +86,11 @@ interface Harness {
   makePoll: (deps?: {
     resolveProjectRoot?: (projectId: string) => Promise<string | null>;
     resolveForge?: () => Promise<ForgeResolution | null>;
+    onSnapshot?: (
+      projectId: string,
+      snapshot: ChangeRequestSnapshot,
+      previous: ChangeRequestSnapshot | null,
+    ) => Promise<void>;
   }) => ChangeRequestPoll;
 }
 
@@ -117,6 +122,7 @@ function makeHarness(): Harness {
           harness.changes.push(change);
         },
         intervalMs: 60_000,
+        onSnapshot: deps?.onSnapshot,
       }),
   };
   return harness;
@@ -425,4 +431,51 @@ describe("diffChangeRequestSnapshots", () => {
       hashChangeRequestSnapshot(snapshot([entry()])),
     );
   });
+});
+
+test("PR author survives coordinator poll persistence and restart", async () => {
+  const harness = makeHarness();
+  try {
+    harness.forge.pullRequests = [makePullRequest({ author: "alice" })];
+    const first = await harness.makePoll().runOnce(PROJECT_ID);
+    expect(first).toMatchObject({ kind: "baseline", snapshot: { entries: [{ author: "alice" }] } });
+    const restored = await harness.makePoll().runOnce(PROJECT_ID);
+    expect(restored).toMatchObject({
+      kind: "unchanged",
+      snapshot: { entries: [{ author: "alice" }] },
+    });
+  } finally {
+    rmSync(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("failed goal observation preserves PR wakes and retries from its own checkpoint after restart", async () => {
+  const harness = makeHarness();
+  try {
+    harness.forge.pullRequests = [makePullRequest()];
+    await harness.makePoll().runOnce(PROJECT_ID);
+    harness.forge.pullRequests = [makePullRequest({ number: 52, headRefName: "next" })];
+    const failing = harness.makePoll({
+      onSnapshot: async () => {
+        throw new Error("merged lookup unavailable");
+      },
+    });
+    expect((await failing.runOnce(PROJECT_ID)).kind).toBe("changed");
+    expect(harness.changes).toHaveLength(1);
+    expect((await failing.runOnce(PROJECT_ID)).kind).toBe("unchanged");
+    expect(harness.changes).toHaveLength(1);
+    const observed: number[][] = [];
+    const restored = harness.makePoll({
+      onSnapshot: async (_id, _current, previous) => {
+        observed.push((previous?.entries ?? []).map((entry) => entry.number));
+      },
+    });
+    expect((await restored.runOnce(PROJECT_ID)).kind).toBe("unchanged");
+    expect(observed).toEqual([[41]]);
+    await restored.runOnce(PROJECT_ID);
+    expect(observed).toEqual([[41], [52]]);
+    expect(harness.changes).toHaveLength(1);
+  } finally {
+    rmSync(harness.root, { recursive: true, force: true });
+  }
 });

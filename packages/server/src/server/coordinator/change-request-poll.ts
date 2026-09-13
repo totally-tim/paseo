@@ -24,6 +24,7 @@ const ChangeRequestCheckSchema = z.object({
 });
 
 const ChangeRequestEntrySchema = z.object({
+  author: z.string().optional(),
   number: z.number(),
   title: z.string(),
   url: z.string(),
@@ -53,6 +54,9 @@ const PersistedPollStateSchema = z.object({
   version: z.literal(1),
   hash: z.string(),
   snapshot: ChangeRequestSnapshotSchema,
+  // Goal observation retries independently of the PR wake baseline. Null means
+  // no observation has succeeded yet; absent preserves older persisted baselines.
+  goalSnapshot: ChangeRequestSnapshotSchema.nullable().optional(),
 });
 
 export type ChangeRequestCheck = z.infer<typeof ChangeRequestCheckSchema>;
@@ -82,6 +86,11 @@ export interface ChangeRequestPollDeps {
   logger: Logger;
   /** Called once per changed snapshot — never on the baseline poll. */
   onChange: (projectId: string, change: ChangeRequestPollChange) => void | Promise<void>;
+  onSnapshot?: (
+    projectId: string,
+    snapshot: ChangeRequestSnapshot,
+    previous: ChangeRequestSnapshot | null,
+  ) => Promise<void>;
   intervalMs?: number;
   now?: () => number;
 }
@@ -110,6 +119,7 @@ function mergeStatusIntoEntry(
   carried: ChangeRequestEntry | null,
 ): ChangeRequestEntry {
   return {
+    author: pr.author,
     number: pr.number,
     title: pr.title,
     url: pr.url,
@@ -128,6 +138,7 @@ function normalizedEntries(snapshot: ChangeRequestSnapshot): ChangeRequestEntry[
   return snapshot.entries
     .map(
       (entry): ChangeRequestEntry => ({
+        ...(entry.author ? { author: entry.author } : {}),
         number: entry.number,
         title: entry.title,
         url: entry.url,
@@ -265,6 +276,7 @@ export class ChangeRequestPoll {
   private readonly resolveProjectRoot: ChangeRequestPollDeps["resolveProjectRoot"];
   private readonly workspaceGitService: ChangeRequestPollDeps["workspaceGitService"];
   private readonly logger: Logger;
+  private readonly onSnapshot: ChangeRequestPollDeps["onSnapshot"];
   private readonly onChange: ChangeRequestPollDeps["onChange"];
   private readonly intervalMs: number;
   private readonly now: () => number;
@@ -278,6 +290,7 @@ export class ChangeRequestPoll {
     this.workspaceGitService = deps.workspaceGitService;
     this.logger = deps.logger.child({ module: "coordinator", component: "cr-poll" });
     this.onChange = deps.onChange;
+    this.onSnapshot = deps.onSnapshot;
     this.intervalMs = deps.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.now = deps.now ?? Date.now;
     this.pollDir = path.join(deps.paseoHome, "coordinator", "poll");
@@ -371,6 +384,22 @@ export class ChangeRequestPoll {
         resolution,
         previous?.snapshot ?? null,
       );
+      let goalSnapshot =
+        previous?.goalSnapshot === undefined ? (previous?.snapshot ?? null) : previous.goalSnapshot;
+      try {
+        await this.onSnapshot?.(projectId, snapshot, goalSnapshot);
+        goalSnapshot = snapshot;
+      } catch (error) {
+        // Keep the failed observer checkpoint so vanished PRs can be retried,
+        // without withholding unrelated PR/CI wakes or their durable baseline.
+        this.logger.warn({ err: error, projectId }, "Goal snapshot observation failed; will retry");
+      }
+      const state = {
+        version: 1 as const,
+        hash: hashChangeRequestSnapshot(snapshot),
+        snapshot,
+        goalSnapshot,
+      };
       const hash = hashChangeRequestSnapshot(snapshot);
       const tracked = this.tracked.get(projectId);
       if (tracked) {
@@ -378,15 +407,22 @@ export class ChangeRequestPoll {
         tracked.failures = 0;
       }
       if (!previous) {
-        await this.savePersisted(projectId, { version: 1, hash, snapshot });
+        await this.savePersisted(projectId, state);
         return { kind: "baseline", snapshot };
       }
       if (previous.hash === hash) {
+        if (
+          previous.goalSnapshot == null || goalSnapshot == null
+            ? previous.goalSnapshot !== goalSnapshot
+            : hashChangeRequestSnapshot(previous.goalSnapshot) !==
+              hashChangeRequestSnapshot(goalSnapshot)
+        )
+          await this.savePersisted(projectId, state);
         return { kind: "unchanged", snapshot };
       }
       const diffSummary =
         diffChangeRequestSnapshots(previous.snapshot, snapshot) || "change-request state changed";
-      await this.savePersisted(projectId, { version: 1, hash, snapshot });
+      await this.savePersisted(projectId, state);
       await this.onChange(projectId, { snapshot, diffSummary });
       return { kind: "changed", snapshot, diffSummary };
     } catch (error) {

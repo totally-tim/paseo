@@ -22,6 +22,8 @@ export const ScheduleTargetSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("agent"),
     agentId: z.guid(),
+    // COMPAT(coordinatorGoals): added in v0.8.0, remove after 2027-03-13 once goal targets have a negotiated wire type.
+    goal: z.object({ projectId: z.string(), goalId: z.string() }).optional(),
   }),
   z.object({
     type: z.literal("new-agent"),

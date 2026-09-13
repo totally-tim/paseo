@@ -154,11 +154,13 @@ function CoordinatorBoardPanel() {
   const handlers = useMemo<CoordinatorBoardHandlers>(
     () => ({
       onOpenChat: openChat,
+      onOpenGoals: () => openTab({ kind: "coordinator_goals", projectId }),
+      onOpenPolicy: () => openTab({ kind: "coordinator_policy", projectId }),
       onOpenAgent: openAgent,
       onOpenFile: openFileInWorkspace,
       onComposerQuote: quoteQuestionInComposer,
     }),
-    [openAgent, openChat, openFileInWorkspace, quoteQuestionInComposer],
+    [openAgent, openChat, openFileInWorkspace, quoteQuestionInComposer, openTab, projectId],
   );
 
   const handleOpenWorkspaceAttachment = useCallback(

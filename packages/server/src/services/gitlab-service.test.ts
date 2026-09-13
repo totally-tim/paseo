@@ -1549,3 +1549,12 @@ describe("createGitLabService", () => {
     );
   });
 });
+
+it("preserves GitLab PR author usernames in list and get summaries", async () => {
+  const item = { ...OPEN_MR, author: { username: "alice", name: "Alice Display" } };
+  const { service } = makeService((args) => ok(JSON.stringify(args[1] === "list" ? [item] : item)));
+  expect((await service.listPullRequests({ cwd: "/repo" }))[0].author).toBe("alice");
+  expect((await service.getPullRequest({ cwd: "/repo", number: OPEN_MR.iid })).author).toBe(
+    "alice",
+  );
+});

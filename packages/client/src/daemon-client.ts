@@ -3067,6 +3067,108 @@ export class DaemonClient {
     return payload.coordinator;
   }
 
+  private requireCoordinatorAutomationSupport(): void {
+    if (this.lastServerInfoMessage?.features?.coordinatorAutomation !== true) {
+      throw new Error("Update this host to use coordinator goals, proposals, and policy.");
+    }
+  }
+
+  async listCoordinatorGoals(input: { projectId?: string } = {}) {
+    this.requireCoordinatorAutomationSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.goals.list.response">({
+        message: { type: "coordinator.goals.list.request", ...input },
+      });
+    if (payload.error || !payload.goals)
+      throw new Error(payload.error ?? "Coordinator operation returned no result");
+    return payload.goals;
+  }
+  async setCoordinatorGoalPaused(input: { projectId: string; goalId: string; paused: boolean }) {
+    this.requireCoordinatorAutomationSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.goal.pause.response">({
+        message: { type: "coordinator.goal.pause.request", ...input },
+      });
+    if (payload.error || !payload.goal)
+      throw new Error(payload.error ?? "Coordinator operation returned no result");
+    return payload.goal;
+  }
+  async listCoordinatorProposals(input: { projectId?: string } = {}) {
+    this.requireCoordinatorAutomationSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.proposals.list.response">({
+        message: { type: "coordinator.proposals.list.request", ...input },
+      });
+    if (payload.error || !payload.proposals)
+      throw new Error(payload.error ?? "Coordinator operation returned no result");
+    return payload.proposals;
+  }
+  async resolveCoordinatorProposal(input: { proposalId: string; action: "approve" | "ignore" }) {
+    this.requireCoordinatorAutomationSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.proposal.resolve.response">({
+        message: { type: "coordinator.proposal.resolve.request", ...input },
+      });
+    if (payload.error || !payload.proposal)
+      throw new Error(payload.error ?? "Coordinator operation returned no result");
+    return payload.proposal;
+  }
+  async listCoordinatorPolicy(input: { projectId?: string } = {}) {
+    this.requireCoordinatorAutomationSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.policy.list.response">({
+        message: { type: "coordinator.policy.list.request", ...input },
+      });
+    if (payload.error || !payload.rules)
+      throw new Error(payload.error ?? "Coordinator operation returned no result");
+    return payload.rules;
+  }
+  async setCoordinatorPolicyEnabled(input: { ruleId: string; enabled: boolean }) {
+    this.requireCoordinatorAutomationSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.policy.toggle.response">({
+        message: { type: "coordinator.policy.toggle.request", ...input },
+      });
+    if (payload.error || !payload.rule)
+      throw new Error(payload.error ?? "Coordinator operation returned no result");
+    return payload.rule;
+  }
+  async getCoordinatorPermissionPolicyPreview(input: { agentId: string; requestId: string }) {
+    this.requireCoordinatorAutomationSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.policy.preview.response">({
+        message: {
+          type: "coordinator.policy.preview.request",
+          agentId: input.agentId,
+          permissionRequestId: input.requestId,
+        },
+      });
+    if (payload.error || !payload.preview)
+      throw new Error(payload.error ?? "Coordinator operation returned no result");
+    return payload.preview;
+  }
+  async alwaysAllowCoordinatorPermission(input: {
+    agentId: string;
+    requestId: string;
+    scope: "daemon" | "project";
+    expectedPattern: string;
+  }) {
+    this.requireCoordinatorAutomationSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.policy.allow.response">({
+        message: {
+          type: "coordinator.policy.allow.request",
+          agentId: input.agentId,
+          permissionRequestId: input.requestId,
+          scope: input.scope,
+          expectedPattern: input.expectedPattern,
+        },
+      });
+    if (payload.error || !payload.rule)
+      throw new Error(payload.error ?? "Coordinator operation returned no result");
+    return payload.rule;
+  }
+
   async getCoordinatorMemory(target: CoordinatorMemoryTarget): Promise<CoordinatorMemorySnapshot> {
     this.requireCoordinatorSupport();
     const payload =

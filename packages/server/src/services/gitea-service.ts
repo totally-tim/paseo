@@ -147,6 +147,7 @@ export interface CreateGiteaServiceOptions {
  */
 const GiteaPrListItemSchema = z
   .object({
+    author: z.string().optional(),
     index: z.string(),
     state: z.string(),
     url: z.string(),
@@ -193,6 +194,7 @@ const GiteaUserSchema = z
 
 const GiteaPullRequestViewSchema = z
   .object({
+    author: z.string().optional(),
     index: z.number(),
     url: z.string(),
     headSha: z.string().optional(),
@@ -241,6 +243,7 @@ const GiteaPullRequestApiSchema = z
 
 const GiteaCurrentPullRequestApiSchema = z
   .object({
+    user: z.object({ login: z.string().optional() }).nullable().optional(),
     number: z.number(),
     html_url: z.string(),
     title: z.string(),
@@ -995,6 +998,7 @@ function currentPullRequestApiToListItem(item: GiteaCurrentPullRequestApi): Gite
   const head =
     headOwner && headOwner !== baseOwner ? `${headOwner}:${item.head.ref}` : item.head.ref;
   return {
+    ...(item.user?.login ? { author: item.user.login } : {}),
     index: String(item.number),
     state: item.merged ? "merged" : item.state,
     url: item.html_url,
@@ -1011,6 +1015,7 @@ function currentPullRequestApiToListItem(item: GiteaCurrentPullRequestApi): Gite
 function toPullRequestSummary(item: GiteaPrListItem): PullRequestSummary {
   const { owner, name } = parseGiteaRepoFromUrl(item.url);
   return {
+    ...(item.author ? { author: item.author } : {}),
     number: parseGiteaInt(item.index) ?? 0,
     title: item.title,
     url: item.url,
@@ -1027,6 +1032,7 @@ function toPullRequestSummary(item: GiteaPrListItem): PullRequestSummary {
 function viewToPullRequestSummary(view: GiteaPullRequestView): PullRequestSummary {
   const { owner, name } = parseGiteaRepoFromUrl(view.url);
   return {
+    ...(view.author ? { author: view.author } : {}),
     number: view.index,
     title: view.title,
     url: view.url,

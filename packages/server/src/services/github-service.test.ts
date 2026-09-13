@@ -4017,7 +4017,7 @@ describe("ForgeService", () => {
         "--search",
         "",
         "--json",
-        "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt",
+        "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt,author",
         "--limit",
         "20",
       ],
@@ -4091,7 +4091,7 @@ describe("ForgeService", () => {
           "--search",
           "cache",
           "--json",
-          "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt",
+          "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt,author",
           "--limit",
           "5",
         ],
@@ -4130,7 +4130,7 @@ describe("ForgeService", () => {
         "--search",
         "793",
         "--json",
-        "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt",
+        "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt,author",
         "--limit",
         "5",
       ],
@@ -4169,7 +4169,7 @@ describe("ForgeService", () => {
         "--search",
         "https://gitlab.com/getpaseo/paseo/issues/793",
         "--json",
-        "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt",
+        "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt,author",
         "--limit",
         "5",
       ],
@@ -4208,7 +4208,7 @@ describe("ForgeService", () => {
         "--search",
         "793",
         "--json",
-        "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt",
+        "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt,author",
         "--limit",
         "5",
       ],
@@ -4259,7 +4259,7 @@ describe("ForgeService", () => {
           "--search",
           "cache",
           "--json",
-          "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt",
+          "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt,author",
           "--limit",
           "5",
         ],
@@ -4780,4 +4780,33 @@ describe("ForgeService", () => {
     // No rerun or rerequest POSTs ran.
     expect(runner.calls).toHaveLength(4);
   });
+});
+
+it("preserves GitHub PR author logins in list and get summaries", async () => {
+  const item = {
+    number: 9,
+    title: "Author rule",
+    url: "https://github.com/o/r/pull/9",
+    state: "OPEN",
+    body: null,
+    baseRefName: "main",
+    headRefName: "feature",
+    labels: [],
+    updatedAt: "2026-09-13T10:00:00Z",
+    author: { login: "alice" },
+  };
+  const calls: string[][] = [];
+  const service = createGitHubService({
+    resolveGhPath: async () => "/fake/gh",
+    resolveRepoHost: async () => null,
+    runner: async (args) => {
+      calls.push(args);
+      return { stdout: JSON.stringify(args[1] === "list" ? [item] : item), stderr: "" };
+    },
+  });
+  expect((await service.listPullRequests({ cwd: "/repo" }))[0].author).toBe("alice");
+  expect((await service.getPullRequest({ cwd: "/repo", number: 9 })).author).toBe("alice");
+  expect(
+    calls.every((args) => args[args.indexOf("--json") + 1].split(",").includes("author")),
+  ).toBe(true);
 });

@@ -130,7 +130,9 @@ describe("coordinator decisions through the daemon", () => {
     now = new Date(2026, 8, 13, 8).getTime();
     await first.daemon.daemon.coordinatorService.tickDecisions();
     expect(digests()).toHaveLength(1);
-    expect(digests()[0].body).toBe("0 items need you (0 proposals); 0 sessions working.");
+    expect(digests()[0].body).toBe(
+      "0 items need you (0 proposals); 0 sessions working.\n0 goal runs fired in the last 24h; 0 goals need attention.",
+    );
     await first.cleanup();
     context = null;
     const restarted = await start();

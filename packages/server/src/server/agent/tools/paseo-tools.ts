@@ -1,4 +1,8 @@
 import {
+  CoordinatorProposalSchema,
+  CoordinatorProposalPayloadSchema,
+} from "@getpaseo/protocol/coordinator-goals";
+import {
   AccountSelectionSchema,
   ProviderAccountSchema,
   type AccountSelection,
@@ -171,6 +175,8 @@ export interface PaseoToolHostDependencies {
    */
   coordinator?: {
     remember(input: CoordinatorRememberInput): Promise<CoordinatorRememberResult>;
+    recordForgeArtifact?: import("../../coordinator/coordinator-service.js").CoordinatorService["recordForgeArtifact"];
+    proposeCoordinatorAutomation?: import("../../coordinator/coordinator-service.js").CoordinatorService["proposeCoordinatorAutomation"];
     raiseDecision?(input: CoordinatorDecisionInput): Promise<CoordinatorDecisionResult>;
     resolveDecisionResponseAgent?(agentId: string, requestId: string): Promise<string | null>;
     /**
@@ -3841,6 +3847,16 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     },
   );
 
+  const recordForgeArtifact = async (head: string, summary: string, artifactUrl: string) => {
+    if (!callerAgentId || !options.coordinator?.recordForgeArtifact) return;
+    // The external write already succeeded. A local receipt failure must not ask the model to repeat it.
+    await options.coordinator
+      .recordForgeArtifact({ callerAgentId, head, summary, artifactUrl })
+      .catch((error) =>
+        logger.warn({ error, artifactUrl }, "Failed to record coordinator forge artifact"),
+      );
+  };
+
   const changeRequestTargetShape = {
     cwd: z
       .string()
@@ -3927,6 +3943,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         head,
         base: base ?? (await requireDefaultBranch(repoCwd)),
       });
+      await recordForgeArtifact(head, `Opened change request #${result.number}`, result.url);
       return {
         content: [],
         structuredContent: ensureValidJson(result),
@@ -3955,7 +3972,19 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       if (callerAgentId) await options.coordinator?.assertForgeWriteAllowed(callerAgentId);
       await assertScopedCwdAllowed(repoCwd);
       const { service } = await requireForgeResolution(repoCwd);
+      const target =
+        callerAgentId && options.coordinator?.recordForgeArtifact
+          ? await service
+              .getPullRequestCheckoutTarget({ cwd: repoCwd, number: prNumber })
+              .catch(() => null)
+          : null;
       const result = await service.createPullRequestComment({ cwd: repoCwd, prNumber, body });
+      if (target && !target.isCrossRepository)
+        await recordForgeArtifact(
+          target.headRefName,
+          `Commented on change request #${prNumber}`,
+          result.url,
+        );
       return {
         content: [],
         structuredContent: ensureValidJson(result),
@@ -3988,6 +4017,34 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         content: [],
         structuredContent: ensureValidJson(result),
       };
+    },
+  );
+
+  registerTool(
+    "coordinator_propose",
+    {
+      title: "Propose coordinator automation",
+      description:
+        "Compile a requested goal or propose a goal/policy change from evidence. Nothing runs until the human approves the board row. Use cron, pr.opened, pr.ci_failed, pr.idle, pr.merged, agent.stalled; use heartbeat with intervalMinutes for judgment goals. YAML requires name, on, step:{profile,prompt}, guard:{max_concurrent}; cron requires cron expression, pr.idle requires filters.days. Project proposals stay in their project; global proposals freeze selected projectIds and are approved once. Never write permission policy directly. An ignored proposal is suppressed for 30 days. To edit an existing pending proposal, pass replacesProposalId so the replacement needs fresh approval.",
+      inputSchema: {
+        sentence: z.string().min(1).max(4000),
+        projectIds: z.array(z.string()).optional(),
+        evidence: z
+          .array(z.object({ title: z.string(), url: z.string().optional() }))
+          .max(50)
+          .optional(),
+        payload: CoordinatorProposalPayloadSchema,
+        replacesProposalId: z.string().optional(),
+      },
+      outputSchema: { proposal: CoordinatorProposalSchema.nullable() },
+    },
+    async (input) => {
+      if (!callerAgentId) throw new Error("Coordinator proposals require an agent caller");
+      const bridge = requireCoordinatorBridge();
+      if (!bridge.proposeCoordinatorAutomation)
+        throw new Error("Coordinator automation is unavailable");
+      const proposal = await bridge.proposeCoordinatorAutomation({ ...input, callerAgentId });
+      return { content: [], structuredContent: ensureValidJson({ proposal }) };
     },
   );
 

@@ -455,6 +455,22 @@ function GlobalBoardContent({
       location: "side",
     });
   }, [serverId, workspaceId, ownBoard.projectId, compact]);
+  const openAutomation = useCallback(
+    (kind: "coordinator_goals" | "coordinator_policy") => {
+      navigateToWorkspace({
+        serverId,
+        workspaceId,
+        target: { kind: "coordinator_board", projectId: ownBoard.projectId },
+      });
+      openWorkspaceTargetAtLocation({
+        workspaceKey: buildWorkspaceTabPersistenceKey({ serverId, workspaceId }),
+        target: { kind },
+        isCompact: compact,
+        location: "side",
+      });
+    },
+    [serverId, workspaceId, ownBoard.projectId, compact],
+  );
   const insets = useSafeAreaInsets();
   const draft = useAgentInputDraft({
     draftKey: buildGlobalCoordinatorDraftKey(serverId),
@@ -503,12 +519,14 @@ function GlobalBoardContent({
   const handlers = useMemo<CoordinatorBoardHandlers>(
     () => ({
       onOpenChat: openChat,
+      onOpenGoals: () => openAutomation("coordinator_goals"),
+      onOpenPolicy: () => openAutomation("coordinator_policy"),
       onOpenAgent: openAgent,
       onOpenFile: openFile,
       onComposerQuote: quote,
       onSetupProject: setupProject,
     }),
-    [openChat, openAgent, openFile, quote, setupProject],
+    [openChat, openAgent, openFile, quote, setupProject, openAutomation],
   );
   const agentTitle = useCallback(
     (targetId: string) => session?.agents.get(targetId)?.title ?? null,

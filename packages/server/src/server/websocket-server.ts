@@ -1839,7 +1839,7 @@ export class VoiceAssistantWebSocketServer {
         // COMPAT(scheduleList): added in v0.8.0, remove gate after 2027-03-11 once daemon floor >= v0.8.0.
         scheduleList: true,
         // COMPAT(coordinator): added in v0.8.0, remove gate after 2027-03-11 once daemon floor >= v0.8.0.
-        ...(this.coordinatorService ? { coordinator: true } : {}),
+        ...(this.coordinatorService ? { coordinator: true, coordinatorAutomation: true } : {}),
       },
     };
   }

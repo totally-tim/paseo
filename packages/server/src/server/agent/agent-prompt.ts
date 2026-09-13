@@ -59,7 +59,14 @@ type BackgroundRecovery = (
   recover: () => Promise<AgentRunIterator>,
 ) => Promise<AgentRunIterator | undefined>;
 
+/** Receives only the iterator owned by this dispatch, never another resident turn. */
+export interface AgentRunObserver {
+  onEvent(event: AgentStreamEvent): void;
+  onSettled(error?: unknown): void;
+}
+
 export interface StartAgentRunOptions {
+  runObserver?: AgentRunObserver;
   /** Recheck daemon-owned receiver eligibility when background recovery would reopen a session. */
   backgroundRecovery?: BackgroundRecovery;
   replaceRunning?: boolean;
@@ -126,10 +133,9 @@ function assertPromptOwnership(
 
 async function drainAgentRunIterator(
   iterator: AsyncGenerator<import("./agent-sdk-types.js").AgentStreamEvent>,
+  observer?: AgentRunObserver,
 ): Promise<void> {
-  for await (const _ of iterator) {
-    // Events are broadcast via AgentManager subscribers.
-  }
+  for await (const event of iterator) observer?.onEvent(event);
 }
 
 export async function startAgentRun(
@@ -196,10 +202,11 @@ async function startAgentRunInner(
     },
     "agent.session.start_stream.iterator_returned",
   );
+  const runObserver = options?.runObserver;
   void (async () => {
     try {
       try {
-        await drainAgentRunIterator(iterator);
+        await drainAgentRunIterator(iterator, runObserver);
       } catch (error) {
         if (!isStaleProviderSessionError(error)) throw error;
         logger.info(
@@ -214,7 +221,7 @@ async function startAgentRunInner(
         const retry = options?.backgroundRecovery
           ? await options.backgroundRecovery(recover)
           : await recover();
-        if (retry) await drainAgentRunIterator(retry);
+        if (retry) await drainAgentRunIterator(retry, runObserver);
       }
       logger.trace(
         {
@@ -224,6 +231,7 @@ async function startAgentRunInner(
         },
         "agent.session.iterator.drained",
       );
+      runObserver?.onSettled();
     } catch (error) {
       logger.trace(
         {
@@ -235,6 +243,7 @@ async function startAgentRunInner(
         "agent.session.iterator.error",
       );
       logger.error({ err: error, agentId }, "Agent stream failed");
+      runObserver?.onSettled(error);
     }
   })();
   return { disposition: "turn_started" };
@@ -307,6 +316,7 @@ export function isSystemInjectedEnvelope(text: string): boolean {
 }
 
 export interface SendPromptToAgentParams {
+  runObserver?: AgentRunObserver;
   backgroundRecovery?: BackgroundRecovery;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
@@ -399,6 +409,7 @@ export async function sendPromptToAgent(
   const record = await params.agentStorage.get(params.agentId);
   if (record?.archivedAt) {
     if (!unarchive) {
+      params.runObserver?.onSettled(new Error("Agent is archived"));
       return { disposition: "turn_started" };
     }
     await unarchiveAgentState(params.agentStorage, params.agentManager, params.agentId);
@@ -420,6 +431,7 @@ export async function sendPromptToAgent(
 
   return await startAgentRun(params.agentManager, params.agentId, params.prompt, params.logger, {
     backgroundRecovery: params.backgroundRecovery,
+    runObserver: params.runObserver,
     replaceRunning: params.replaceRunning ?? true,
     activeTurnBehavior: params.activeTurnBehavior,
     clearPendingPermissions: params.clearPendingPermissions,

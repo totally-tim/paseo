@@ -100,6 +100,11 @@ export interface CreateAgentFromMcpInput {
   provider: string;
   title: string;
   initialPrompt?: string;
+  /** Daemon-only hook; runs inside the governed spawn lock before the first turn. */
+  dispatchInitialPrompt?: (
+    snapshot: ManagedAgent,
+    dispatch: () => Promise<InitialPromptDispatch>,
+  ) => Promise<InitialPromptDispatch>;
   config?: Partial<AgentSessionConfig>;
   cwd?: string;
   workspaceId?: string;
@@ -233,7 +238,7 @@ export async function createAgentCommand(
         // creates all slide under the cap.
         const promptDispatch =
           gatedResolved.prompt !== undefined
-            ? await sendInitialPrompt(dependencies, gatedResolved, gatedSnapshot)
+            ? await dispatchInitialPrompt(dependencies, input, gatedResolved, gatedSnapshot)
             : undefined;
         return { resolved: gatedResolved, snapshot: gatedSnapshot, promptDispatch };
       },
@@ -288,7 +293,7 @@ async function finishCreatedAgent(
   const sendResult =
     promptDispatch ??
     (resolved.prompt !== undefined
-      ? await sendInitialPrompt(dependencies, resolved, snapshot)
+      ? await dispatchInitialPrompt(dependencies, input, resolved, snapshot)
       : undefined);
   if (sendResult) {
     initialPromptStarted = sendResult.started;
@@ -589,6 +594,18 @@ async function ensureWorkspaceForMcpCreate(
     return undefined;
   }
   return dependencies.ensureWorkspaceForCreate(cwd, { prompt: initialPrompt });
+}
+
+async function dispatchInitialPrompt(
+  dependencies: CreateAgentCommandDependencies,
+  input: CreateAgentCommandInput,
+  resolved: ResolvedCreateAgent,
+  snapshot: ManagedAgent,
+): Promise<InitialPromptDispatch> {
+  const dispatch = () => sendInitialPrompt(dependencies, resolved, snapshot);
+  return input.kind === "mcp" && input.dispatchInitialPrompt
+    ? input.dispatchInitialPrompt(snapshot, dispatch)
+    : dispatch();
 }
 
 async function sendInitialPrompt(

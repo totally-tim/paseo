@@ -143,6 +143,7 @@ const GitHubIssueSummarySchema = z.object({
 });
 
 const GitHubPullRequestSummarySchema = z.object({
+  author: z.object({ login: z.string().optional() }).nullable().optional(),
   number: z.number(),
   title: z.string().catch(""),
   url: z.string().catch(""),
@@ -2039,7 +2040,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
               "--search",
               input.query ?? "",
               "--json",
-              "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt",
+              "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt,author",
               "--limit",
               String(input.limit ?? 20),
             ],
@@ -2092,7 +2093,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
               "view",
               String(input.number),
               "--json",
-              "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt",
+              "number,title,url,state,body,labels,baseRefName,headRefName,updatedAt,author",
             ],
             { cwd: input.cwd },
             GitHubPullRequestSummarySchema,
@@ -3570,6 +3571,7 @@ function toPullRequestSummary(
   item: z.infer<typeof GitHubPullRequestSummarySchema>,
 ): PullRequestSummary {
   return {
+    ...(item.author?.login ? { author: item.author.login } : {}),
     number: item.number,
     title: item.title,
     url: item.url,

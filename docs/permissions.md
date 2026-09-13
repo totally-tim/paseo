@@ -17,17 +17,17 @@ A pairing invitation is neither. It is an expiring, single-use exchange that cre
 
 ## Permissions
 
-| Permission          | Authority                                                                  |
-| ------------------- | -------------------------------------------------------------------------- |
-| `daemon.read`       | Daemon status, diagnostics, configuration, and provider information        |
-| `daemon.manage`     | Restart, update, configuration changes, providers, skills, and plugins     |
-| `tunnel.manage`     | Relay, Hub, service tunnel, and public endpoint relationships              |
-| `access.manage`     | Pairing invitations, principals, credentials, grants, and revocation       |
-| `workspace.read`    | Projects, workspaces, agents, timelines, files, diffs, and terminal output |
-| `workspace.write`   | Prompts, agent control, files, terminals, git operations, and scripts      |
-| `workspace.manage`  | Create, rename, archive, and remove projects and workspaces                |
-| `automation.manage` | Schedules, heartbeats, and loops                                           |
-| `hub.execute`       | Agent lifecycle, agent/workspace observation, and workspace recovery       |
+| Permission          | Authority                                                                       |
+| ------------------- | ------------------------------------------------------------------------------- |
+| `daemon.read`       | Daemon status, diagnostics, configuration, and provider information             |
+| `daemon.manage`     | Restart, update, configuration changes, providers, skills, and plugins          |
+| `tunnel.manage`     | Relay, Hub, service tunnel, and public endpoint relationships                   |
+| `access.manage`     | Pairing invitations, principals, credentials, grants, and revocation            |
+| `workspace.read`    | Projects, workspaces, agents, timelines, files, diffs, and terminal output      |
+| `workspace.write`   | Prompts, agent control, files, terminals, git operations, and scripts           |
+| `workspace.manage`  | Create, rename, archive, and remove projects and workspaces                     |
+| `automation.manage` | Schedules, heartbeats, loops, coordinator goals, and automatic permission rules |
+| `hub.execute`       | Agent lifecycle, agent/workspace observation, and workspace recovery            |
 
 Agents and terminals use workspace authority. Both can execute code and mutate the workspace, so separate write permissions would claim an isolation boundary the daemon cannot enforce.
 

@@ -334,6 +334,8 @@ function getFallbackTabOptionLabel(
   if (tab.target.kind === "setup") {
     return labels.setup;
   }
+  if (tab.target.kind === "coordinator_goals") return "Goals";
+  if (tab.target.kind === "coordinator_policy") return "Policy";
   if (tab.target.kind === "coordinator_memory") return "Personal memory";
   if (tab.target.kind === "coordinator_board") {
     return labels.coordinator;
@@ -386,6 +388,8 @@ function getFallbackTabOptionDescription(
   if (tab.target.kind === "setup") {
     return labels.workspaceSetup;
   }
+  if (tab.target.kind === "coordinator_goals") return "Goals";
+  if (tab.target.kind === "coordinator_policy") return "Policy";
   if (tab.target.kind === "coordinator_memory") return "Personal memory";
   if (tab.target.kind === "coordinator_board") {
     return labels.coordinator;

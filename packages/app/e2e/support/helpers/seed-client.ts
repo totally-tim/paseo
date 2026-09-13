@@ -42,6 +42,7 @@ export interface SeedDaemonClient extends Pick<
   | "getCoordinatorMemory"
   | "updateCoordinatorMemory"
   | "observeCoordinatorBoard"
+  | "listCoordinatorGoals"
 > {
   connect(): Promise<void>;
   close(): Promise<void>;

@@ -151,6 +151,7 @@ const GitLabPipelineDetailsSchema = z
 
 const GitLabMergeRequestSchema = z
   .object({
+    author: z.object({ username: z.string().optional() }).nullable().optional(),
     iid: z.number(),
     title: z.string(),
     web_url: z.string(),
@@ -372,6 +373,7 @@ function splitProjectPath(fullReference: string | undefined): {
 function toPullRequestSummary(mr: GitLabMergeRequest): PullRequestSummary {
   const projectPath = extractProjectPath(mr.references?.full);
   return {
+    ...(mr.author?.username ? { author: mr.author.username } : {}),
     number: mr.iid,
     title: mr.title,
     url: mr.web_url,

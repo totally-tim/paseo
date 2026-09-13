@@ -3111,3 +3111,17 @@ describe("detectGiteaFamilySoftware", () => {
     expect(software).toBe("gitea");
   });
 });
+
+it("preserves Gitea PR author logins in list and get summaries", async () => {
+  const { service } = makeService((args) =>
+    ok(
+      JSON.stringify(
+        args[1] === "list"
+          ? [{ ...OPEN_PR, author: "alice" }]
+          : { ...OPEN_PR, index: 5, author: "alice", labels: [], mergeable: true },
+      ),
+    ),
+  );
+  expect((await service.listPullRequests({ cwd: "/repo" }))[0].author).toBe("alice");
+  expect((await service.getPullRequest({ cwd: "/repo", number: 5 })).author).toBe("alice");
+});

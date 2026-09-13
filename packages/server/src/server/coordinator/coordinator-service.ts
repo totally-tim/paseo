@@ -1,3 +1,13 @@
+import { CoordinatorAutomation, GoalExecutionDeferred } from "./automation.js";
+import { executeCoordinatorJudgment } from "./judgment-execution.js";
+import type { GoalRecord } from "./goals.js";
+import { executeCoordinatorGoal } from "./goal-execution.js";
+import { permissionPolicyPattern } from "./policy.js";
+import { parseGoalRule } from "./goals.js";
+import type { CoordinatorProposalInput } from "./proposals.js";
+import type { BoundCreateAgentCommand } from "../agent/create-agent/create.js";
+import type { ScheduleService } from "../schedule/service.js";
+import type { StoredSchedule } from "@getpaseo/protocol/schedule/types";
 import { decorateCoordinatorMemoryPrompt } from "./memory-prompt.js";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -76,6 +86,7 @@ import {
   hashChangeRequestSnapshot,
   type ChangeRequestPollChange,
   type ChangeRequestPollOutcome,
+  type ChangeRequestSnapshot,
 } from "./change-request-poll.js";
 import {
   CoordinatorStore,
@@ -600,6 +611,7 @@ export class CoordinatorService {
   private readonly decisions: CoordinatorDecisions;
   private readonly memory: CoordinatorMemory;
   private rotation: CoordinatorRotation | null = null;
+  private automation: CoordinatorAutomation | null = null;
   private readonly rotationTrigger = new CoordinatorRotationTrigger();
   private readonly pendingRotations = new Map<
     string,
@@ -793,7 +805,23 @@ export class CoordinatorService {
               ),
           ),
         );
-        const body = formatCoordinatorDigest(boards, snapshots, this.now());
+        const goals = (await this.automation?.goals.list()) ?? [];
+        const proposals = (await this.automation?.proposals.list()) ?? [];
+        const body = formatCoordinatorDigest(
+          boards,
+          snapshots,
+          this.now(),
+          this.automation
+            ? {
+                goalRuns: goals
+                  .flatMap((goal) => Object.values(goal.runs))
+                  .filter((run) => Date.parse(run.startedAt) >= this.now() - 86400000).length,
+                pendingProposals: proposals.filter((proposal) => proposal.status === "pending")
+                  .length,
+                goalsAttention: goals.filter((goal) => Boolean(goal.lastError)).length,
+              }
+            : undefined,
+        );
         return { agentId: global.agentId, title: "Coordinator daily digest", body };
       },
       sendDecision: deps.sendDecision,
@@ -918,6 +946,354 @@ export class CoordinatorService {
       onAttention: (record, error) => this.rotationAttention(record.sourceAgentId, error),
     });
     await this.rotation.initialize();
+  }
+
+  async initializeAutomation(deps: {
+    schedules: () => ScheduleService;
+    createAgent: BoundCreateAgentCommand;
+    cleanupNeverStartedWorkspace?: Parameters<
+      typeof executeCoordinatorGoal
+    >[0]["cleanupNeverStartedWorkspace"];
+    resolveProfile: (name: string) => CoordinatorProfileSelection | null;
+  }): Promise<void> {
+    this.automation = new CoordinatorAutomation({
+      paseoHome: this.paseoHome,
+      now: this.now,
+      schedules: deps.schedules,
+      getProject: (id) => this.getState(id),
+      listProjectIds: () => this.store.listProjectIds(),
+      canRunGoal: (goal) => this.canRunCoordinatorGoal(goal),
+      pauseGoal: (projectId, goalId) =>
+        this.withProjectLock(projectId, () =>
+          this.requireAutomation().goals.setPaused(projectId, goalId, true),
+        ),
+      executeGoal: async (goal, runId, event) => {
+        const state = await this.getState(goal.projectId);
+        if (!state?.enabled || !state.agentId)
+          throw new GoalExecutionDeferred("Coordinator is unavailable before goal dispatch");
+        const owner = await this.agentStorage.get(state.agentId);
+        if (!owner?.workspaceId)
+          throw new CoordinatorRequestError("Coordinator workspace is unavailable");
+        if (goal.kind === "judgment")
+          return executeCoordinatorJudgment({
+            goal,
+            runId,
+            agentId: owner.id,
+            agentManager: this.agentManager,
+            agentStorage: this.agentStorage,
+            logger: this.logger,
+            authorizeStart: (run) => this.withCoordinatorDelivery(goal.projectId, owner.id, run),
+            assertStart: async () => {
+              const current = await this.requireAutomation().goals.get(goal.projectId, goal.id);
+              if (!current || !(await this.canRunCoordinatorGoal(current)))
+                throw new GoalExecutionDeferred(
+                  "Judgment goal is paused or its coordinator is unavailable",
+                );
+            },
+          });
+        const role = parseGoalRule(goal.ruleYaml).step.profile;
+        const profile =
+          role === "investigator" || role === "reviewer" || role === "implementer"
+            ? await this.resolveSubagentProfile({ callerAgentId: owner.id, kind: role })
+            : deps.resolveProfile(role);
+        if (!profile) throw new CoordinatorRequestError(`Goal profile ${role} is not configured`);
+        return executeCoordinatorGoal({
+          goal,
+          runId,
+          event,
+          profile,
+          createAgent: deps.createAgent,
+          cleanupNeverStartedWorkspace: deps.cleanupNeverStartedWorkspace,
+          owner: { agentId: owner.id, cwd: owner.cwd, workspaceId: owner.workspaceId },
+          agentManager: this.agentManager,
+          agentStorage: this.agentStorage,
+          logger: this.logger,
+          authorizeStart: (run) => this.withCoordinatorDelivery(goal.projectId, owner.id, run),
+          assertStart: async () => {
+            const currentGoal = await this.requireAutomation().goals.get(goal.projectId, goal.id);
+            if (!currentGoal || currentGoal.paused)
+              throw new GoalExecutionDeferred("Goal was paused before dispatch");
+            const currentOwner = await this.getState(goal.projectId);
+            if (
+              this.stopped ||
+              !currentOwner?.enabled ||
+              currentOwner.agentId !== owner.id ||
+              this.isRotatingAgentTarget(owner.id)
+            )
+              throw new GoalExecutionDeferred("Coordinator ownership changed before goal dispatch");
+            await this.assertSpawnAllowed({
+              parentAgentId: owner.id,
+              subagentKind: role === "reviewer" || role === "investigator" ? role : "implementer",
+            });
+          },
+        });
+      },
+      appendDone: (goal, runId, result) =>
+        this.appendDoneRow(
+          goal.projectId,
+          `Goal ${goal.sentence}: ${result.output}`,
+          { agentId: result.agentId, ...(result.artifactUrl ? { url: result.artifactUrl } : {}) },
+          `goal:${goal.id}:run:${runId}`,
+          true,
+        ),
+    });
+    await this.automation.initialize();
+  }
+
+  private async canRunCoordinatorGoal(goal: GoalRecord): Promise<boolean> {
+    if (goal.kind !== "judgment") return true;
+    const state = await this.getState(goal.projectId);
+    if (this.stopped || goal.paused || !state?.enabled || !state.agentId) return false;
+    const agent = this.agentManager.getAgent(state.agentId);
+    return Boolean(
+      agent &&
+      agent.lifecycle === "idle" &&
+      !agent.pendingPermissions.size &&
+      !this.agentManager.hasInFlightRun(agent.id) &&
+      !this.isRotatingAgentTarget(agent.id),
+    );
+  }
+
+  /** Forge receipts are attributed only to a unique delegated worker on the exact local branch. */
+  async recordForgeArtifact(input: {
+    callerAgentId: string;
+    head: string;
+    summary: string;
+    artifactUrl: string;
+  }): Promise<void> {
+    if (!this.automation) return;
+    const caller = await this.agentStorage.get(input.callerAgentId);
+    if (!caller?.workspaceId) return;
+    const ownerWorkspace = await this.workspaceRegistry.get(caller.workspaceId);
+    if (!ownerWorkspace) return;
+    const state = await this.getState(ownerWorkspace.projectId);
+    if (!state?.enabled || state.agentId !== caller.id) return;
+    const workspaces = (await this.workspaceRegistry.list()).filter(
+      (workspace) =>
+        workspace.projectId === ownerWorkspace.projectId &&
+        workspace.workspaceId !== caller.workspaceId &&
+        workspace.branch === input.head &&
+        !workspace.archivedAt,
+    );
+    if (workspaces.length !== 1) return;
+    const workers = (await this.agentStorage.list()).filter(
+      (worker) =>
+        worker.workspaceId === workspaces[0]!.workspaceId &&
+        getParentAgentIdFromLabels(worker.labels) === caller.id &&
+        getCoordinatorSubagentKind(worker.labels) !== "reviewer",
+    );
+    if (workers.length !== 1) return;
+    await this.automation.recordArtifact({
+      projectId: ownerWorkspace.projectId,
+      workerAgentId: workers[0]!.id,
+      summary: input.summary,
+      artifactUrl: input.artifactUrl,
+    });
+  }
+
+  private requireAutomation(): CoordinatorAutomation {
+    if (!this.automation)
+      throw new CoordinatorRequestError("Coordinator automation is unavailable");
+    return this.automation;
+  }
+  runGoalSchedule(schedule: StoredSchedule, runId: string) {
+    return this.requireAutomation().runGoal(schedule, runId);
+  }
+  async listCoordinatorGoals(projectId?: string) {
+    if (projectId) await this.assertVisibleProject(projectId);
+    return this.requireAutomation().goals.list(projectId);
+  }
+  async setCoordinatorGoalPaused(projectId: string, goalId: string, paused: boolean) {
+    return this.withProjectLock(projectId, async () => {
+      await this.assertVisibleProject(projectId);
+      if (!paused && !(await this.getState(projectId))?.enabled)
+        throw new CoordinatorRequestError(
+          "Enable the project coordinator before resuming its goal",
+        );
+      await this.requireAutomation().goals.setPaused(projectId, goalId, paused);
+      return this.requireAutomation().goals.get(projectId, goalId);
+    });
+  }
+  async listCoordinatorProposals(projectId?: string) {
+    if (projectId) await this.assertVisibleProject(projectId);
+    return this.requireAutomation().proposals.list(projectId);
+  }
+  async resolveCoordinatorProposal(proposalId: string, action: "approve" | "ignore") {
+    const proposals = this.requireAutomation().proposals;
+    const proposal = (await proposals.list()).find((entry) => entry.id === proposalId);
+    if (!proposal) throw new CoordinatorRequestError("Proposal not found");
+    for (const projectId of proposal.projectIds) await this.assertVisibleProject(projectId);
+    if (action === "approve") {
+      if (proposal.payload.kind === "pause_goal") {
+        const projectId = proposal.projectIds[0];
+        if (!projectId || proposal.projectIds.length !== 1)
+          throw new CoordinatorRequestError("A pause proposal must name one project");
+        await proposals.approve(proposalId);
+      } else await proposals.approve(proposalId);
+    } else await proposals.ignore(proposalId);
+    return (await proposals.list()).find((entry) => entry.id === proposalId) ?? null;
+  }
+  async proposeCoordinatorAutomation(
+    input: Omit<CoordinatorProposalInput, "sourceAgentId" | "projectIds"> & {
+      callerAgentId: string;
+      projectIds?: string[];
+      replacesProposalId?: string;
+    },
+  ) {
+    const owner = await this.rotationOwner(input.callerAgentId);
+    if (!owner?.state.enabled || owner.state.agentId !== input.callerAgentId)
+      throw new CoordinatorRequestError("Only an enabled coordinator may propose automation");
+    const projects = owner.global
+      ? (input.projectIds ?? (await this.store.listProjectIds()))
+      : [owner.projectId];
+    if (!owner.global && input.projectIds?.some((id) => id !== owner.projectId))
+      throw new CoordinatorRequestError("Project proposals cannot target another project");
+    for (const projectId of projects) {
+      await this.assertVisibleProject(projectId);
+      if (!(await this.getState(projectId))?.enabled)
+        throw new CoordinatorRequestError("Proposal targets a disabled coordinator");
+    }
+    if (input.replacesProposalId) {
+      const original = (await this.requireAutomation().proposals.list()).find(
+        (entry) => entry.id === input.replacesProposalId,
+      );
+      if (!original || (!owner.global && original.projectIds.some((id) => id !== owner.projectId)))
+        throw new CoordinatorRequestError("Proposal is outside this coordinator's scope");
+      for (const projectId of original.projectIds) await this.assertVisibleProject(projectId);
+    }
+    const proposal = {
+      sourceAgentId: input.callerAgentId,
+      projectIds: projects,
+      sentence: input.sentence,
+      evidence: input.evidence,
+      payload: input.payload,
+    };
+    return input.replacesProposalId
+      ? this.requireAutomation().proposals.edit(input.replacesProposalId, proposal)
+      : this.requireAutomation().proposals.propose(proposal);
+  }
+  async listCoordinatorPolicy(projectId?: string) {
+    if (projectId) await this.assertVisibleProject(projectId);
+    return (await this.requireAutomation().policy.list()).filter(
+      (rule) => !projectId || rule.scope === "daemon" || rule.scope === projectId,
+    );
+  }
+  async setCoordinatorPolicyEnabled(ruleId: string, enabled: boolean) {
+    await this.withGlobalLock(() => this.requireAutomation().policy.setEnabled(ruleId, enabled));
+    return (
+      (await this.requireAutomation().policy.list()).find((rule) => rule.id === ruleId) ?? null
+    );
+  }
+  private async assertPolicyCoverage(
+    agentId: string,
+    state: PersistedProjectCoordinator,
+    automatic: boolean,
+  ): Promise<void> {
+    if (automatic && state.trustLevel !== "ship" && state.trustLevel !== "autopilot")
+      throw new CoordinatorRequestError("Automatic permission policy requires Ship trust");
+    const governing = await this.governingCoordinator(agentId);
+    const ownChild = governing?.node.agentId === state.agentId && governing.depth > 0;
+    const ownSession = !governing && state.scope === "everything";
+    if (!ownChild && !ownSession)
+      throw new CoordinatorRequestError("Permission is outside coordinator coverage");
+  }
+
+  private async policySubject(agentId: string, requestId: string, automatic = false) {
+    const agent = this.agentManager.getAgent(agentId);
+    const request = agent?.pendingPermissions.get(requestId);
+    if (!agent || !request || isCoordinatorAgent(agent))
+      throw new CoordinatorRequestError("Permission is no longer available");
+    const projectId = await this.projectIdForAgent(agent);
+    const state = projectId ? await this.getState(projectId) : null;
+    if (!projectId || !state?.enabled || !state.agentId)
+      throw new CoordinatorRequestError("Permission is outside coordinator coverage");
+    await this.assertPolicyCoverage(agentId, state, automatic);
+    const pattern = permissionPolicyPattern(request);
+    const response = stalledPermissionActions(request).find(
+      (action) => action.id === "allow",
+    )?.response;
+    if (!pattern || !response)
+      throw new CoordinatorRequestError("This permission needs a one-time response in the app");
+    return { agent, request, projectId, state, pattern, response };
+  }
+  async getCoordinatorPermissionPolicyPreview(agentId: string, requestId: string) {
+    const subject = await this.policySubject(agentId, requestId);
+    return { pattern: subject.pattern, projectId: subject.projectId };
+  }
+  async alwaysAllowCoordinatorPermission(input: {
+    agentId: string;
+    requestId: string;
+    scope: "daemon" | "project";
+    expectedPattern: string;
+  }) {
+    const before = await this.policySubject(input.agentId, input.requestId);
+    const rule = await this.withCoordinatorDelivery(
+      before.projectId,
+      before.state.agentId!,
+      async () => {
+        const current = await this.policySubject(input.agentId, input.requestId);
+        if (current.pattern !== input.expectedPattern)
+          throw new CoordinatorRequestError("The permission changed; review its rule again");
+        const saved = await this.requireAutomation().policy.addApproved({
+          scope: input.scope === "daemon" ? "daemon" : current.projectId,
+          pattern: current.pattern,
+        });
+        await this.agentManager.respondToPermission(
+          input.agentId,
+          input.requestId,
+          current.response,
+        );
+        await this.recordPolicyFire(
+          saved.id,
+          current.projectId,
+          input.agentId,
+          input.requestId,
+          saved.pattern,
+        );
+        return saved;
+      },
+    );
+    if (!rule) throw new CoordinatorRequestError("Coordinator is disabled");
+    return (
+      (await this.requireAutomation().policy.list()).find((entry) => entry.id === rule.id) ?? rule
+    );
+  }
+  private async recordPolicyFire(
+    ruleId: string,
+    projectId: string,
+    agentId: string,
+    requestId: string,
+    pattern: string,
+  ) {
+    await this.requireAutomation().policy.recordFire(ruleId, `${agentId}:${requestId}`);
+    await this.appendDoneRow(
+      projectId,
+      `Policy allowed ${pattern}`,
+      { agentId },
+      `policy:${agentId}:${requestId}`,
+    );
+  }
+  private async applyPermissionPolicy(agentId: string, requestId: string): Promise<boolean> {
+    if (!this.automation) return false;
+    try {
+      const before = await this.policySubject(agentId, requestId, true);
+      return (
+        (await this.withCoordinatorDelivery(before.projectId, before.state.agentId!, async () => {
+          const subject = await this.policySubject(agentId, requestId, true);
+          const rule = await this.requireAutomation().policy.match(
+            subject.projectId,
+            subject.request,
+          );
+          if (!rule) return false;
+          await this.agentManager.respondToPermission(agentId, requestId, subject.response);
+          await this.recordPolicyFire(rule.id, subject.projectId, agentId, requestId, rule.pattern);
+          return true;
+        })) ?? false
+      );
+    } catch (error) {
+      this.logger.debug({ err: error, agentId, requestId }, "Permission policy did not answer");
+      return false;
+    }
   }
 
   isRotatingAgentTarget(agentId: string): boolean {
@@ -1156,6 +1532,7 @@ export class CoordinatorService {
   /** Driven by the daemon schedule tick, also available to the isolated daemon harness. */
   async tickDecisions(): Promise<void> {
     if (this.started && !this.stopped) {
+      await this.automation?.tick();
       await this.decisions.tick();
       await this.sweepStalledSessions();
       await this.flushRotations();
@@ -1280,7 +1657,12 @@ export class CoordinatorService {
   async enableProjectCoordinator(
     input: EnableProjectCoordinatorInput,
   ): Promise<ProjectCoordinatorState> {
-    return this.withGlobalLock(() => this.enableProjectCoordinatorAtCurrentDefault(input));
+    const state = await this.withGlobalLock(() =>
+      this.enableProjectCoordinatorAtCurrentDefault(input),
+    );
+    // Proposal recovery may acquire delivery locks; reconcile after releasing them.
+    await this.automation?.reconcile(false);
+    return state;
   }
 
   private async enableProjectCoordinatorAtCurrentDefault(
@@ -1418,6 +1800,7 @@ export class CoordinatorService {
         this.wakeFlushTimers.delete(projectId);
       }
       if (next.agentId) {
+        await this.automation?.pauseProject(projectId);
         await this.agentManager.continuations?.cancelExisting(next.agentId);
         this.pendingRotations.delete(next.agentId);
         // Pause the session but keep transcript and memory on disk; re-enable
@@ -2305,7 +2688,8 @@ export class CoordinatorService {
         const actions = boardDecisionActions(
           request,
           questions,
-          !isCoordinatorAgent(agent) && now - Date.parse(askedAt) >= this.stallThresholdMs,
+          !isCoordinatorAgent(agent) &&
+            (request.kind === "tool" || now - Date.parse(askedAt) >= this.stallThresholdMs),
         );
         needsYou.push({
           ...projectSetupRowFields(request),
@@ -3184,6 +3568,7 @@ export class CoordinatorService {
         ? 0
         : this.stallThresholdMs;
       for (const request of agent.pendingPermissions.values()) {
+        if (await this.applyPermissionPolicy(agent.id, request.id)) continue;
         const askedAt = request.requestedAt ?? agent.permissionRequestedAt.get(request.id);
         const askedMs = askedAt ? Date.parse(askedAt) : Number.NaN;
         if (!Number.isFinite(askedMs) || nowMs - askedMs < notificationThreshold) continue;
@@ -3205,6 +3590,13 @@ export class CoordinatorService {
         if (nowMs - askedMs < this.stallThresholdMs) continue;
         if (this.stalledWakeKeys.has(key)) continue;
         this.stalledWakeKeys.add(key);
+        await this.automation?.emitEvent({
+          id: key,
+          projectId,
+          trigger: "agent.stalled",
+          occurredAt: new Date(nowMs).toISOString(),
+          context: { agentId: agent.id, requestId: request.id, waitedMinutes: waitedMin },
+        });
         await this.wakeProjectCoordinator(projectId, {
           key,
           reason: `Stalled session: ${goal} has waited on a permission for ${waitedMin}m`,
@@ -3238,6 +3630,8 @@ export class CoordinatorService {
       paseoHome: this.paseoHome,
       logger: this.logger,
       onChange: (projectId, change) => this.onChangeRequestDiff(projectId, change),
+      onSnapshot: (projectId, snapshot, previous) =>
+        this.observeGoalSnapshot(projectId, snapshot, previous),
       ...(this.changeRequestPollIntervalMs !== undefined
         ? { intervalMs: this.changeRequestPollIntervalMs }
         : {}),
@@ -3249,6 +3643,104 @@ export class CoordinatorService {
     for (const projectId of projectIds) {
       const state = await this.getState(projectId);
       if (state?.enabled) poll.trackProject(projectId);
+    }
+  }
+
+  private async observeGoalSnapshot(
+    projectId: string,
+    snapshot: ChangeRequestSnapshot,
+    previous: ChangeRequestSnapshot | null,
+  ): Promise<void> {
+    if (!this.automation) return;
+    const failures: unknown[] = [];
+    const earlier = new Map((previous?.entries ?? []).map((entry) => [entry.number, entry]));
+    for (const entry of snapshot.entries) {
+      try {
+        const context = { change_request: entry, forge: snapshot.forge };
+        const base = {
+          projectId,
+          occurredAt: snapshot.fetchedAt,
+          lastActivityAt: entry.updatedAt,
+          author: entry.author,
+          context,
+        };
+        if (previous && !previous.truncated && !earlier.has(entry.number))
+          await this.automation.emitEvent({
+            ...base,
+            id: `pr:${entry.number}:opened`,
+            trigger: "pr.opened",
+          });
+        if (
+          entry.checksStatus === "failing" ||
+          entry.checksStatus === "failed" ||
+          entry.checks.some((check) => /failure|failed|error|timed_out/i.test(check.status))
+        )
+          await this.automation.emitEvent({
+            ...base,
+            id: `pr:${entry.number}:ci:${entry.updatedAt}:${JSON.stringify(entry.checks)}`,
+            trigger: "pr.ci_failed",
+          });
+        await this.automation.emitEvent({
+          ...base,
+          id: `pr:${entry.number}:idle:${entry.updatedAt}`,
+          trigger: "pr.idle",
+        });
+      } catch (error) {
+        failures.push(error);
+        this.logger.warn(
+          { err: error, projectId, prNumber: entry.number },
+          "Goal PR event observation failed",
+        );
+      }
+    }
+    const finish = () => {
+      if (failures.length)
+        throw new AggregateError(failures, "Some goal PR events could not be observed");
+    };
+    if (previous && !snapshot.truncated) {
+      await this.observeMergedGoalSnapshot(projectId, snapshot, previous, failures);
+    }
+    finish();
+  }
+
+  private async observeMergedGoalSnapshot(
+    projectId: string,
+    snapshot: ChangeRequestSnapshot,
+    previous: ChangeRequestSnapshot,
+    failures: unknown[],
+  ): Promise<void> {
+    if (!this.automation) return;
+    const missing = previous.entries.filter(
+      (entry) => !snapshot.entries.some((current) => current.number === entry.number),
+    );
+    if (!missing.length || !this.workspaceGitService) return;
+    const project = await this.projectRegistry.get(projectId);
+    if (!project) return;
+    const resolution = await this.workspaceGitService.resolveForge(project.rootPath);
+    if (!resolution) return;
+    for (const entry of missing) {
+      try {
+        const status = await resolution.service.getPullRequest({
+          cwd: project.rootPath,
+          number: entry.number,
+          reason: "coordinator-goal-merged",
+        });
+        if (status.state.toLowerCase() !== "merged") continue;
+        await this.automation.emitEvent({
+          projectId,
+          occurredAt: snapshot.fetchedAt,
+          trigger: "pr.merged",
+          id: `pr:${entry.number}:merged`,
+          author: status.author,
+          context: { change_request: status, forge: snapshot.forge },
+        });
+      } catch (error) {
+        failures.push(error);
+        this.logger.warn(
+          { err: error, projectId, prNumber: entry.number },
+          "Goal merged-PR observation failed",
+        );
+      }
     }
   }
 
@@ -3592,13 +4084,15 @@ export class CoordinatorService {
     text: string,
     link?: { url?: string; agentId?: string; filePath?: string },
     deterministicId?: string,
+    replaceExisting = false,
   ): Promise<void> {
     // Serialized per project: concurrent appends each read-modify-write the
     // persisted done list, so without the lock the last write wins.
     await this.withBoardLock(projectId, async () => {
       const board = await this.getBoard(projectId);
       const id = deterministicId ?? `done:${randomUUID()}`;
-      if (board.done.some((row) => row.id === id)) return;
+      const existing = board.done.find((row) => row.id === id);
+      if (existing && !replaceExisting) return;
       const row = {
         kind: "done" as const,
         id,
@@ -3607,7 +4101,9 @@ export class CoordinatorService {
         at: new Date().toISOString(),
         ...(link ? { link } : {}),
       };
-      const done = [row, ...this.pruneDoneRows(board.done)];
+      const done = existing
+        ? board.done.map((entry) => (entry.id === id ? { ...row, at: entry.at } : entry))
+        : [row, ...this.pruneDoneRows(board.done)];
       await this.saveBoard(projectId, { ...board, done });
     });
     this.queueBoardRefresh(projectId);

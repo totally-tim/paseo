@@ -1,3 +1,5 @@
+import { CoordinatorProposals } from "../automation/proposals";
+import { PermissionPolicySheet } from "../automation/permission-policy-sheet";
 import { Children, memo, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Pressable, Text, View, type PressableStateCallbackType } from "react-native";
 import { useTranslation } from "react-i18next";
@@ -43,6 +45,8 @@ const RESPOND_TIMEOUT_MS = 15_000;
 export interface CoordinatorBoardHandlers {
   /** Opens the coordinator session's ordinary agent tab. */
   onOpenChat: () => void;
+  onOpenGoals?: () => void;
+  onOpenPolicy?: () => void;
   onSetupProject?: (row: CoordinatorDecisionBoardRow, action: BoardAction) => void;
   /** Opens an agent tab for a working/done row's session. */
   onOpenAgent: (agentId: string) => void;
@@ -386,6 +390,10 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
 }) {
   const { t } = useTranslation();
   const now = useNow();
+  const [policyRequest, setPolicyRequest] = useState<{ agentId: string; requestId: string } | null>(
+    null,
+  );
+  const closePolicy = useCallback(() => setPolicyRequest(null), []);
   const [doneExpanded, setDoneExpanded] = useState(false);
   const [peekRowId, setPeekRowId] = useState<string | null>(null);
   const [decisionStates, setDecisionStates] = useState<Record<string, DecisionResponseState>>({});
@@ -403,7 +411,11 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
         handlers.onSetupProject(row, action);
         return;
       }
-      if (!client && action.operation !== "policy") {
+      if (action.operation === "policy") {
+        setPolicyRequest({ agentId: row.agentId, requestId: row.requestId });
+        return;
+      }
+      if (!client) {
         setDecisionStates((current) => ({
           ...current,
           [rowId]: { pendingActionId: null, error: t("workspace.terminal.hostDisconnected") },
@@ -541,6 +553,7 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
       </View>
 
       {headerContent}
+      <AutomationLinks handlers={handlers} />
       {compact ? (
         <CompactBoardScroll
           hasDecisions={hasDecisions}
@@ -548,6 +561,13 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
           onToggleDone={toggleDoneExpanded}
         >
           {needsYouSection}
+          <CoordinatorProposals
+            key={`${board.tier}:${board.projectId}`}
+            client={client}
+            projectId={board.tier === "global" ? undefined : board.projectId}
+            onEdit={handlers.onComposerQuote}
+            projectNameForId={projectNameForId}
+          />
           {workingSection}
           {doneSection}
         </CompactBoardScroll>
@@ -559,6 +579,13 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
               style={styles.boardColumn}
               contentContainerStyle={styles.boardColumnContent}
             >
+              <CoordinatorProposals
+                key={`${board.tier}:${board.projectId}`}
+                client={client}
+                projectId={board.tier === "global" ? undefined : board.projectId}
+                onEdit={handlers.onComposerQuote}
+                projectNameForId={projectNameForId}
+              />
               {workingSection}
             </ScrollView>
             <ScrollView
@@ -580,6 +607,7 @@ export const CoordinatorBoard = memo(function CoordinatorBoard({
       ) : null}
       {children}
 
+      <BoardPolicySheet request={policyRequest} client={client} onClose={closePolicy} />
       <DecisionPeekSheet
         row={peekRow}
         agentTitle={peekRow ? agentTitleForId(peekRow.agentId) : null}
@@ -712,3 +740,40 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.fontSize.base,
   },
 }));
+
+function AutomationLinks({ handlers }: { handlers: CoordinatorBoardHandlers }) {
+  return (
+    <View style={styles.headerRow}>
+      {handlers.onOpenGoals ? (
+        <Button size="sm" variant="ghost" onPress={handlers.onOpenGoals}>
+          Goals
+        </Button>
+      ) : null}
+      {handlers.onOpenPolicy ? (
+        <Button size="sm" variant="ghost" onPress={handlers.onOpenPolicy}>
+          Policy
+        </Button>
+      ) : null}
+    </View>
+  );
+}
+
+function BoardPolicySheet({
+  request,
+  client,
+  onClose,
+}: {
+  request: { agentId: string; requestId: string } | null;
+  client: DaemonClient | null;
+  onClose: () => void;
+}) {
+  if (!request) return null;
+  return (
+    <PermissionPolicySheet
+      key={`${request.agentId}:${request.requestId}`}
+      {...request}
+      client={client}
+      onClose={onClose}
+    />
+  );
+}

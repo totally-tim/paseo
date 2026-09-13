@@ -41,6 +41,7 @@ export function normalizeWorkspaceTabTarget(
   if (value.kind === "plugin") {
     return normalizePluginTabTarget(value);
   }
+  if (value.kind.startsWith("coordinator_")) return normalizeCoordinatorTarget(value);
   return normalizeSimpleWorkspaceTabTarget(value);
 }
 
@@ -65,13 +66,6 @@ function normalizeSimpleWorkspaceTabTarget(value: WorkspaceTabTarget): Workspace
     case "setup": {
       const workspaceId = trimNonEmpty(value.workspaceId);
       return workspaceId ? { kind: "setup", workspaceId } : null;
-    }
-    case "coordinator_memory": {
-      if (value.scope === "personal") return { kind: "coordinator_memory", scope: "personal" };
-      const projectId = value.scope === "personal-project" ? trimNonEmpty(value.projectId) : null;
-      return projectId
-        ? { kind: "coordinator_memory", scope: "personal-project", projectId }
-        : null;
     }
     case "coordinator_board": {
       const projectId = trimNonEmpty(value.projectId);
@@ -143,7 +137,7 @@ export function workspaceTabTargetsEqual(
         (right.context === "agent" && left.agentId === right.agentId))
     );
   }
-  if (left.kind === "coordinator_memory") return equal(left, right);
+  if (left.kind.startsWith("coordinator_")) return equal(left, right);
   return secondaryWorkspaceTabTargetsEqual(left, right);
 }
 
@@ -241,6 +235,7 @@ export function buildDeterministicWorkspaceTabId(target: WorkspaceTabTarget): st
   if (target.kind === "commit_diff") {
     return `commit_diff_${target.sha}`;
   }
+  if (isAutomationTarget(target)) return `${target.kind}_${target.projectId ?? "daemon"}`;
   if (target.kind === "coordinator_memory") {
     return target.scope === "personal"
       ? "coordinator_memory_personal"
@@ -316,4 +311,27 @@ function trimOptionalString(value: string | null | undefined): string | null {
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeCoordinatorTarget(value: WorkspaceTabTarget): WorkspaceTabTarget | null {
+  if (value.kind === "coordinator_board") {
+    const projectId = trimNonEmpty(value.projectId);
+    return projectId ? { kind: value.kind, projectId } : null;
+  }
+  if (value.kind === "coordinator_memory") {
+    if (value.scope === "personal") return { kind: value.kind, scope: "personal" };
+    const projectId = trimNonEmpty(value.projectId);
+    return projectId ? { kind: value.kind, scope: "personal-project", projectId } : null;
+  }
+  if (value.kind === "coordinator_goals" || value.kind === "coordinator_policy") {
+    const projectId = trimNonEmpty(value.projectId);
+    return projectId ? { kind: value.kind, projectId } : { kind: value.kind };
+  }
+  return null;
+}
+
+function isAutomationTarget(
+  target: WorkspaceTabTarget,
+): target is Extract<WorkspaceTabTarget, { kind: "coordinator_goals" | "coordinator_policy" }> {
+  return target.kind === "coordinator_goals" || target.kind === "coordinator_policy";
 }

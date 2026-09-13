@@ -70,6 +70,7 @@ const OBSERVE_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   "read_agent_handoff",
   "remember",
   "coordinator_decision",
+  "coordinator_propose",
 ]);
 
 /**

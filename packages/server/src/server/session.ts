@@ -1,3 +1,4 @@
+import type { CoordinatorAutomationResult } from "@getpaseo/protocol/messages";
 import type { CoordinatorMemorySnapshot } from "@getpaseo/protocol/messages";
 import type { SidebarOrderStore } from "./sidebar-order-store.js";
 import { handleContinuationRequest } from "./agent-continuation/session.js";
@@ -3183,6 +3184,101 @@ export class Session {
     );
   }
 
+  private async handleCoordinatorAutomation(
+    msg: Extract<
+      SessionInboundMessage,
+      {
+        type:
+          | "coordinator.goals.list.request"
+          | "coordinator.goal.pause.request"
+          | "coordinator.proposals.list.request"
+          | "coordinator.proposal.resolve.request"
+          | "coordinator.policy.list.request"
+          | "coordinator.policy.toggle.request"
+          | "coordinator.policy.preview.request"
+          | "coordinator.policy.allow.request";
+      }
+    >,
+    source?: object,
+  ): Promise<void> {
+    const payload: CoordinatorAutomationResult = { requestId: msg.requestId, error: null };
+    try {
+      if (!this.coordinatorService) throw new Error("Coordinator automation is unavailable");
+      switch (msg.type) {
+        case "coordinator.goals.list.request":
+          payload.goals = await this.coordinatorService.listCoordinatorGoals(msg.projectId);
+          break;
+        case "coordinator.goal.pause.request":
+          payload.goal = await this.coordinatorService.setCoordinatorGoalPaused(
+            msg.projectId,
+            msg.goalId,
+            msg.paused,
+          );
+          break;
+        case "coordinator.proposals.list.request":
+          payload.proposals = await this.coordinatorService.listCoordinatorProposals(msg.projectId);
+          break;
+        case "coordinator.proposal.resolve.request":
+          payload.proposal = await this.coordinatorService.resolveCoordinatorProposal(
+            msg.proposalId,
+            msg.action,
+          );
+          break;
+        case "coordinator.policy.list.request":
+          payload.rules = await this.coordinatorService.listCoordinatorPolicy(msg.projectId);
+          break;
+        case "coordinator.policy.toggle.request":
+          payload.rule = await this.coordinatorService.setCoordinatorPolicyEnabled(
+            msg.ruleId,
+            msg.enabled,
+          );
+          break;
+        case "coordinator.policy.preview.request":
+          payload.preview = await this.coordinatorService.getCoordinatorPermissionPolicyPreview(
+            msg.agentId,
+            msg.permissionRequestId,
+          );
+          break;
+        case "coordinator.policy.allow.request":
+          payload.rule = await this.coordinatorService.alwaysAllowCoordinatorPermission({
+            agentId: msg.agentId,
+            requestId: msg.permissionRequestId,
+            scope: msg.scope,
+            expectedPattern: msg.expectedPattern,
+          });
+          break;
+      }
+    } catch (error) {
+      payload.error = getErrorMessage(error);
+    }
+    switch (msg.type) {
+      case "coordinator.goals.list.request":
+        this.emitForSource({ type: "coordinator.goals.list.response", payload }, source);
+        return;
+      case "coordinator.goal.pause.request":
+        this.emitForSource({ type: "coordinator.goal.pause.response", payload }, source);
+        return;
+      case "coordinator.proposals.list.request":
+        this.emitForSource({ type: "coordinator.proposals.list.response", payload }, source);
+        return;
+      case "coordinator.proposal.resolve.request":
+        this.emitForSource({ type: "coordinator.proposal.resolve.response", payload }, source);
+        return;
+      case "coordinator.policy.list.request":
+        this.emitForSource({ type: "coordinator.policy.list.response", payload }, source);
+        return;
+      case "coordinator.policy.toggle.request":
+        this.emitForSource({ type: "coordinator.policy.toggle.response", payload }, source);
+        return;
+      case "coordinator.policy.preview.request":
+        this.emitForSource({ type: "coordinator.policy.preview.response", payload }, source);
+        return;
+      case "coordinator.policy.allow.request":
+        this.emitForSource({ type: "coordinator.policy.allow.response", payload }, source);
+        return;
+    }
+  }
+
   private async handleCoordinatorMemory(
     msg: Extract<
       SessionInboundMessage,
@@ -3215,10 +3311,31 @@ export class Session {
     );
   }
 
+  private dispatchCoordinatorAutomationMessage(
+    msg: SessionInboundMessage,
+    source?: object,
+  ): Promise<void> | undefined {
+    switch (msg.type) {
+      case "coordinator.goals.list.request":
+      case "coordinator.goal.pause.request":
+      case "coordinator.proposals.list.request":
+      case "coordinator.proposal.resolve.request":
+      case "coordinator.policy.list.request":
+      case "coordinator.policy.toggle.request":
+      case "coordinator.policy.preview.request":
+      case "coordinator.policy.allow.request":
+        return this.handleCoordinatorAutomation(msg, source);
+      default:
+        return undefined;
+    }
+  }
+
   private dispatchCoordinatorMessage(
     msg: SessionInboundMessage,
     source?: object,
   ): Promise<void> | undefined {
+    const automation = this.dispatchCoordinatorAutomationMessage(msg, source);
+    if (automation) return automation;
     switch (msg.type) {
       case "coordinator.memory.get.request":
       case "coordinator.memory.update.request":

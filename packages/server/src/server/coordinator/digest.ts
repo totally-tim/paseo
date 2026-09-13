@@ -58,19 +58,26 @@ function projectNote(
   return lines.join(" ");
 }
 
-/** M6 will supply goal-run facts; absent goal history never becomes a fabricated zero. */
+/** Counts come from durable run and proposal records. */
 export function formatCoordinatorDigest(
   boards: CoordinatorBoardSnapshot[],
   snapshots: ReadonlyMap<string, ChangeRequestSnapshot | null>,
   now: number,
+  automation?: { goalRuns: number; pendingProposals: number; goalsAttention: number },
 ): string {
   const pending = boards.flatMap((board) => board.needsYou);
-  const proposals = pending.filter(proposal).length;
+  const proposals = pending.filter(proposal).length + (automation?.pendingProposals ?? 0);
+  const needsYou = pending.length + (automation?.pendingProposals ?? 0);
   const working = boards.reduce((sum, board) => sum + board.working.length, 0);
-  const lead = `${pending.length} item${pending.length === 1 ? " needs" : "s need"} you (${proposals} proposal${proposals === 1 ? "" : "s"}); ${working} session${working === 1 ? "" : "s"} working.`;
+  const lead = `${needsYou} item${needsYou === 1 ? " needs" : "s need"} you (${proposals} proposal${proposals === 1 ? "" : "s"}); ${working} session${working === 1 ? "" : "s"} working.`;
   const projects = boards.filter((board) => board.tier !== "global");
   return [
     lead,
+    ...(automation
+      ? [
+          `${automation.goalRuns} goal runs fired in the last 24h; ${automation.goalsAttention} goals need attention.`,
+        ]
+      : []),
     ...projects.map((board) => projectNote(board, snapshots.get(board.projectId) ?? null, now)),
   ].join("\n");
 }

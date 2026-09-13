@@ -6549,3 +6549,67 @@ test("advertises the coordinator client capability in hello", async () => {
   const hello = JSON.parse(assertStr(mock.sent[0]));
   expect(hello.capabilities[CLIENT_CAPS.coordinator]).toBe(true);
 });
+
+test("coordinator automation rejects M5 hosts before sending any new RPC", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "automation-gate",
+    logger: createMockLogger(),
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connected = client.connect();
+  mock.triggerOpen({ features: { ownedSubscriptions: true, coordinator: true } });
+  await connected;
+  const operations = [
+    () => client.listCoordinatorGoals(),
+    () => client.setCoordinatorGoalPaused({ projectId: "project", goalId: "goal", paused: true }),
+    () => client.listCoordinatorProposals(),
+    () => client.resolveCoordinatorProposal({ proposalId: "proposal", action: "approve" }),
+    () => client.listCoordinatorPolicy(),
+    () => client.setCoordinatorPolicyEnabled({ ruleId: "rule", enabled: true }),
+    () => client.getCoordinatorPermissionPolicyPreview({ agentId: "agent", requestId: "request" }),
+    () =>
+      client.alwaysAllowCoordinatorPermission({
+        agentId: "agent",
+        requestId: "request",
+        scope: "project",
+        expectedPattern: "{}",
+      }),
+  ];
+  for (const run of operations)
+    await expect(run()).rejects.toThrow(
+      "Update this host to use coordinator goals, proposals, and policy.",
+    );
+  expect(mock.sent).toHaveLength(0);
+});
+
+test("coordinator automation sends RPCs when the host advertises support", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "automation-enabled",
+    logger: createMockLogger(),
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connected = client.connect();
+  mock.triggerOpen({
+    features: { ownedSubscriptions: true, coordinator: true, coordinatorAutomation: true },
+  });
+  await connected;
+  const goals = client.listCoordinatorGoals();
+  await vi.waitFor(() => expect(mock.sent).toHaveLength(1));
+  const request = parseSentFrame(mock.sent[0]);
+  expect(request.type).toBe("coordinator.goals.list.request");
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "coordinator.goals.list.response",
+      payload: { requestId: request.requestId, goals: [], error: null },
+    }),
+  );
+  await expect(goals).resolves.toEqual([]);
+});

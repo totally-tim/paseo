@@ -1,3 +1,5 @@
+import { ConnectedPermissionPolicySheet } from "@/coordinator/automation/permission-policy-sheet";
+import { resolvePolicyNotification } from "@/coordinator/automation/permission-policy-model";
 import { handleNotificationAction } from "@/push-notifications/actions";
 import "@/styles/unistyles";
 import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
@@ -159,6 +161,9 @@ const HostRuntimeBootstrapContext = createContext<HostRuntimeBootstrapState>({
 });
 
 function PushNotificationRouter() {
+  const [policyRequest, setPolicyRequest] =
+    useState<ReturnType<typeof resolvePolicyNotification>>(null);
+  const closePolicy = useCallback(() => setPolicyRequest(null), []);
   const router = useRouter();
   const lastHandledIdRef = useRef<string | null>(null);
   const openNotification = useStableEvent((data: Record<string, unknown> | undefined) => {
@@ -251,7 +256,9 @@ function PushNotificationRouter() {
       const data = response.notification.request.content.data as
         | Record<string, unknown>
         | undefined;
-      openNotification(data);
+      const policy = resolvePolicyNotification(response.actionIdentifier, data);
+      if (policy) setPolicyRequest(policy);
+      else openNotification(data);
     };
 
     const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
@@ -270,7 +277,13 @@ function PushNotificationRouter() {
     };
   }, [openNotification]);
 
-  return null;
+  return policyRequest ? (
+    <ConnectedPermissionPolicySheet
+      key={`${policyRequest.serverId}:${policyRequest.agentId}:${policyRequest.requestId}`}
+      {...policyRequest}
+      onClose={closePolicy}
+    />
+  ) : null;
 }
 
 function ManagedDaemonSession({ daemon }: { daemon: HostProfile }) {

@@ -41,6 +41,13 @@ export class ScheduleTargetGoneError extends Error {
   }
 }
 
+function assertScheduleOwner(schedule: StoredSchedule, goalOwned = false): void {
+  const isGoal = schedule.target.type === "agent" && Boolean(schedule.target.goal);
+  if (isGoal && !goalOwned)
+    throw new Error("This schedule is managed by a coordinator goal. Manage it from Goals.");
+  if (!isGoal && goalOwned) throw new Error("Schedule is not owned by a coordinator goal");
+}
+
 function trimOptionalName(value: string | null | undefined): string | null {
   if (typeof value !== "string") {
     return null;
@@ -246,6 +253,7 @@ export interface ScheduleServiceOptions {
   now?: () => Date;
   isProtectedAgentTarget?: (agentId: string) => boolean;
   runner?: (schedule: StoredSchedule, runId: string) => Promise<ScheduleExecutionResult>;
+  runGoal?: (schedule: StoredSchedule, runId: string) => Promise<ScheduleExecutionResult>;
 }
 
 export class ScheduleService {
@@ -281,7 +289,15 @@ export class ScheduleService {
     this.createPaseoWorktreeWorkspace = options.createPaseoWorktreeWorkspace;
     this.archiveWorkspace = options.archiveWorkspace;
     this.now = options.now ?? (() => new Date());
-    this.runner = options.runner ?? ((schedule, runId) => this.executeSchedule(schedule, runId));
+    this.runner = (schedule, runId) => {
+      if (schedule.target.type === "agent" && schedule.target.goal) {
+        if (!options.runGoal) throw new Error("Goal schedule execution is unavailable");
+        return options.runGoal(schedule, runId);
+      }
+      return options.runner
+        ? options.runner(schedule, runId)
+        : this.executeSchedule(schedule, runId);
+    };
   }
 
   async start(): Promise<void> {
@@ -364,6 +380,7 @@ export class ScheduleService {
         return this.buildScheduleRecord(input, { name, prompt, target: inputTarget });
       },
       update: async (current) => {
+        assertScheduleOwner(current);
         const now = this.now();
         const cadence = mergeScheduleCadenceTimezone(current.cadence, input.cadence);
         const runOnCreate = input.runOnCreate ?? cadence.type === "every";
@@ -403,7 +420,14 @@ export class ScheduleService {
   }
 
   async pause(id: string): Promise<StoredSchedule> {
+    return this.pauseSchedule(id);
+  }
+  async setGoalSchedulePaused(id: string, paused: boolean): Promise<StoredSchedule> {
+    return paused ? this.pauseSchedule(id, true) : this.resumeSchedule(id, true);
+  }
+  private async pauseSchedule(id: string, goalOwned = false): Promise<StoredSchedule> {
     const paused = await this.store.update(id, (schedule) => {
+      assertScheduleOwner(schedule, goalOwned);
       if (schedule.status === "completed") {
         throw new Error(`Schedule ${id} is already completed`);
       }
@@ -423,7 +447,11 @@ export class ScheduleService {
   }
 
   async resume(id: string): Promise<StoredSchedule> {
+    return this.resumeSchedule(id);
+  }
+  private async resumeSchedule(id: string, goalOwned = false): Promise<StoredSchedule> {
     const resumed = await this.store.update(id, (schedule) => {
+      assertScheduleOwner(schedule, goalOwned);
       if (schedule.status === "completed") {
         throw new Error(`Schedule ${id} is already completed`);
       }
@@ -444,6 +472,7 @@ export class ScheduleService {
 
   async update(input: UpdateScheduleInput): Promise<StoredSchedule> {
     const next = await this.store.update(input.id, async (schedule) => {
+      assertScheduleOwner(schedule);
       const now = this.now();
       let updated: StoredSchedule = schedule;
 
@@ -488,6 +517,7 @@ export class ScheduleService {
   }
 
   async delete(id: string): Promise<void> {
+    assertScheduleOwner(await this.inspect(id));
     await this.store.delete(id);
   }
 
@@ -564,7 +594,14 @@ export class ScheduleService {
   }
 
   async runOnce(id: string): Promise<StoredSchedule> {
+    return this.runOnceOwned(id);
+  }
+  async runGoalOnce(id: string): Promise<StoredSchedule> {
+    return this.runOnceOwned(id, true);
+  }
+  private async runOnceOwned(id: string, goalOwned = false): Promise<StoredSchedule> {
     const schedule = await this.inspect(id);
+    assertScheduleOwner(schedule, goalOwned);
     if (this.protectedSchedule(schedule)) throw new Error("The schedule target is rotating");
     if (schedule.status === "completed") {
       throw new Error(`Schedule ${id} is already completed`);
@@ -610,7 +647,13 @@ export class ScheduleService {
       if (new Date(schedule.nextRunAt).getTime() > now.getTime()) {
         continue;
       }
-      await this.runSchedule(schedule, now);
+      if (schedule.target.type === "agent" && schedule.target.goal) {
+        void this.runSchedule(schedule, now).catch((error) => {
+          this.logger.error({ err: error, scheduleId: schedule.id }, "Failed to run goal schedule");
+        });
+      } else {
+        await this.runSchedule(schedule, now);
+      }
     }
   }
 
@@ -676,6 +719,7 @@ export class ScheduleService {
 
       if (
         updated.status === "active" &&
+        !(updated.target.type === "agent" && updated.target.goal && runningIndex === -1) &&
         updated.nextRunAt &&
         new Date(updated.nextRunAt).getTime() <= now.getTime()
       ) {

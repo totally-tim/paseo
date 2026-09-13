@@ -60,6 +60,8 @@ import {
   type CoordinatorSpawnDecision,
 } from "./coordinator-service.js";
 import { CoordinatorStore } from "./persistence.js";
+import { CoordinatorAutomation } from "./automation.js";
+import { ScheduleService, type ScheduleServiceOptions } from "../schedule/service.js";
 import { DEFAULT_DECISION_SETTINGS } from "./decisions.js";
 import { SPAWN_ISOLATION_ENV } from "./spawn-isolation.js";
 import { CoordinatorToolDeniedError } from "./tool-policy.js";
@@ -3010,6 +3012,12 @@ describe("lifecycle-bus observation", () => {
 // Minimal forge stub for the poll-through-service tests.
 class HarnessForgeService {
   pullRequests: PullRequestSummary[] = [];
+  resolvedPullRequests = new Map<number, PullRequestSummary>();
+  async getPullRequest(options: { number: number }): Promise<PullRequestSummary> {
+    const result = this.resolvedPullRequests.get(options.number);
+    if (!result) throw new Error(`No resolved change request ${options.number}`);
+    return result;
+  }
   statuses = new Map<string, CurrentPullRequestStatus | null>();
   listCalls = 0;
   statusCalls: string[] = [];
@@ -3054,6 +3062,121 @@ function harnessWorkspaceGitService(
 }
 
 describe("change-request polling", () => {
+  test("merged author filters reach automation only after confirmed merge and dispatch once through schedules", async () => {
+    const forge = new HarnessForgeService();
+    forge.pullRequests = [41, 42, 43].map(harnessPullRequest);
+    forge.resolvedPullRequests.set(43, {
+      ...harnessPullRequest(43),
+      state: "closed",
+      author: "alice",
+    });
+    forge.resolvedPullRequests.set(42, {
+      ...harnessPullRequest(42),
+      state: "merged",
+      author: "bob",
+    });
+    forge.resolvedPullRequests.set(41, {
+      ...harnessPullRequest(41),
+      state: "merged",
+      author: "alice",
+    });
+    await reinitHarness({
+      workspaceGitService: harnessWorkspaceGitService(forge),
+      changeRequestPollIntervalMs: 3_600_000,
+    });
+    const unexpected = (): never => {
+      throw new Error("Goals must use their dedicated schedule runner");
+    };
+    const schedules = new ScheduleService({
+      paseoHome: harness.paseoHome,
+      logger,
+      agentStorage: harness.agentStorage,
+      agentManager: harness.agentManager as ScheduleServiceOptions["agentManager"],
+      createAgent: unexpected,
+      createDirectoryWorkspace: unexpected,
+      createPaseoWorktreeWorkspace: unexpected,
+      archiveWorkspace: unexpected,
+      runner: unexpected,
+      runGoal: (schedule, runId) => harness.service.runGoalSchedule(schedule, runId),
+    });
+    await harness.service.initializeAutomation({
+      schedules: () => schedules,
+      resolveProfile: () => CODEX_PROFILE,
+      createAgent: (input) =>
+        createAgentCommand(
+          {
+            agentManager: harness.agentManager,
+            agentStorage: harness.agentStorage,
+            logger,
+            providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+            coordinator: harness.service,
+          },
+          input,
+        ),
+    });
+    const state = await harness.service.enableProjectCoordinator(
+      enableInput({ trustLevel: "ship", profiles: { investigator: CODEX_PROFILE } }),
+    );
+    const proposal = await harness.service.proposeCoordinatorAutomation({
+      callerAgentId: state.agentId!,
+      sentence: "Review Alice's merged changes",
+      payload: {
+        kind: "goal",
+        ruleYaml:
+          "name: review-merged\non: pr.merged\nfilters:\n  authors: [alice]\nstep:\n  profile: investigator\n  prompt: Review the merged change\nguard:\n  max_concurrent: 1\n",
+      },
+    });
+    expect(proposal).not.toBeNull();
+    await harness.service.resolveCoordinatorProposal(proposal!.id, "approve");
+    const goal = (await harness.service.listCoordinatorGoals(PROJECT_ID))[0]!;
+    const events = vi.spyOn(CoordinatorAutomation.prototype, "emitEvent");
+    try {
+      await harness.service.start();
+      const pollFile = path.join(harness.paseoHome, "coordinator", "poll", `${PROJECT_ID}.json`);
+      await vi.waitFor(() => expect(existsSync(pollFile)).toBe(true));
+      await coordinatorIdle(state.agentId!);
+      await harness.service.runChangeRequestPollOnce(PROJECT_ID);
+      forge.pullRequests = [41, 42].map(harnessPullRequest);
+      await harness.service.runChangeRequestPollOnce(PROJECT_ID);
+      expect(
+        events.mock.calls.flatMap(([event]) => (event.trigger === "pr.merged" ? [event] : [])),
+      ).toHaveLength(0);
+      expect(await schedules.logs(goal.scheduleId!)).toHaveLength(0);
+      forge.pullRequests = [harnessPullRequest(44), harnessPullRequest(41)];
+      await harness.service.runChangeRequestPollOnce(PROJECT_ID);
+      expect(events.mock.calls.find(([event]) => event.id === "pr:42:merged")?.[0]).toMatchObject({
+        author: "bob",
+      });
+      expect(await schedules.logs(goal.scheduleId!)).toHaveLength(0);
+      // 44 disappears with a failing forge lookup before Alice's merged PR.
+      // Its observer failure must neither block Alice's event nor the PR wake.
+      forge.pullRequests = [];
+      expect((await harness.service.runChangeRequestPollOnce(PROJECT_ID)).kind).toBe("changed");
+      expect(events.mock.calls.find(([event]) => event.id === "pr:41:merged")?.[0]).toMatchObject({
+        author: "alice",
+        context: { change_request: { number: 41, state: "merged" } },
+      });
+      await expect
+        .poll(async () => (await schedules.logs(goal.scheduleId!))[0]?.status)
+        .toBe("succeeded");
+      await harness.service.runChangeRequestPollOnce(PROJECT_ID);
+      await schedules.tick();
+      expect(await schedules.logs(goal.scheduleId!)).toHaveLength(1);
+      expect((await harness.service.listCoordinatorGoals(PROJECT_ID))[0]?.firedCount).toBe(1);
+      const prompts = harness.client.sessions.flatMap((session) => session.prompts);
+      expect(
+        prompts.filter((prompt) =>
+          (typeof prompt === "string" ? prompt : JSON.stringify(prompt)).includes(
+            "Run the approved goal: Review Alice's merged changes",
+          ),
+        ),
+      ).toHaveLength(1);
+    } finally {
+      events.mockRestore();
+      await schedules.stop();
+    }
+  });
+
   test("the first poll baselines silently; a changed check state wakes once with the diff", async () => {
     const forge = new HarnessForgeService();
     forge.pullRequests = [harnessPullRequest(41)];

@@ -1,4 +1,9 @@
 import {
+  CoordinatorGoalSchema,
+  CoordinatorProposalSchema,
+  CoordinatorPolicyRuleSchema,
+} from "./coordinator-goals.js";
+import {
   AgentContinuationPolicySchema,
   AgentContinuationStatusSchema,
 } from "./agent-continuation.js";
@@ -3605,6 +3610,102 @@ export const CoordinatorGlobalUpdateRequestSchema = z.object({
 export type CoordinatorGlobalUpdateRequest = z.infer<typeof CoordinatorGlobalUpdateRequestSchema>;
 
 // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+export const CoordinatorAutomationResultSchema = z.object({
+  requestId: z.string(),
+  error: z.string().nullable(),
+  goals: z.array(CoordinatorGoalSchema).optional(),
+  goal: CoordinatorGoalSchema.nullable().optional(),
+  proposals: z.array(CoordinatorProposalSchema).optional(),
+  proposal: CoordinatorProposalSchema.nullable().optional(),
+  rules: z.array(CoordinatorPolicyRuleSchema).optional(),
+  rule: CoordinatorPolicyRuleSchema.nullable().optional(),
+  preview: z
+    .object({ pattern: z.string(), projectId: z.string().nullable() })
+    .nullable()
+    .optional(),
+});
+export type CoordinatorAutomationResult = z.infer<typeof CoordinatorAutomationResultSchema>;
+export const CoordinatorGoalsListRequestSchema = z.object({
+  type: z.literal("coordinator.goals.list.request"),
+  requestId: z.string(),
+  projectId: z.string().optional(),
+});
+export const CoordinatorGoalsListResponseSchema = z.object({
+  type: z.literal("coordinator.goals.list.response"),
+  payload: CoordinatorAutomationResultSchema,
+});
+export const CoordinatorGoalPauseRequestSchema = z.object({
+  type: z.literal("coordinator.goal.pause.request"),
+  requestId: z.string(),
+  projectId: z.string(),
+  goalId: z.string(),
+  paused: z.boolean(),
+});
+export const CoordinatorGoalPauseResponseSchema = z.object({
+  type: z.literal("coordinator.goal.pause.response"),
+  payload: CoordinatorAutomationResultSchema,
+});
+export const CoordinatorProposalsListRequestSchema = z.object({
+  type: z.literal("coordinator.proposals.list.request"),
+  requestId: z.string(),
+  projectId: z.string().optional(),
+});
+export const CoordinatorProposalsListResponseSchema = z.object({
+  type: z.literal("coordinator.proposals.list.response"),
+  payload: CoordinatorAutomationResultSchema,
+});
+export const CoordinatorProposalResolveRequestSchema = z.object({
+  type: z.literal("coordinator.proposal.resolve.request"),
+  requestId: z.string(),
+  proposalId: z.string(),
+  action: z.enum(["approve", "ignore"]),
+});
+export const CoordinatorProposalResolveResponseSchema = z.object({
+  type: z.literal("coordinator.proposal.resolve.response"),
+  payload: CoordinatorAutomationResultSchema,
+});
+export const CoordinatorPolicyListRequestSchema = z.object({
+  type: z.literal("coordinator.policy.list.request"),
+  requestId: z.string(),
+  projectId: z.string().optional(),
+});
+export const CoordinatorPolicyListResponseSchema = z.object({
+  type: z.literal("coordinator.policy.list.response"),
+  payload: CoordinatorAutomationResultSchema,
+});
+export const CoordinatorPolicyToggleRequestSchema = z.object({
+  type: z.literal("coordinator.policy.toggle.request"),
+  requestId: z.string(),
+  ruleId: z.string(),
+  enabled: z.boolean(),
+});
+export const CoordinatorPolicyToggleResponseSchema = z.object({
+  type: z.literal("coordinator.policy.toggle.response"),
+  payload: CoordinatorAutomationResultSchema,
+});
+export const CoordinatorPolicyPreviewRequestSchema = z.object({
+  type: z.literal("coordinator.policy.preview.request"),
+  requestId: z.string(),
+  agentId: z.string(),
+  permissionRequestId: z.string(),
+});
+export const CoordinatorPolicyPreviewResponseSchema = z.object({
+  type: z.literal("coordinator.policy.preview.response"),
+  payload: CoordinatorAutomationResultSchema,
+});
+export const CoordinatorPolicyAllowRequestSchema = z.object({
+  type: z.literal("coordinator.policy.allow.request"),
+  requestId: z.string(),
+  agentId: z.string(),
+  permissionRequestId: z.string(),
+  scope: z.enum(["daemon", "project"]),
+  expectedPattern: z.string(),
+});
+export const CoordinatorPolicyAllowResponseSchema = z.object({
+  type: z.literal("coordinator.policy.allow.response"),
+  payload: CoordinatorAutomationResultSchema,
+});
+
 export const CoordinatorMemoryTargetSchema = z.object({
   scope: z.enum(["personal", "personal-project"]),
   projectId: z.string().optional(),
@@ -4008,6 +4109,14 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   CoordinatorGlobalUpdateRequestSchema,
   CoordinatorGlobalGetRequestSchema,
   CoordinatorPermissionDeferRequestSchema,
+  CoordinatorGoalsListRequestSchema,
+  CoordinatorGoalPauseRequestSchema,
+  CoordinatorProposalsListRequestSchema,
+  CoordinatorProposalResolveRequestSchema,
+  CoordinatorPolicyListRequestSchema,
+  CoordinatorPolicyToggleRequestSchema,
+  CoordinatorPolicyPreviewRequestSchema,
+  CoordinatorPolicyAllowRequestSchema,
   CoordinatorMemoryGetRequestSchema,
   CoordinatorMemoryUpdateRequestSchema,
   CoordinatorProjectEnableRequestSchema,
@@ -4362,6 +4471,8 @@ export const ServerInfoStatusPayloadSchema = z
         scheduleList: z.boolean().optional(),
         // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-11. The daemon serves coordinator.project.* and coordinator.board.* and pushes coordinator.board.changed.
         coordinator: z.boolean().optional(),
+        // COMPAT(coordinator-automation): added in v0.8.0, remove after 2027-03-13 once daemon floor supports automation.
+        coordinatorAutomation: z.boolean().optional(),
       })
       .optional(),
   })
@@ -7604,6 +7715,14 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   CoordinatorGlobalUpdateResponseSchema,
   CoordinatorGlobalGetResponseSchema,
   CoordinatorPermissionDeferResponseSchema,
+  CoordinatorGoalsListResponseSchema,
+  CoordinatorGoalPauseResponseSchema,
+  CoordinatorProposalsListResponseSchema,
+  CoordinatorProposalResolveResponseSchema,
+  CoordinatorPolicyListResponseSchema,
+  CoordinatorPolicyToggleResponseSchema,
+  CoordinatorPolicyPreviewResponseSchema,
+  CoordinatorPolicyAllowResponseSchema,
   CoordinatorMemoryGetResponseSchema,
   CoordinatorMemoryUpdateResponseSchema,
   CoordinatorProjectEnableResponseSchema,
