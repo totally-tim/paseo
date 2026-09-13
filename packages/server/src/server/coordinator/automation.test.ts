@@ -1,7 +1,7 @@
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { AgentStorage } from "../agent/agent-storage.js";
 import { ScheduleService, type ScheduleServiceOptions } from "../schedule/service.js";
@@ -176,6 +176,41 @@ test("approved cron goal keeps its missed window across restart and executes onc
     .poll(async () => (await h.schedules.inspect(goal.scheduleId!)).nextRunAt)
     .toBe("2026-09-18T08:00:00.000Z");
 });
+
+test.each(["admission", "dispatch"] as const)(
+  "scheduled heartbeat stays due across a %s deferral and restart",
+  async (stage) => {
+    const h = await harness();
+    const goal = await approve(h, "heartbeat");
+    const due = (await h.schedules.inspect(goal.scheduleId!)).nextRunAt!;
+    h.setNow(due);
+    h.setAdmission(stage !== "admission");
+    h.setDeferredDispatch(stage === "dispatch");
+    const dispatch = vi.spyOn(h.automation, "runGoal");
+    await h.schedules.tick();
+    await expect.poll(() => dispatch.mock.calls.length).toBe(1);
+    await Promise.allSettled(dispatch.mock.results.map((result) => result.value));
+    await expect.poll(async () => (await h.schedules.inspect(goal.scheduleId!)).runs).toEqual([]);
+    expect((await h.schedules.inspect(goal.scheduleId!)).nextRunAt).toBe(due);
+    expect((await h.schedules.inspect(goal.scheduleId!)).lastRunAt).toBeNull();
+    expect((await h.automation.goals.get("project", goal.id))?.firedCount).toBe(0);
+    expect(h.done).toHaveLength(0);
+    await h.schedules.tick();
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    await h.restart();
+    expect((await h.schedules.inspect(goal.scheduleId!)).nextRunAt).toBe(due);
+    h.setAdmission(true);
+    h.setDeferredDispatch(false);
+    h.setNow(new Date(Date.parse(due) + 30_000).toISOString());
+    await h.schedules.tick();
+    await expect.poll(() => h.done.length).toBe(1);
+    await expect
+      .poll(async () => (await h.schedules.inspect(goal.scheduleId!)).nextRunAt)
+      .not.toBe(due);
+    await h.schedules.tick();
+    expect(h.done).toHaveLength(1);
+  },
+);
 
 test("repeated concurrent polls and restart deliver one event with its saved context", async () => {
   const h = await harness();
@@ -456,9 +491,7 @@ test("review regression: deterministic dispatch deferral restores its event with
     occurredAt: new Date().toISOString(),
   };
   await h.automation.emitEvent(event);
-  await expect
-    .poll(async () => (await h.schedules.logs(goal.scheduleId!))[0]?.status)
-    .toBe("succeeded");
+  await expect.poll(async () => await h.schedules.logs(goal.scheduleId!)).toEqual([]);
   expect((await h.automation.goals.get("project", goal.id))?.lastError).toBeUndefined();
   expect((await h.automation.goals.get("project", goal.id))?.firedCount).toBe(0);
   h.setDeferredDispatch(false);

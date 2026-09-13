@@ -69,9 +69,11 @@ function useSettingsSnapshot(serverId: string, projectId?: string) {
     [client, projectId, serverId],
   );
   const disable = useCallback(async () => {
-    if (!client || !projectId) throw new Error("Project coordinator is unavailable.");
-    const result = await client.disableProjectCoordinator(projectId);
-    useCoordinatorProjectStore.getState().applyProjectResult(serverId, projectId, result);
+    if (!client) throw new Error("Host disconnected");
+    if (projectId) {
+      const result = await client.disableProjectCoordinator(projectId);
+      useCoordinatorProjectStore.getState().applyProjectResult(serverId, projectId, result);
+    } else await client.disableGlobalCoordinator();
   }, [client, projectId, serverId]);
   return { snapshot, error, reload, save, disable };
 }
@@ -90,7 +92,7 @@ function OpenSettingsSheet({ serverId, projectId, onClose }: SettingsProps) {
           serverId={serverId}
           onClose={onClose}
           onSave={save}
-          onDisable={projectId ? disable : undefined}
+          onDisable={disable}
         />
       ) : (
         <View style={styles.content}>

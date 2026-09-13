@@ -162,6 +162,15 @@ for (const viewport of [
       await expect(goals).toContainText("Keep dependencies current");
       await goals.getByRole("switch", { name: "Run goal: Keep dependencies current" }).click();
       await expect(goals.getByText("Goal paused", { exact: true })).toBeVisible();
+      await workspace.client.disableProjectCoordinator(workspace.projectId);
+      await page.goto(buildSchedulesRoute());
+      await expect(scheduleRow).toBeVisible();
+      await scheduleRow.getByRole("button", { name: "Open Goals", exact: true }).click();
+      await expect(goals).toBeVisible();
+      await expect(goals).toContainText("Keep dependencies current");
+      await expect(
+        goals.getByRole("switch", { name: "Run goal: Keep dependencies current" }),
+      ).not.toBeChecked();
       await page.screenshot({
         path: testInfo.outputPath("schedule-open-goals.png"),
         fullPage: true,

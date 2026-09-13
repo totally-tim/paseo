@@ -1173,16 +1173,6 @@ describe("agent MCP availability", () => {
     snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
     expect(snapshot.wake?.text).toContain("reachable again");
   });
-
-  test("the wake row names the flag that cut the tools", async () => {
-    await harness.service.enableProjectCoordinator(enableInput());
-
-    await harness.service.handleAgentMcpAvailability(false, "mcp.injectIntoAgents");
-    await flushBoard();
-
-    const snapshot = await harness.service.getBoardSnapshot(PROJECT_ID);
-    expect(snapshot.wake?.text).toContain("mcp.injectIntoAgents");
-  });
 });
 
 describe("remember", () => {
@@ -1929,6 +1919,22 @@ describe("assertAgentTargetAllowed", () => {
       workspaceId: harness.workspace.workspaceId,
       labels: { [PARENT_AGENT_ID_LABEL]: parentAgentId },
     });
+
+  test.each(["steer", "mutate", "permission"] as const)(
+    "project-only scope rejects %s of children owned by a human session",
+    async (action) => {
+      const state = await enableAt("ship", "project");
+      const human = await harness.agentManager.createAgent(
+        { provider: "codex", cwd: harness.projectDir },
+        undefined,
+        { workspaceId: harness.workspace.workspaceId },
+      );
+      const child = await spawnChild(human.id);
+      await expect(
+        harness.service.assertAgentTargetAllowed(state.agentId!, child.id, { action }),
+      ).rejects.toThrow(/scope/);
+    },
+  );
 
   test("a coordinator steers its descendants at any level", async () => {
     const state = await enableAt("observe");

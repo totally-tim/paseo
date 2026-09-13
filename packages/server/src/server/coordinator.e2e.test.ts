@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -75,6 +75,21 @@ afterEach(async () => {
 });
 
 describe("project coordinator over the wire", () => {
+  test("required coordinator tools stay available when default injection is disabled", async () => {
+    const { projectId } = await openProject(makeProjectDir());
+    const coordinator = await enableCoordinator(projectId);
+    const service = ctx.daemon.daemon.coordinatorService;
+    const availability = vi.spyOn(service, "handleAgentMcpAvailability");
+    await ctx.client.patchDaemonConfig({ mcp: { injectIntoAgents: false } });
+    expect(availability).not.toHaveBeenCalled();
+    expect(ctx.daemon.daemon.agentManager.getAgent(coordinator.agentId!)?.config.paseoTools).toBe(
+      "required",
+    );
+    expect((await service.getBoardSnapshot(projectId)).wake?.text).not.toContain("tools are off");
+    await ctx.client.patchDaemonConfig({ mcp: { injectIntoAgents: true } });
+    expect(availability).not.toHaveBeenCalled();
+  });
+
   test("server_info advertises the coordinator feature", () => {
     expect(ctx.client.getLastServerInfoMessage()?.features?.coordinator).toBe(true);
   });

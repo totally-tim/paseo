@@ -109,11 +109,13 @@ function SchedulesTableRow({
     setGoalError(null);
     void (async () => {
       if (!client) throw new Error("Reconnect to this host to open Goals.");
-      const coordinator = await client.getProjectCoordinator(projectId);
-      if (!coordinator.coordinator?.agentId) throw new Error("Project coordinator is unavailable.");
-      const result = await client.fetchAgent(coordinator.coordinator.agentId);
-      const workspaceId = result?.agent.workspaceId;
-      if (!workspaceId) throw new Error("Coordinator workspace is unavailable.");
+      const workspaces = await client.fetchWorkspaces({
+        filter: { projectId },
+        page: { limit: 1 },
+      });
+      const workspaceId = workspaces.entries[0]?.id;
+      if (!workspaceId)
+        throw new Error("No active workspace is available for this project's Goals.");
       navigateToWorkspace({
         serverId,
         workspaceId,

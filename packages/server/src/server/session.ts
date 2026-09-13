@@ -1180,6 +1180,7 @@ export class Session {
       listProviderSubagentActivity: async () => this.agentManager.listProviderSubagentActivity(),
       listTerminalActivityContributions: () => this.listTerminalActivityContributions(),
       isProviderVisibleToClient: (provider) => this.isProviderVisibleToClient(provider),
+      canDisplayHiddenWorkspaces: () => this.supports(CLIENT_CAPS.coordinator),
       buildWorkspaceDescriptor: (input) => this.buildWorkspaceDescriptor(input),
     });
 
@@ -6424,6 +6425,8 @@ export class Session {
         return;
       }
       const workspace = descriptorsByWorkspaceId.get(workspaceId);
+      // Keep client visibility out of the daemon-global directory sequence.
+      if (workspace?.hidden && !this.supports(CLIENT_CAPS.coordinator)) continue;
       const filteredWorkspace =
         workspace && this.matchesWorkspaceFilter({ workspace, filter: subscription.filter })
           ? workspace
@@ -6798,6 +6801,9 @@ export class Session {
         payload: {
           requestId: request.requestId,
           ...(synchronized ?? { projects }),
+          projects: (synchronized?.projects ?? projects).filter(
+            (project) => !project.hidden || this.supports(CLIENT_CAPS.coordinator),
+          ),
         },
       });
     } catch (error) {
@@ -6977,10 +6983,16 @@ export class Session {
         "Sequenced workspace directory reads do not support filters.",
       );
     }
-    return this.directorySync.synchronizeWorkspaces(
+    const result = this.directorySync.synchronizeWorkspaces(
       await this.workspaceDirectory.listDescriptors(),
       request.sync ?? {},
     );
+    return {
+      ...result,
+      entries: result.entries.filter((workspace) =>
+        this.matchesWorkspaceFilter({ workspace, filter: undefined }),
+      ),
+    };
   }
 
   // Build the bootstrap snapshot used by `flushBootstrappedWorkspaceUpdates`
@@ -8874,6 +8886,7 @@ export class Session {
     message: SessionOutboundMessage,
     notified: Set<object>,
   ): void {
+    if (!this.canReceiveCoordinatorRecord(message, subscription.owner.source)) return;
     if (
       message.type !== "agent_attention_required" &&
       message.type !== "terminal_attention_required"
@@ -8915,12 +8928,31 @@ export class Session {
           (!onlySource || source === onlySource) &&
           !delivered.has(source) &&
           !this.delivery.isModern(source) &&
+          this.canReceiveCoordinatorRecord(message, source) &&
           this.wantsEvent(event, source)
         )
           this.onMessageToSource(source, this.workspaceSetupMessageForClient(message, source));
       }
-    } else if (delivered.size === 0 && this.wantsEvent(event)) this.onMessage(message);
+    } else if (
+      delivered.size === 0 &&
+      this.wantsEvent(event) &&
+      this.canReceiveCoordinatorRecord(message)
+    )
+      this.onMessage(message);
     return true;
+  }
+
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13 once all clients filter hidden records.
+  private canReceiveCoordinatorRecord(message: SessionOutboundMessage, source?: object): boolean {
+    if (
+      message.type !== "project.update" ||
+      message.payload.kind !== "upsert" ||
+      !message.payload.project.hidden
+    )
+      return true;
+    return source
+      ? this.supportsForSource(CLIENT_CAPS.coordinator, source)
+      : this.supports(CLIENT_CAPS.coordinator);
   }
 
   private emit(msg: SessionOutboundMessage): void {

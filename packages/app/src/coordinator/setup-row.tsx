@@ -268,11 +268,16 @@ function OpenCoordinatorEnableSheet({
     return providerRows.find((row) => row.enabled)?.provider ?? null;
   }, [providerRows, selectedProvider, savedProfile?.provider]);
 
-  // Delegates launch as ordinary sessions, so their pickers offer every
-  // enabled provider, not just the coordinator-eligible ones.
   const delegateSelectorProviders = useMemo(
     () => buildSelectableProviderSelectorProviders(snapshot.entries),
     [snapshot.entries],
+  );
+  const readOnlySelectorProviders = useMemo(
+    () =>
+      delegateSelectorProviders.filter((provider) =>
+        COORDINATOR_ELIGIBLE_PROVIDERS.includes(provider.id),
+      ),
+    [delegateSelectorProviders],
   );
 
   const handleEnable = useCallback(async () => {
@@ -377,7 +382,7 @@ function OpenCoordinatorEnableSheet({
           label={t("coordinator.setup.investigatorProfile")}
           selection={roleSelections.investigator}
           fallbackProvider={effectiveSelection}
-          providers={delegateSelectorProviders}
+          providers={readOnlySelectorProviders}
           isLoading={snapshot.isLoading}
           isRefreshing={snapshot.isRefreshing}
           disabled={isEnabling}

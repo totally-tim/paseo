@@ -3,7 +3,7 @@ import path from "node:path";
 import { z } from "zod";
 import type { CoordinatorProposal } from "@getpaseo/protocol/coordinator-goals";
 import type { ScheduleExecutionResult, StoredSchedule } from "@getpaseo/protocol/schedule/types";
-import type { ScheduleService } from "../schedule/service.js";
+import { ScheduleExecutionDeferredError, type ScheduleService } from "../schedule/service.js";
 import { AutomationStore } from "./automation-store.js";
 import {
   CoordinatorGoals,
@@ -16,7 +16,7 @@ import { CoordinatorPolicy } from "./policy.js";
 import { CoordinatorProposals } from "./proposals.js";
 
 /** Admission changed before dispatch; preserve the next heartbeat without recording a failure. */
-export class GoalExecutionDeferred extends Error {}
+export class GoalExecutionDeferred extends ScheduleExecutionDeferredError {}
 
 export interface GoalExecutionOutcome {
   agentId: string;
@@ -341,7 +341,7 @@ export class CoordinatorAutomation {
     if (!(await this.deps.getProject(projectId))?.enabled)
       return { agentId: null, output: "Goal project is disabled" };
     if (this.deps.canRunGoal && !(await this.deps.canRunGoal(configured)))
-      return { agentId: null, output: "Goal deferred until its coordinator is available" };
+      throw new GoalExecutionDeferred("Goal deferred until its coordinator is available");
     const receipt = (await this.receipts.read()).events.find(
       (entry) => !entry.delivered && entry.goalId === goalId && entry.event.projectId === projectId,
     );
@@ -352,12 +352,11 @@ export class CoordinatorAutomation {
         receipt &&
         existing &&
         Object.values(existing.runs).some((run) => run.eventId === receipt.event.id)
-      )
+      ) {
         await this.markDelivered(goalId, receipt.event);
-      return {
-        agentId: null,
-        output: "Goal paused, already claimed, or concurrency limit reached",
-      };
+        return { agentId: null, output: "Goal event already claimed" };
+      }
+      throw new GoalExecutionDeferred("Goal paused, already claimed, or concurrency limit reached");
     }
     if (receipt) await this.markDelivered(goalId, receipt.event);
     let result: GoalExecutionOutcome;
@@ -366,7 +365,7 @@ export class CoordinatorAutomation {
     } catch (error) {
       if (error instanceof GoalExecutionDeferred) {
         await this.deferExecution(projectId, goalId, runId, receipt?.event);
-        return { agentId: null, output: error.message };
+        throw error;
       }
       await this.goals.markRunAttention(
         projectId,

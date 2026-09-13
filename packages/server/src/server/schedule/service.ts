@@ -30,6 +30,10 @@ import type {
 import type { FirstAgentContext } from "@getpaseo/protocol/messages";
 
 const SCHEDULE_TICK_INTERVAL_MS = 1000;
+const DEFERRED_SCHEDULE_RETRY_MS = 30_000;
+
+/** No work was dispatched. Leave the cadence due for the next scheduler tick. */
+export class ScheduleExecutionDeferredError extends Error {}
 
 // A run failed because its target no longer exists: the agent was deleted or
 // archived, or a new-agent cwd was removed. These are permanent, so the schedule
@@ -276,6 +280,9 @@ export class ScheduleService {
     runId: string,
   ) => Promise<ScheduleExecutionResult>;
   private readonly runningScheduleIds = new Set<string>();
+  // Keep the original due time durable; a restart may retry admission once.
+  // This throttle only avoids rewriting a busy goal on every one-second tick.
+  private readonly deferredScheduledRetryAt = new Map<string, number>();
   private tickTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: ScheduleServiceOptions) {
@@ -640,6 +647,7 @@ export class ScheduleService {
       if (this.runningScheduleIds.has(schedule.id)) {
         continue;
       }
+      if ((this.deferredScheduledRetryAt.get(schedule.id) ?? 0) > now.getTime()) continue;
       if (shouldCompleteSchedule(schedule, now)) {
         await this.completeScheduleIfDue(schedule.id, now);
         continue;
@@ -805,6 +813,7 @@ export class ScheduleService {
 
     try {
       const result = await this.runner(scheduleWithRun, runId);
+      this.deferredScheduledRetryAt.delete(schedule.id);
       await this.finishRun({
         scheduleId: schedule.id,
         runId,
@@ -817,6 +826,22 @@ export class ScheduleService {
         manual,
       });
     } catch (error) {
+      if (error instanceof ScheduleExecutionDeferredError) {
+        if (!manual) {
+          this.deferredScheduledRetryAt.set(
+            schedule.id,
+            this.now().getTime() + DEFERRED_SCHEDULE_RETRY_MS,
+          );
+        }
+        // Admission is not a completed run: it must not consume maxRuns or a
+        // cadence window. Preserve concurrent pause, retarget and delete edits.
+        await this.store.update(schedule.id, (current) => ({
+          ...current,
+          runs: current.runs.filter((run) => run.id !== runId),
+          updatedAt: this.now().toISOString(),
+        }));
+        return;
+      }
       await this.finishRun({
         scheduleId: schedule.id,
         runId,

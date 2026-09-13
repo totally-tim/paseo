@@ -2788,7 +2788,10 @@ export class CoordinatorService {
     }
     const scope = params.state?.scope ?? "everything";
     if (scope === "everything") return true;
-    return getParentAgentIdFromLabels(target.labels) !== null;
+    return Boolean(
+      params.state?.agentId &&
+      (await isAgentDescendantOf(this.lineageDeps(), params.state.agentId, params.targetAgentId)),
+    );
   }
 
   private lineageDeps(): AgentLineageDeps {
@@ -2946,17 +2949,15 @@ export class CoordinatorService {
    * reads enabled. Each availability edge writes a wake row on every enabled
    * project's board so the outage surfaces where the coordinator is watched.
    */
-  async handleAgentMcpAvailability(
-    available: boolean,
-    flag: "mcp.enabled" | "mcp.injectIntoAgents" = "mcp.enabled",
-  ): Promise<void> {
+  async handleAgentMcpAvailability(available: boolean): Promise<void> {
     const previous = this.agentMcpAvailable;
     if (previous === available) return;
     this.agentMcpAvailable = available;
     // Booting with the endpoint already on is the default, not a transition.
     let text: string | null = null;
     if (!available) {
-      text = `Paseo tools are off (daemon ${flag}) — the coordinator's tools are unreachable until it is set`;
+      text =
+        "Paseo tools are off (daemon mcp.enabled) — the coordinator's tools are unreachable until it is set";
     } else if (previous === false) {
       text = "Paseo tools are back — the coordinator's tools are reachable again";
     }

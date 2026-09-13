@@ -16,6 +16,8 @@ import {
 } from "./test-utils/daemon-test-context.js";
 import { createTestAgentClients } from "./test-utils/fake-agent-client.js";
 import type { AgentPromptInput } from "./agent/agent-sdk-types.js";
+import { DaemonClient } from "./test-utils/daemon-client.js";
+import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
 
 let context: DaemonTestContext | null = null;
 const directories: string[] = [];
@@ -54,6 +56,70 @@ function promptText(prompt: AgentPromptInput): string {
 }
 
 describe("global coordinator over the wire", () => {
+  test.each([false, true])(
+    "hidden backing records stay out of older feeds (owned subscriptions: %s)",
+    async (owned) => {
+      context = await createDaemonTestContext();
+      await openProject(context);
+      const clientId = `coordinator-visibility-${owned}`;
+      const legacy = new DaemonClient({
+        url: `ws://127.0.0.1:${context.daemon.port}/ws`,
+        clientId,
+        capabilities: { [CLIENT_CAPS.coordinator]: false, [CLIENT_CAPS.ownedSubscriptions]: owned },
+      });
+      const modern = new DaemonClient({
+        url: `ws://127.0.0.1:${context.daemon.port}/ws`,
+        clientId,
+      });
+      const workspaceUpdates: string[] = [];
+      const projectUpdates: string[] = [];
+      legacy.on("workspace_update", (message) => {
+        if (message.payload.kind === "upsert") workspaceUpdates.push(message.payload.workspace.id);
+      });
+      legacy.on("project.update", (message) => {
+        if (message.payload.kind === "upsert")
+          projectUpdates.push(message.payload.project.projectId);
+      });
+      try {
+        await legacy.connect();
+        await modern.connect();
+        await legacy.observeWorkspaces().ready;
+        await legacy.observeEvents(["project.update"]).ready;
+        await modern.observeWorkspaces().ready;
+        const global = await context.client.enableGlobalCoordinator({
+          profile: { provider: "codex" },
+        });
+        const ordinary = await openProject(context);
+        await expect.poll(() => workspaceUpdates).toContain(ordinary.id);
+        await expect.poll(() => projectUpdates).toContain(ordinary.projectId);
+        expect(workspaceUpdates).not.toContain(global.workspaceId);
+        expect(projectUpdates).not.toContain(global.projectId);
+        expect((await legacy.fetchWorkspaces()).entries.map((entry) => entry.id)).not.toContain(
+          global.workspaceId,
+        );
+        expect(
+          (await legacy.fetchWorkspaces({ sync: {} })).entries.map((entry) => entry.id),
+        ).not.toContain(global.workspaceId);
+        expect(
+          (await legacy.listProjects()).projects.map((project) => project.projectId),
+        ).not.toContain(global.projectId);
+        expect(
+          (await legacy.listProjects({ sync: {} })).projects.map((project) => project.projectId),
+        ).not.toContain(global.projectId);
+        // Older sockets sharing the client ID must not remove modern directory records.
+        expect(
+          (await modern.fetchWorkspaces({ sync: {} })).entries.map((entry) => entry.id),
+        ).toContain(global.workspaceId);
+        expect(
+          (await modern.listProjects({ sync: {} })).projects.map((project) => project.projectId),
+        ).toContain(global.projectId);
+      } finally {
+        await legacy.close();
+        await modern.close();
+      }
+    },
+  );
+
   test("enable reparents project coordinators and keeps its backing records hidden", async () => {
     context = await createDaemonTestContext();
     const workspace = await openProject(context);

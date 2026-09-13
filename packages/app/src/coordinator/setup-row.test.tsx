@@ -65,6 +65,8 @@ const providersSnapshot = vi.hoisted(() => ({
       { provider: "claude", status: "ready", enabled: true, label: "Claude" },
       { provider: "codex", status: "ready", enabled: true, label: "Codex" },
       { provider: "opencode", status: "ready", enabled: true, label: "OpenCode" },
+      { provider: "copilot", status: "ready", enabled: true, label: "Copilot" },
+      { provider: "pi", status: "ready", enabled: true, label: "Pi" },
     ] as ProviderSnapshotEntry[],
   },
 }));
@@ -86,9 +88,8 @@ vi.mock("@/components/provider-icons", () => ({
   getProviderIcon: () => () => null,
 }));
 
-vi.mock("@/components/combined-model-selector", () => ({
-  CombinedModelSelector: () => null,
-}));
+const modelSelector = vi.hoisted(() => vi.fn((_props: { providers: { id: string }[] }) => null));
+vi.mock("@/components/combined-model-selector", () => ({ CombinedModelSelector: modelSelector }));
 
 // The combobox under SelectFieldTrigger mounts reanimated, whose Flow sources do
 // not survive the test transform; the delegate pickers are not under test here.
@@ -158,6 +159,7 @@ function renderSheet() {
 }
 
 beforeEach(() => {
+  modelSelector.mockClear();
   useCoordinatorProjectStore.setState({ hosts: {} });
   useDraftStore.setState({ drafts: {} });
 });
@@ -167,6 +169,24 @@ afterEach(() => {
 });
 
 describe("coordinator setup sheet CI note", () => {
+  it("offers only restricted providers for investigators while implementers retain all providers", async () => {
+    hostClient.current = clientWith({ coordinator: null });
+    renderSheet();
+    await waitFor(() => expect(hostClient.current?.getProjectCoordinator).toHaveBeenCalled());
+    const [investigator, implementer] = modelSelector.mock.calls.slice(-2);
+    expect(investigator[0].providers.map((entry) => entry.id)).toEqual([
+      "claude",
+      "codex",
+      "opencode",
+    ]);
+    expect(implementer[0].providers.map((entry) => entry.id)).toEqual([
+      "claude",
+      "codex",
+      "opencode",
+      "copilot",
+      "pi",
+    ]);
+  });
   it("says the CI watch has nothing to poll when the repository has no CI", async () => {
     hostClient.current = clientWith({ coordinator: null, ciConfigured: false });
     renderSheet();

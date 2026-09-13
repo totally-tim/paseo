@@ -108,6 +108,11 @@ test.describe("Global coordinator", () => {
       await expect(page.getByTestId("coordinator-reply").filter({ visible: true })).toContainText(
         GLOBAL_REPLY,
       );
+      await page.getByTestId("coordinator-trust-pill").filter({ visible: true }).click();
+      await page.getByTestId("coordinator-open-settings").filter({ visible: true }).click();
+      await page.getByTestId("coordinator-disable-project").filter({ visible: true }).click();
+      await expect(page.getByTestId("coordinator-global-setup")).toBeVisible();
+      expect((await workspace.client.getGlobalCoordinator()).enabled).toBe(false);
     } finally {
       await workspace.client.disableGlobalCoordinator();
       if (hiddenProjectId) await workspace.client.removeProject(hiddenProjectId);
