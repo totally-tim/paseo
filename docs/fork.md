@@ -24,6 +24,7 @@ sync PR and remove its line here.
 | Plugin child restoration across parent replacement               | `packages/server/src/server/agent/plugin-provider.ts`                                                                                                                                                                                                                                   | Retains child routing when parent runtimes overlap during reopen                                                                                                                                                                |
 | In-app changelog reads the fork repository                       | `packages/app/src/changelog/internal/changelog-source.ts`                                                                                                                                                                                                                               | Upstream fetches `getpaseo/paseo` CHANGELOG.md, which would show upstream release notes inside fork builds                                                                                                                      |
 | Agent-spawned `paseo run` isolation                              | `packages/cli/src/commands/agent/run.ts`, `packages/server/src/server/agent/tools/paseo-tools.ts`, `packages/server/src/server/test-utils/session-stubs.ts`, `public-docs/cli.md`, `public-docs/mcp.md`                                                                                 | Stderr notice when a spawned run shares the caller checkout, and `PASEO_AGENT_SPAWN_ISOLATION=worktree` to default spawned runs to a managed worktree, on both `paseo run` and the `create_agent` tool. Candidate for upstream. |
+| Paseo tools enabled by default                                   | `packages/server/src/server/config.ts`, [MCP configuration](../public-docs/mcp.md)                                                                                                                                                                                                      | Remote coding sessions receive orchestration tools without a setup step; explicit host and provider opt-outs remain available.                                                                                                  |
 | Fork identity: feed owner, drift check, this doc, the fork skill | `packages/desktop/electron-builder.yml`, `.github/workflows/fork-upstream-drift.yml`, `scripts/fork/`, `docs/fork.md`, `.agents/skills/fork`                                                                                                                                            | Only meaningful on the fork                                                                                                                                                                                                     |
 | Product display name Forkeo                                      | `packages/app/app.config.js`, `packages/desktop/electron-builder.yml`, `packages/desktop/src/main.ts`, `packages/desktop/bin/paseo`, `packages/cli/src/commands/open.ts`, `packages/app/src/i18n/resources`                                                                             | The fork ships its own app name; every internal identifier stays paseo so upstream merges keep working                                                                                                                          |
 | Forkeo icon assets and glyph                                     | `packages/app/assets/images`, `packages/app/public`, `packages/desktop/assets`, `packages/app/src/components/icons/paseo-logo.tsx`, `scripts/fork/generate-icons.mjs`                                                                                                                   | Shared `forkeo-glyph.json` defines the open f-shaped fork; regenerate everything with `node scripts/fork/generate-icons.mjs`                                                                                                    |
@@ -123,18 +124,16 @@ workspace without committing. The release workflow runs it before building, and
 `scripts/fork/build-desktop.sh <version>` runs it for a local build and restores the files
 afterwards.
 
-Why every workspace and not just desktop: the desktop app restarts a desktop-managed daemon
-whenever the app version differs from the daemon's, and the daemon reports the version from
-`packages/server/package.json` (`shouldRestartForVersion` in
-`packages/desktop/src/daemon/daemon-manager.ts`). A build where desktop says 1.0.1 and the
-server says 0.7.2 restarts its own daemon on every launch.
+Stamp every workspace so the CLI, daemon, and desktop report the same release.
+A package's committed upstream version does not establish the installed binary's
+provenance. Record the fork tag, resolved commit, artifact checksum, and executable
+paths when installing a release.
 
-Why the fork's version has to differ from upstream's at all: the same guard is what stops a
-fork app from adopting a leftover upstream desktop-managed daemon, which does not advertise
-the `projectGroups` capability and would show a sidebar with no groups and no error. The guard
-returns `false` whenever `desktopManaged` is false, so a daemon started by the CLI or launchd is
-adopted at any version. The version protects you from a leftover desktop-managed daemon, not
-from one you started yourself.
+Desktop ownership follows the [daemon lifecycle contract](architecture.md#deployment-models).
+A preexisting CLI or launchd daemon is attached without automatic binary replacement.
+Updating the desktop application therefore does not upgrade a separately managed
+daemon. Verify the supervisor and worker after an explicit service upgrade, and
+check app/CLI/daemon version drift separately from the fork update feed.
 
 The 1.x line collides with upstream the day upstream ships 1.0.0. Nothing breaks on that day,
 because the feed only ever compares fork builds with fork builds, but pick a new line before
@@ -146,7 +145,7 @@ then.
 the auto-updater (`autoDownload = true`, `allowDowngrade = false` in
 `packages/desktop/src/features/auto-updater.ts`) would install an upstream release over the fork
 build and take every fork feature with it. Check any built app: `Contents/Resources/app-update.yml`
-must say `owner: totally-tim`.
+must say `owner: totally-tim` and `repo: paseo`.
 
 ## Releasing
 
@@ -180,16 +179,19 @@ is downloadable by anyone who finds it.
 scripts/fork/build-desktop.sh 1.0.1
 ```
 
-The artifacts land in `packages/desktop/release/`. To install, quit Forkeo first and wait for
-port 6767 to go quiet. The desktop settings ship `daemon.keepRunningAfterQuit: false`, so
-quitting stops the daemon and kills every agent it manages. Remove the existing
-`/Applications/Paseo.app` or `/Applications/Forkeo.app` before copying the new one in, because
-of the shared settings profile below.
+The artifacts land in `packages/desktop/release/`. Back up the application settings and daemon
+state before installation. Quit the desktop before replacing the installed `/Applications/Paseo.app` or `/Applications/Forkeo.app` as a whole;
+do not merge app bundle contents. With the default `daemon.keepRunningAfterQuit: false`, quitting
+stops a daemon the desktop started and interrupts its agents. A preexisting CLI or launchd daemon
+continues running. Upgrade that daemon separately after permission to interrupt its agents.
 
-Confirm the swap took: `paseo daemon status` reports the fork version for both `CLI` and
-`Daemon Version`. The CLI shim at `~/.local/bin/paseo` resolves into the installed app bundle.
-A shim installed while `Paseo.app` was the bundle path dangles after the swap; reinstall the
-CLI from the app's integrations settings to repoint it at `Forkeo.app`.
+Confirm the swap took: `paseo --version` reports the CLI version, and `paseo daemon status`
+reports `Daemon Version`. Both must match the approved fork release. A desktop-managed
+installation uses the bundled CLI shim. A launchd installation
+uses its approved versioned launcher; invoking the desktop's **Install CLI** action replaces that
+link with the bundled shim, so recheck command resolution afterward.
+For desktop-managed installs, reinstall the CLI through the app after a bundle rename so the
+shim points to `Forkeo.app`. Keep a launchd installation linked to its versioned launcher.
 
 A locally built app carries no quarantine flag and launches even though `spctl` rejects it as
 "Unnotarized Developer ID". A teammate who downloads a DMG in a browser gets the quarantine flag

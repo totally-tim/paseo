@@ -15,7 +15,7 @@ category: Orchestration
 | Setting                       | Default | Purpose                                            |
 | ----------------------------- | ------- | -------------------------------------------------- |
 | `daemon.mcp.enabled`          | `true`  | Run the MCP server.                                |
-| `daemon.mcp.injectIntoAgents` | `false` | Give agents launched by Paseo access to its tools. |
+| `daemon.mcp.injectIntoAgents` | `true`  | Give agents launched by Paseo access to its tools. |
 
 Depending on the provider, Paseo delivers tools through its native tool interface or MCP. The capabilities are the same. Start a new agent or reload an existing one after changing injection settings.
 

@@ -119,7 +119,7 @@ Hover doesn't exist on touch devices. Anything you hide behind hover must have a
 const showControls = isHovered || isNative || isCompact;
 ```
 
-`isNative` and `isCompact` come from `@/constants/platform` and `@/constants/layout`. Don't use `Platform.OS === "ios"` as a proxy.
+Use the [platform and layout gates](platforms.md) for `isNative` and `isCompact`.
 
 `onPointerEnter` / `onPointerLeave` are DOM events. They do not fire on native. You do not need to gate them — on native, hover is unreachable anyway and visibility is driven by `isNative` / `isCompact` in your show-the-controls expression above. This is why the workspace row's pointer events are not wrapped in `if (isWeb)`.
 
