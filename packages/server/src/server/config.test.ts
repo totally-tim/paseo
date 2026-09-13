@@ -14,6 +14,27 @@ describe("server config", () => {
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   });
 
+  test.each([
+    { persisted: undefined, cli: undefined, expected: true },
+    { persisted: false, cli: undefined, expected: false },
+    { persisted: true, cli: false, expected: false },
+    { persisted: false, cli: true, expected: true },
+  ])("resolves MCP injection with persisted=$persisted and cli=$cli", async (settings) => {
+    const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-config-mcp-"));
+    roots.push(paseoHome);
+    await writeFile(
+      path.join(paseoHome, "config.json"),
+      JSON.stringify({ version: 1, daemon: { mcp: { injectIntoAgents: settings.persisted } } }),
+    );
+
+    const config = loadConfig(paseoHome, {
+      env: {},
+      cli: { mcpInjectIntoAgents: settings.cli },
+    });
+
+    expect(config.mcpInjectIntoAgents).toBe(settings.expected);
+  });
+
   test("records when the daemon is managed by Paseo Desktop", async () => {
     const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-config-desktop-managed-"));
     roots.push(paseoHome);
