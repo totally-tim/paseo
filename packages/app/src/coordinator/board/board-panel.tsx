@@ -1,3 +1,4 @@
+import { openWorkspaceTargetAtLocation } from "@/workspace-tabs/open-beside";
 import { useCallback, useMemo, useState } from "react";
 import { Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
@@ -67,6 +68,14 @@ function CoordinatorBoardPanel() {
   const coordinatorAgentId = board?.coordinatorAgentId ?? null;
   const insets = useSafeAreaInsets();
   const isCompact = useIsCompactFormFactor();
+  const openMemory = useCallback(() => {
+    openWorkspaceTargetAtLocation({
+      workspaceKey: buildWorkspaceTabPersistenceKey({ serverId, workspaceId }),
+      target: { kind: "coordinator_memory", scope: "personal-project", projectId },
+      isCompact,
+      location: "side",
+    });
+  }, [serverId, workspaceId, projectId, isCompact]);
   const { onLayout: onInputAreaLayout, isBelow: isCompactComposerLayout } = useContainerWidthBelow(
     COMPACT_FORM_FACTOR_WIDTH,
     { initialIsBelow: isCompact },
@@ -197,7 +206,11 @@ function CoordinatorBoardPanel() {
           reply={reply}
         >
           <View style={inputAreaStyle} onLayout={onInputAreaLayout}>
-            <CoordinatorBoardTracks serverId={serverId} projectId={projectId} />
+            <CoordinatorBoardTracks
+              serverId={serverId}
+              projectId={projectId}
+              onOpenMemory={openMemory}
+            />
             {coordinatorAgentId ? (
               <Composer
                 agentId={coordinatorAgentId}

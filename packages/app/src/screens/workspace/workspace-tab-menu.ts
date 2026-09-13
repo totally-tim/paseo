@@ -164,6 +164,9 @@ function getCloseButtonTestId(tab: WorkspaceTabDescriptor): string {
   if (tab.target.kind === "new_tab") {
     return `workspace-new-tab-close-${tab.tabId}`;
   }
+  if (tab.target.kind === "coordinator_memory") {
+    return `workspace-memory-close-${encodeFilePathForPathSegment(buildDeterministicWorkspaceTabId(tab.target))}`;
+  }
   if (tab.target.kind === "coordinator_board") {
     return `workspace-coordinator-board-close-${encodeFilePathForPathSegment(tab.target.projectId)}`;
   }

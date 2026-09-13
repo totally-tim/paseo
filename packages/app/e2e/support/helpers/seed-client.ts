@@ -39,6 +39,8 @@ export interface SeedDaemonClient extends Pick<
   | "enableGlobalCoordinator"
   | "disableGlobalCoordinator"
   | "getGlobalCoordinator"
+  | "getCoordinatorMemory"
+  | "updateCoordinatorMemory"
   | "observeCoordinatorBoard"
 > {
   connect(): Promise<void>;

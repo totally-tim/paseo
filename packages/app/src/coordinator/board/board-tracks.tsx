@@ -8,7 +8,7 @@ import type {
   CoordinatorUsage,
   CoordinatorUsageExpectation,
 } from "@getpaseo/protocol/messages";
-import { ComposerTrackPill } from "@/composer/tracks";
+import { ComposerTrackPill, ComposerTrackRow } from "@/composer/tracks";
 import { Button } from "@/components/ui/button";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { useHostRuntimeClient } from "@/runtime/host-runtime";
@@ -19,6 +19,7 @@ import {
   useProjectCoordinatorRecord,
 } from "@/coordinator/project-store";
 import { useCoordinatorBoardSnapshot } from "@/coordinator/board-store";
+import { CoordinatorSettingsSheet } from "@/coordinator/settings-sheet";
 
 const TRUST_LEVELS: readonly CoordinatorTrustLevel[] = ["observe", "propose", "ship", "autopilot"];
 
@@ -121,6 +122,8 @@ export interface CoordinatorTrustPillProps {
   usage: CoordinatorUsage | null;
   usageExpectation: CoordinatorUsageExpectation | null;
   onSelectTrust: (level: CoordinatorTrustLevel) => Promise<void> | void;
+  onOpenMemory?: () => void;
+  onOpenSettings?: () => void;
 }
 
 /**
@@ -134,6 +137,8 @@ export function CoordinatorTrustPill({
   usage,
   usageExpectation,
   onSelectTrust,
+  onOpenMemory,
+  onOpenSettings,
   children,
   global = false,
 }: CoordinatorTrustPillProps): ReactElement {
@@ -222,6 +227,16 @@ export function CoordinatorTrustPill({
           <CoordinatorUsageMeter usage={usage} expectation={usageExpectation} />
         ) : null}
         {children}
+        {onOpenMemory ? (
+          <ComposerTrackRow onPress={onOpenMemory} testID="coordinator-personal-memory">
+            <Text style={styles.hint}>Personal memory</Text>
+          </ComposerTrackRow>
+        ) : null}
+        {onOpenSettings ? (
+          <ComposerTrackRow onPress={onOpenSettings} testID="coordinator-open-settings">
+            <Text style={styles.hint}>Coordinator settings</Text>
+          </ComposerTrackRow>
+        ) : null}
         {error ? (
           <Text style={styles.errorText} testID="coordinator-trust-error">
             {error}
@@ -320,10 +335,15 @@ export function CoordinatorScopePill({
 export function CoordinatorBoardTracks({
   serverId,
   projectId,
+  onOpenMemory,
 }: {
   serverId: string;
   projectId: string;
+  onOpenMemory?: () => void;
 }): ReactElement | null {
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
   const client = useHostRuntimeClient(serverId);
   const board = useCoordinatorBoardSnapshot(serverId, projectId);
   const record = useProjectCoordinatorRecord(serverId, projectId);
@@ -367,8 +387,16 @@ export function CoordinatorBoardTracks({
         usage={board.usage ?? null}
         usageExpectation={record?.coordinator?.usageExpectation ?? null}
         onSelectTrust={applyTrust}
+        onOpenMemory={onOpenMemory}
+        onOpenSettings={openSettings}
       />
       <CoordinatorScopePill scope={board.scope} onSelectScope={applyScope} />
+      <CoordinatorSettingsSheet
+        serverId={serverId}
+        projectId={projectId}
+        visible={settingsOpen}
+        onClose={closeSettings}
+      />
     </View>
   );
 }

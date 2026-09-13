@@ -458,3 +458,13 @@ test("a stale delete does not release a link the source already gave to another 
   expect((await agentStorage.get(source.id))?.labels[HANDOFF_TO_AGENT_ID_LABEL]).toBe(second.id);
   expect((await agentStorage.getHandoff(source.id))?.successorAgentId).toBe(second.id);
 });
+
+test("manual handoff keeps interactive provider resolution and successor creation", async () => {
+  const { deps, source } = await setup();
+  const create = vi.spyOn(deps.agentManager, "createAgent");
+  await handoffAgent(deps, { sourceAgentId: source.id, provider: "codex" });
+  expect(deps.providerSnapshotManager.resolveCreateConfig).toHaveBeenCalledWith(
+    expect.objectContaining({ unattended: false }),
+  );
+  expect(create.mock.calls[0]?.[2]?.unattended).toBeUndefined();
+});

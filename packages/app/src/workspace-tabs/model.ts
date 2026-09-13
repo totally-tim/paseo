@@ -40,6 +40,8 @@ export type WorkspaceTabTarget =
   | { kind: "new_tab" }
   | { kind: "draft"; draftId: string; setup?: WorkspaceDraftTabSetup }
   | { kind: "coordinator_board"; projectId: string }
+  | { kind: "coordinator_memory"; scope: "personal" }
+  | { kind: "coordinator_memory"; scope: "personal-project"; projectId: string }
   | { kind: "agent"; agentId: string }
   | { kind: "provider_subagent"; parentAgentId: string; subagentId: string }
   | { kind: "terminal"; terminalId: string }

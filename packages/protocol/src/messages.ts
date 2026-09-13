@@ -3542,6 +3542,9 @@ export const ProjectCoordinatorStateSchema = z.object({
   scope: CoordinatorScopeSchema,
   /** The coordinator session's own launch bundle. */
   profile: CoordinatorProfileSelectionSchema.optional(),
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+  fallbackProfile: CoordinatorProfileSelectionSchema.optional(),
+  rotationThresholdPercent: z.number().int().min(1).max(100).optional(),
   profiles: CoordinatorProfilesSchema.optional(),
   usageExpectation: CoordinatorUsageExpectationSchema.optional(),
   /** Hard spawn limits; daemon defaults 8 concurrent, depth 2. */
@@ -3568,6 +3571,9 @@ export const GlobalCoordinatorStateSchema = z.object({
   projectId: z.string().nullable(),
   trustLevel: CoordinatorTrustLevelSchema,
   profile: CoordinatorProfileSelectionSchema.optional(),
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+  fallbackProfile: CoordinatorProfileSelectionSchema.optional(),
+  rotationThresholdPercent: z.number().int().min(1).max(100).optional(),
 });
 export type GlobalCoordinatorState = z.infer<typeof GlobalCoordinatorStateSchema>;
 
@@ -3591,11 +3597,52 @@ export const CoordinatorGlobalUpdateRequestSchema = z.object({
   notificationSettings: CoordinatorNotificationSettingsSchema.partial().optional(),
   requestId: z.string(),
   profile: CoordinatorProfileSelectionSchema.optional(),
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+  fallbackProfile: CoordinatorProfileSelectionSchema.nullable().optional(),
+  rotationThresholdPercent: z.number().int().min(1).max(100).optional(),
   trustLevel: CoordinatorTrustLevelSchema.optional(),
 });
 export type CoordinatorGlobalUpdateRequest = z.infer<typeof CoordinatorGlobalUpdateRequestSchema>;
 
 // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+export const CoordinatorMemoryTargetSchema = z.object({
+  scope: z.enum(["personal", "personal-project"]),
+  projectId: z.string().optional(),
+});
+export type CoordinatorMemoryTarget = z.infer<typeof CoordinatorMemoryTargetSchema>;
+export const CoordinatorMemoryUpdateSchema = CoordinatorMemoryTargetSchema.extend({
+  content: z.string(),
+  expectedRevision: z.string(),
+});
+export type CoordinatorMemoryUpdate = z.infer<typeof CoordinatorMemoryUpdateSchema>;
+export const CoordinatorMemorySnapshotSchema = z.object({
+  filePath: z.string(),
+  content: z.string(),
+  revision: z.string(),
+});
+export type CoordinatorMemorySnapshot = z.infer<typeof CoordinatorMemorySnapshotSchema>;
+export const CoordinatorMemoryGetRequestSchema = CoordinatorMemoryTargetSchema.extend({
+  type: z.literal("coordinator.memory.get.request"),
+  requestId: z.string(),
+});
+export const CoordinatorMemoryUpdateRequestSchema = CoordinatorMemoryUpdateSchema.extend({
+  type: z.literal("coordinator.memory.update.request"),
+  requestId: z.string(),
+});
+const CoordinatorMemoryResultSchema = z.object({
+  requestId: z.string(),
+  memory: CoordinatorMemorySnapshotSchema.nullable(),
+  error: z.string().nullable(),
+});
+export const CoordinatorMemoryGetResponseSchema = z.object({
+  type: z.literal("coordinator.memory.get.response"),
+  payload: CoordinatorMemoryResultSchema,
+});
+export const CoordinatorMemoryUpdateResponseSchema = z.object({
+  type: z.literal("coordinator.memory.update.response"),
+  payload: CoordinatorMemoryResultSchema,
+});
+
 export const CoordinatorPermissionDeferRequestSchema = z.object({
   type: z.literal("coordinator.permission.defer.request"),
   agentId: z.string(),
@@ -3662,6 +3709,9 @@ export const CoordinatorProjectUpdateRequestSchema = z.object({
   requestId: z.string(),
   projectId: z.string(),
   profile: CoordinatorProfileSelectionSchema.optional(),
+  // COMPAT(coordinator): added in v0.8.0, remove after 2027-03-13.
+  fallbackProfile: CoordinatorProfileSelectionSchema.nullable().optional(),
+  rotationThresholdPercent: z.number().int().min(1).max(100).optional(),
   profiles: CoordinatorProfilesSchema.optional(),
   trustLevel: CoordinatorTrustLevelSchema.optional(),
   scope: CoordinatorScopeSchema.optional(),
@@ -3958,6 +4008,8 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   CoordinatorGlobalUpdateRequestSchema,
   CoordinatorGlobalGetRequestSchema,
   CoordinatorPermissionDeferRequestSchema,
+  CoordinatorMemoryGetRequestSchema,
+  CoordinatorMemoryUpdateRequestSchema,
   CoordinatorProjectEnableRequestSchema,
   CoordinatorProjectDisableRequestSchema,
   CoordinatorProjectUpdateRequestSchema,
@@ -7552,6 +7604,8 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   CoordinatorGlobalUpdateResponseSchema,
   CoordinatorGlobalGetResponseSchema,
   CoordinatorPermissionDeferResponseSchema,
+  CoordinatorMemoryGetResponseSchema,
+  CoordinatorMemoryUpdateResponseSchema,
   CoordinatorProjectEnableResponseSchema,
   CoordinatorProjectDisableResponseSchema,
   CoordinatorProjectUpdateResponseSchema,

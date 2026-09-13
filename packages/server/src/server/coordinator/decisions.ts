@@ -42,6 +42,7 @@ const ActionSchema = z.object({
 const RecordSchema = z.object({
   requestId: z.string(),
   agentId: z.string(),
+  previousAgentIds: z.array(z.string()).optional(),
   projectId: z.string(),
   question: z.string(),
   actions: z.array(ActionSchema),
@@ -137,6 +138,34 @@ export class CoordinatorDecisions {
     await writeJsonFileAtomic(this.file, StateSchema.parse(next));
     this.state = next;
   }
+  async retargetAgent(sourceAgentId: string, successorAgentId: string): Promise<void> {
+    await this.serialize(async () => {
+      const state = await this.load();
+      const decisions = state.decisions.map((record) => {
+        if (record.agentId !== sourceAgentId || record.completed) return record;
+        this.registered.get(record.requestId)?.();
+        this.registered.delete(record.requestId);
+        return {
+          ...record,
+          agentId: successorAgentId,
+          previousAgentIds: [...new Set([...(record.previousAgentIds ?? []), sourceAgentId])],
+        };
+      });
+      await this.save({ ...state, decisions });
+    });
+  }
+
+  /** Only durable daemon questions can route an old notification to a successor. */
+  async resolveResponseAgent(agentId: string, requestId: string): Promise<string | null> {
+    const state = await this.load();
+    const record = state.decisions.find(
+      (entry) => entry.requestId === requestId && !entry.completed,
+    );
+    return record && (record.agentId === agentId || record.previousAgentIds?.includes(agentId))
+      ? record.agentId
+      : null;
+  }
+
   owns(requestId: string): boolean {
     return this.state?.decisions.some((record) => record.requestId === requestId) ?? false;
   }

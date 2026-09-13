@@ -1,3 +1,4 @@
+import type { CoordinatorMemorySnapshot } from "@getpaseo/protocol/messages";
 import type { SidebarOrderStore } from "./sidebar-order-store.js";
 import { handleContinuationRequest } from "./agent-continuation/session.js";
 import type { AgentContinuationService } from "./agent-continuation/service.js";
@@ -3182,11 +3183,46 @@ export class Session {
     );
   }
 
+  private async handleCoordinatorMemory(
+    msg: Extract<
+      SessionInboundMessage,
+      { type: "coordinator.memory.get.request" | "coordinator.memory.update.request" }
+    >,
+    source?: object,
+  ): Promise<void> {
+    let memory: CoordinatorMemorySnapshot | null = null;
+    let error: string | null = null;
+    try {
+      if (!this.coordinatorService)
+        throw new Error("Coordinator support is not available on this daemon");
+      memory =
+        msg.type === "coordinator.memory.get.request"
+          ? await this.coordinatorService.getMemory(msg)
+          : await this.coordinatorService.updateMemory(msg);
+    } catch (cause) {
+      error = getErrorMessage(cause);
+    }
+    const payload = { requestId: msg.requestId, memory, error };
+    this.emitForSource(
+      {
+        type:
+          msg.type === "coordinator.memory.get.request"
+            ? "coordinator.memory.get.response"
+            : "coordinator.memory.update.response",
+        payload,
+      },
+      source,
+    );
+  }
+
   private dispatchCoordinatorMessage(
     msg: SessionInboundMessage,
     source?: object,
   ): Promise<void> | undefined {
     switch (msg.type) {
+      case "coordinator.memory.get.request":
+      case "coordinator.memory.update.request":
+        return this.handleCoordinatorMemory(msg, source);
       case "coordinator.permission.defer.request":
         return this.handleCoordinatorPermissionDefer(msg, source);
       case "coordinator.global.enable.request":
@@ -3263,6 +3299,12 @@ export class Session {
         case "coordinator.global.update.request":
           respond(
             await service.updateGlobalCoordinator({
+              ...(msg.fallbackProfile !== undefined
+                ? { fallbackProfile: msg.fallbackProfile }
+                : {}),
+              ...(msg.rotationThresholdPercent !== undefined
+                ? { rotationThresholdPercent: msg.rotationThresholdPercent }
+                : {}),
               ...(msg.notificationSettings !== undefined
                 ? { notificationSettings: msg.notificationSettings }
                 : {}),
@@ -3346,6 +3388,12 @@ export class Session {
         case "coordinator.project.update.request":
           respond(
             await service.updateProjectCoordinator({
+              ...(msg.fallbackProfile !== undefined
+                ? { fallbackProfile: msg.fallbackProfile }
+                : {}),
+              ...(msg.rotationThresholdPercent !== undefined
+                ? { rotationThresholdPercent: msg.rotationThresholdPercent }
+                : {}),
               projectId: msg.projectId,
               ...(msg.profile !== undefined ? { profile: msg.profile } : {}),
               ...(msg.profiles !== undefined ? { profiles: msg.profiles } : {}),
@@ -5220,13 +5268,17 @@ export class Session {
     response: AgentPermissionResponse,
   ): Promise<void> {
     try {
+      const responseAgentId =
+        (await this.coordinatorService?.resolveDecisionResponseAgent(agentId, requestId)) ??
+        agentId;
       await respondToAgentPermission({
         agentManager: this.agentManager,
-        agentId,
+        agentId: responseAgentId,
         requestId,
         response,
         logger: this.sessionLogger,
       });
+      // The manager publishes the successor event; the caller still awaits its original IDs.
       // COMPAT(ownedSubscriptions): added in v0.8.0, remove after 2027-03-09.
       // Legacy clients consume the single domain resolution; modern request outcomes
       // are independent of whether this socket (or its logical Session) observes it.

@@ -1445,6 +1445,7 @@ export async function createPaseoDaemon(
     );
   };
   const scheduleService = new ScheduleService({
+    isProtectedAgentTarget: (id) => coordinatorService.isRotatingAgentTarget(id),
     paseoHome: config.paseoHome,
     logger,
     agentManager,
@@ -1457,6 +1458,10 @@ export async function createPaseoDaemon(
   const unsubscribeDecisionTick = scheduleService.subscribeTick(() =>
     coordinatorService.tickDecisions(),
   );
+  await coordinatorService.initializeRotation({
+    providerSnapshotManager,
+    schedules: () => scheduleService,
+  });
   await scheduleService.start();
   agentManager.setAgentArchivedCallback(async (agentId) => {
     try {

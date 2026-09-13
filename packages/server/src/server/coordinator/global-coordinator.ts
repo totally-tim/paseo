@@ -247,6 +247,7 @@ export class GlobalCoordinator {
     return this.serialize(async () => {
       const state = await this.save({ ...(await this.get()), enabled: false });
       await this.deps.reconcileGlobalSetupProposals?.(state);
+      if (state.agentId) await this.deps.agentManager.continuations?.cancelExisting(state.agentId);
       if (state.agentId && this.deps.agentManager.getAgent(state.agentId))
         await this.deps.agentManager.closeAgent(state.agentId);
       return state;
@@ -254,6 +255,8 @@ export class GlobalCoordinator {
   }
 
   update(input: {
+    fallbackProfile?: CoordinatorProfileSelection | null;
+    rotationThresholdPercent?: number;
     notificationSettings?: Partial<NonNullable<GlobalCoordinatorState["notificationSettings"]>>;
     profile?: CoordinatorProfileSelection;
     trustLevel?: CoordinatorTrustLevel;
@@ -265,10 +268,11 @@ export class GlobalCoordinator {
         if (record && record.provider !== input.profile.provider)
           throw new Error("The coordinator provider is fixed for its session lifetime");
       }
-      const { notificationSettings, ...changes } = input;
+      const { notificationSettings, fallbackProfile, ...changes } = input;
       const next: GlobalCoordinatorState = {
         ...state,
         ...changes,
+        ...(fallbackProfile !== undefined ? { fallbackProfile: fallbackProfile ?? undefined } : {}),
         ...(notificationSettings
           ? {
               notificationSettings: {
@@ -296,6 +300,28 @@ export class GlobalCoordinator {
         }
       }
       return this.save(next);
+    });
+  }
+
+  adoptSuccessor(
+    sourceAgentId: string,
+    successor: import("../agent/agent-storage.js").StoredAgentRecord,
+  ): Promise<GlobalCoordinatorState> {
+    return this.serialize(async () => {
+      const state = await this.get();
+      if (!state.enabled || (state.agentId !== sourceAgentId && state.agentId !== successor.id))
+        throw new Error("Global coordinator changed during rotation");
+      return this.save({
+        ...state,
+        agentId: successor.id,
+        profile: {
+          provider: successor.provider,
+          model: successor.config?.model ?? undefined,
+          modeId: successor.config?.modeId ?? undefined,
+          thinkingOptionId: successor.config?.thinkingOptionId ?? undefined,
+          featureValues: successor.config?.featureValues ?? undefined,
+        },
+      });
     });
   }
 

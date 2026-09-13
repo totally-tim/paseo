@@ -172,6 +172,7 @@ export interface PaseoToolHostDependencies {
   coordinator?: {
     remember(input: CoordinatorRememberInput): Promise<CoordinatorRememberResult>;
     raiseDecision?(input: CoordinatorDecisionInput): Promise<CoordinatorDecisionResult>;
+    resolveDecisionResponseAgent?(agentId: string, requestId: string): Promise<string | null>;
     /**
      * Change-request writes stay with the coordinator: delegated subagents in
      * its tree are denied (they report upward; the coordinator posts under its
@@ -3820,9 +3821,15 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       // Permission authority sits with the coordinator or the user — a
       // governed session may not approve its own prompts.
       await assertSelfActionAllowed(agentId, "answer permission requests");
+      const responseAgentId =
+        (await options.coordinator?.resolveDecisionResponseAgent?.(agentId, requestId)) ?? agentId;
+      if (responseAgentId !== agentId) {
+        await assertAgentTargetAllowed(responseAgentId, { action: "mutate" });
+        await assertSelfActionAllowed(responseAgentId, "answer permission requests");
+      }
       await respondToAgentPermission({
         agentManager,
-        agentId,
+        agentId: responseAgentId,
         requestId,
         response,
         logger: childLogger,
@@ -4027,17 +4034,24 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       description:
         "Write a markdown memory entry. scope 'team' appends to .paseo/memory/project.md " +
         "for a coordinator and .paseo/memory/learned.md for a delegated agent, in your own " +
-        "checkout. Personal memory layers arrive in a later milestone; only 'team' works today.",
+        "checkout. Personal memory stores facts about you on this daemon; personal-project stores " +
+        "your preferences for this project. Coordinators may replace learned.md to prune it.",
       inputSchema: {
         scope: z
           .enum(["team", "personal", "personal-project"])
           .default("personal")
-          .describe("Memory layer; only 'team' is supported in this milestone."),
+          .describe(
+            "Memory layer; defaults to personal. Team memory must describe the codebase, not a person.",
+          ),
         content: z
           .string()
           .trim()
           .min(1)
           .describe("Markdown body to record — facts and decisions, not transcripts."),
+        file: z
+          .enum(["project.md", "learned.md"])
+          .optional()
+          .describe("Team file. Only coordinators may replace learned.md or write project.md."),
         mode: z
           .enum(["append", "replace"])
           .optional()
@@ -4047,7 +4061,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         filePath: z.string(),
       },
     },
-    async ({ scope, content, mode }) => {
+    async ({ scope, content, mode, file }) => {
       if (!callerAgentId) {
         throw new Error("remember requires an agent caller");
       }
@@ -4056,6 +4070,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         scope,
         content,
         mode,
+        ...(file !== undefined ? { file } : {}),
       });
       return {
         content: [],

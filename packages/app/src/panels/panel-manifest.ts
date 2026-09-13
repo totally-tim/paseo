@@ -82,6 +82,12 @@ const manifests = {
     supportedHosts: ["main"],
     resourceKey: (target) => target.workspaceId,
   },
+  coordinator_memory: {
+    kind: "coordinator_memory",
+    supportedHosts: ["main"],
+    resourceKey: (target) =>
+      target.scope === "personal" ? "personal" : `personal-project:${target.projectId}`,
+  },
   coordinator_board: {
     kind: "coordinator_board",
     supportedHosts: ["main"],

@@ -66,6 +66,13 @@ function normalizeSimpleWorkspaceTabTarget(value: WorkspaceTabTarget): Workspace
       const workspaceId = trimNonEmpty(value.workspaceId);
       return workspaceId ? { kind: "setup", workspaceId } : null;
     }
+    case "coordinator_memory": {
+      if (value.scope === "personal") return { kind: "coordinator_memory", scope: "personal" };
+      const projectId = value.scope === "personal-project" ? trimNonEmpty(value.projectId) : null;
+      return projectId
+        ? { kind: "coordinator_memory", scope: "personal-project", projectId }
+        : null;
+    }
     case "coordinator_board": {
       const projectId = trimNonEmpty(value.projectId);
       return projectId ? { kind: "coordinator_board", projectId } : null;
@@ -136,6 +143,7 @@ export function workspaceTabTargetsEqual(
         (right.context === "agent" && left.agentId === right.agentId))
     );
   }
+  if (left.kind === "coordinator_memory") return equal(left, right);
   return secondaryWorkspaceTabTargetsEqual(left, right);
 }
 
@@ -232,6 +240,11 @@ export function buildDeterministicWorkspaceTabId(target: WorkspaceTabTarget): st
   }
   if (target.kind === "commit_diff") {
     return `commit_diff_${target.sha}`;
+  }
+  if (target.kind === "coordinator_memory") {
+    return target.scope === "personal"
+      ? "coordinator_memory_personal"
+      : `coordinator_memory_project_${target.projectId}`;
   }
   if (target.kind === "coordinator_board") {
     return `coordinator_board_${target.projectId}`;

@@ -1,3 +1,8 @@
+import type {
+  CoordinatorMemoryTarget,
+  CoordinatorMemoryUpdate,
+  CoordinatorMemorySnapshot,
+} from "@getpaseo/protocol/messages";
 import { subscribeTimeline, type TimelineMessage } from "./timeline-subscription/index.js";
 import { ProviderSnapshotUpdates } from "./provider-snapshots/index.js";
 import {
@@ -582,6 +587,8 @@ export interface EnableGlobalCoordinatorOptions {
 }
 
 export interface UpdateGlobalCoordinatorOptions {
+  fallbackProfile?: CoordinatorProfileSelection | null;
+  rotationThresholdPercent?: number;
   notificationSettings?: Partial<NonNullable<GlobalCoordinatorState["notificationSettings"]>>;
   profile?: CoordinatorProfileSelection;
   trustLevel?: CoordinatorTrustLevel;
@@ -600,6 +607,8 @@ export interface EnableProjectCoordinatorOptions {
 }
 
 export interface UpdateProjectCoordinatorOptions {
+  fallbackProfile?: CoordinatorProfileSelection | null;
+  rotationThresholdPercent?: number;
   projectId: string;
   profile?: CoordinatorProfileSelection;
   profiles?: CoordinatorProfiles;
@@ -3042,6 +3051,12 @@ export class DaemonClient {
           ...(options.notificationSettings !== undefined
             ? { notificationSettings: options.notificationSettings }
             : {}),
+          ...(options.fallbackProfile !== undefined
+            ? { fallbackProfile: options.fallbackProfile }
+            : {}),
+          ...(options.rotationThresholdPercent !== undefined
+            ? { rotationThresholdPercent: options.rotationThresholdPercent }
+            : {}),
           ...(options.profile !== undefined ? { profile: options.profile } : {}),
           ...(options.trustLevel !== undefined ? { trustLevel: options.trustLevel } : {}),
         },
@@ -3050,6 +3065,30 @@ export class DaemonClient {
       throw new Error(payload.error ?? "updateGlobalCoordinator rejected");
     }
     return payload.coordinator;
+  }
+
+  async getCoordinatorMemory(target: CoordinatorMemoryTarget): Promise<CoordinatorMemorySnapshot> {
+    this.requireCoordinatorSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.memory.get.response">({
+        message: { type: "coordinator.memory.get.request", ...target },
+      });
+    if (payload.error || !payload.memory)
+      throw new Error(payload.error ?? "Memory could not be read");
+    return payload.memory;
+  }
+
+  async updateCoordinatorMemory(
+    input: CoordinatorMemoryUpdate,
+  ): Promise<CoordinatorMemorySnapshot> {
+    this.requireCoordinatorSupport();
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"coordinator.memory.update.response">({
+        message: { type: "coordinator.memory.update.request", ...input },
+      });
+    if (payload.error || !payload.memory)
+      throw new Error(payload.error ?? "Memory could not be saved");
+    return payload.memory;
   }
 
   async deferCoordinatorPermission(agentId: string, requestId: string): Promise<void> {
@@ -3125,6 +3164,12 @@ export class DaemonClient {
         message: {
           type: "coordinator.project.update.request",
           projectId: options.projectId,
+          ...(options.fallbackProfile !== undefined
+            ? { fallbackProfile: options.fallbackProfile }
+            : {}),
+          ...(options.rotationThresholdPercent !== undefined
+            ? { rotationThresholdPercent: options.rotationThresholdPercent }
+            : {}),
           ...(options.profile ? { profile: options.profile } : {}),
           ...(options.profiles ? { profiles: options.profiles } : {}),
           ...(options.trustLevel ? { trustLevel: options.trustLevel } : {}),

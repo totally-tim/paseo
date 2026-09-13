@@ -51,6 +51,8 @@ const PersistedProjectCoordinatorSchema = z.object({
   trustInherited: z.boolean().optional(),
   profile: CoordinatorProfileSelectionSchema.optional(),
   profiles: CoordinatorProfilesSchema.optional(),
+  fallbackProfile: CoordinatorProfileSelectionSchema.optional(),
+  rotationThresholdPercent: z.number().int().min(1).max(100).optional(),
   usageExpectation: CoordinatorUsageExpectationSchema.optional(),
   guard: CoordinatorGuardSchema.optional(),
   usage: PersistedCoordinatorUsageSchema.optional(),

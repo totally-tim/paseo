@@ -1219,18 +1219,18 @@ describe("remember", () => {
     ).rejects.toThrow(/coordinators and delegated agents/);
   });
 
-  test("rejects personal scopes in this milestone", async () => {
+  test("personal memory stays under the daemon home", async () => {
     const state = await harness.service.enableProjectCoordinator(enableInput());
-    await expect(
-      harness.service.remember({
-        callerAgentId: state.agentId!,
-        scope: "personal",
-        content: "nope",
-      }),
-    ).rejects.toThrow(/not supported yet/);
+    const result = await harness.service.remember({
+      callerAgentId: state.agentId!,
+      scope: "personal",
+      content: "Prefers short summaries.",
+    });
+    expect(result.filePath).toBe(path.join(harness.paseoHome, "coordinator", "memory.md"));
+    expect(readFileSync(result.filePath, "utf8")).toContain("Prefers short summaries.");
   });
 
-  test("the tool schema defaults scope to personal, which the service still rejects", async () => {
+  test("the tool schema defaults to personal memory", async () => {
     const state = await harness.service.enableProjectCoordinator(enableInput());
     const catalog = createPaseoToolCatalog({
       agentManager: harness.agentManager,
@@ -1240,12 +1240,10 @@ describe("remember", () => {
       coordinator: harness.service,
       logger,
     });
-
-    // No scope passed: the schema fills "personal" and the service rejects it.
-    // A "team" default would have written the file instead.
-    await expect(catalog.executeTool("remember", { content: "note" })).rejects.toThrow(
-      /only 'team' is supported/,
-    );
+    await catalog.executeTool("remember", { content: "Prefers short summaries." });
+    expect(
+      readFileSync(path.join(harness.paseoHome, "coordinator", "memory.md"), "utf8"),
+    ).toContain("Prefers short summaries.");
   });
 
   test("replace mode rewrites the file; append adds dated sections", async () => {

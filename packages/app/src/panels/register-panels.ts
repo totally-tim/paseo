@@ -1,3 +1,4 @@
+import { coordinatorMemoryPanelRegistration } from "@/coordinator/memory/panel";
 import { agentPanelRegistration } from "@/panels/agent-panel";
 import { browserPanelRegistration } from "@/desktop/browser/panel";
 import {
@@ -38,5 +39,6 @@ export function ensurePanelsRegistered(): void {
   registerPanel(changesTreePanelRegistration);
   registerPanel(pluginPanelRegistration);
   registerPanel(coordinatorBoardPanelRegistration);
+  registerPanel(coordinatorMemoryPanelRegistration);
   panelsRegistered = true;
 }

@@ -88,7 +88,7 @@ import {
   type PendingForegroundRun,
 } from "./agent-run-state.js";
 import { invokeRewindCapability, type RewindMode } from "./rewind/rewind.js";
-import { isSystemInjectedEnvelope } from "./agent-prompt.js";
+import { isSystemInjectedEnvelope, stripCoordinatorMemoryContext } from "./agent-prompt.js";
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
 import { stripInternalPaseoMcpServer, withRuntimePaseoMcpServer } from "./runtime-mcp-config.js";
 import {
@@ -124,12 +124,14 @@ type TimeoutResult = "completed" | "timed_out";
 
 function submittedPromptText(prompt: AgentPromptInput): string {
   if (typeof prompt === "string") {
-    return prompt;
+    return stripCoordinatorMemoryContext(prompt);
   }
-  return prompt
-    .flatMap((block) => (block.type === "text" && !("mimeType" in block) ? [block.text] : []))
-    .join("\n")
-    .trim();
+  return stripCoordinatorMemoryContext(
+    prompt
+      .flatMap((block) => (block.type === "text" && !("mimeType" in block) ? [block.text] : []))
+      .join("\n")
+      .trim(),
+  );
 }
 
 interface DaemonQuestion {
@@ -673,13 +675,17 @@ function buildExplicitTimelineSeedForRegister(
 function buildImportedTimelineRows(entries: readonly ImportedTimelineEntry[]): AgentTimelineRow[] {
   const rows: AgentTimelineRow[] = [];
   for (const entry of entries) {
-    if (entry.item.type === "user_message" && isSystemInjectedEnvelope(entry.item.text)) {
+    const item =
+      entry.item.type === "user_message"
+        ? { ...entry.item, text: stripCoordinatorMemoryContext(entry.item.text) }
+        : entry.item;
+    if (item.type === "user_message" && isSystemInjectedEnvelope(item.text)) {
       continue;
     }
     rows.push({
       seq: rows.length + 1,
       timestamp: entry.timestamp ?? new Date().toISOString(),
-      item: limitAgentTimelineItemContent(entry.item),
+      item: limitAgentTimelineItemContent(item),
     });
   }
   return rows;
@@ -4607,6 +4613,9 @@ export class AgentManager {
     for await (const rawEvent of agent.session.streamHistory()) {
       const event = limitAgentStreamEventContent(rawEvent);
       if (event.type === "timeline") {
+        if (event.item.type === "user_message") {
+          event.item = { ...event.item, text: stripCoordinatorMemoryContext(event.item.text) };
+        }
         if (event.item.type === "user_message" && isSystemInjectedEnvelope(event.item.text)) {
           continue;
         }
@@ -4677,6 +4686,9 @@ export class AgentManager {
         }
         if (event.type !== "timeline") {
           continue;
+        }
+        if (event.item.type === "user_message") {
+          event.item = { ...event.item, text: stripCoordinatorMemoryContext(event.item.text) };
         }
         if (event.item.type === "user_message" && isSystemInjectedEnvelope(event.item.text)) {
           continue;
@@ -5012,6 +5024,9 @@ export class AgentManager {
   }): Promise<void> {
     const { agent, event, options, flags } = params;
 
+    if (event.item.type === "user_message") {
+      event.item = { ...event.item, text: stripCoordinatorMemoryContext(event.item.text) };
+    }
     if (event.item.type === "user_message" && isSystemInjectedEnvelope(event.item.text)) {
       flags.shouldDispatchEvent = false;
       flags.shouldNotifyWaiters = false;

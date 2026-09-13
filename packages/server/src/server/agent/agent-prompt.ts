@@ -31,6 +31,29 @@ export type AgentRunController = Pick<
     reloadAgentSession(agentId: string): Promise<unknown>;
   };
 
+export type AgentPromptDecorator = (
+  agentId: string,
+  prompt: AgentPromptInput,
+) => Promise<AgentPromptInput>;
+const promptDecorators = new WeakMap<AgentRunController, AgentPromptDecorator>();
+
+/** Daemon-owned context is read at dispatch, including stale-session retries. */
+export function setAgentPromptDecorator(
+  manager: AgentRunController,
+  decorator: AgentPromptDecorator | null,
+): void {
+  if (decorator) promptDecorators.set(manager, decorator);
+  else promptDecorators.delete(manager);
+}
+
+async function decorateAgentPrompt(
+  manager: AgentRunController,
+  agentId: string,
+  prompt: AgentPromptInput,
+): Promise<AgentPromptInput> {
+  return (await promptDecorators.get(manager)?.(agentId, prompt)) ?? prompt;
+}
+
 type AgentRunIterator = AsyncGenerator<AgentStreamEvent>;
 type BackgroundRecovery = (
   recover: () => Promise<AgentRunIterator>,
@@ -156,13 +179,14 @@ async function startAgentRunInner(
   options?: StartAgentRunOptions,
 ): Promise<{ disposition: PromptDispatchDisposition }> {
   const snapshot = agentManager.getAgent(agentId);
-  const steered = await steerOrReplaceActiveRun(agentManager, agentId, prompt, options);
+  const decoratedPrompt = await decorateAgentPrompt(agentManager, agentId, prompt);
+  const steered = await steerOrReplaceActiveRun(agentManager, agentId, decoratedPrompt, options);
   if (steered?.disposition === "steered") {
     return steered;
   }
   const { iterator, replaced } = steered
     ? { iterator: steered.iterator, replaced: true }
-    : await startOrReplaceRun(agentManager, agentId, prompt, options);
+    : await startOrReplaceRun(agentManager, agentId, decoratedPrompt, options);
   logger.trace(
     {
       agentId,
@@ -184,7 +208,8 @@ async function startAgentRunInner(
         );
         const recover = async () => {
           await agentManager.reloadAgentSession(agentId);
-          return (await startOrReplaceRun(agentManager, agentId, prompt, options)).iterator;
+          const retryPrompt = await decorateAgentPrompt(agentManager, agentId, prompt);
+          return (await startOrReplaceRun(agentManager, agentId, retryPrompt, options)).iterator;
         };
         const retry = options?.backgroundRecovery
           ? await options.backgroundRecovery(recover)
@@ -256,11 +281,22 @@ export function formatSystemNotificationPrompt(reason: string): string {
  * `</paseo-system >`).
  */
 const PROMPT_TAG_PATTERN =
-  /<\/?(untrusted-decision-answer|untrusted-wake-details|untrusted-projects|untrusted-project|untrusted-forge-data|untrusted-git-data|wake-context|paseo-system|agent-response|permission-request)(?=[\s/>"'`])[^>]*>/gi;
+  /<\/?(coordinator-memory|untrusted-decision-answer|untrusted-wake-details|untrusted-projects|untrusted-project|untrusted-forge-data|untrusted-git-data|wake-context|paseo-system|agent-response|permission-request)(?=[\s/>"'`])[^>]*>/gi;
 
 export function sanitizeUntrustedText(text: string): string {
   return text.replace(PROMPT_TAG_PATTERN, (match) =>
     match.replace(/</g, "&lt;").replace(/>/g, "&gt;"),
+  );
+}
+
+const COORDINATOR_MEMORY_PREFIX =
+  /^(<paseo-system>\n)?<coordinator-memory>\nCurrent memory snapshot for this dispatch\.[\s\S]*?\n<\/coordinator-memory>\n{1,2}/;
+
+/** Remove only the daemon prefix; quoted markers in the actual user text stay intact. */
+export function stripCoordinatorMemoryContext(text: string): string {
+  return text.replace(
+    COORDINATOR_MEMORY_PREFIX,
+    (_prefix, systemEnvelope: string | undefined) => systemEnvelope ?? "",
   );
 }
 
@@ -519,9 +555,14 @@ async function resolveNotificationTarget(
 /** One active per-turn subscription per sender/receiver pair, shared by
  * explicit delegation and daemon-owned project summary forwarding. */
 const finishSubscriptions = new WeakMap<AgentManager, Map<string, () => void>>();
+export interface AgentNotificationInstruction {
+  id: string;
+  prompt: string;
+}
 type NotificationDeliveryHandler = <T>(
   agentId: string,
   deliver: () => Promise<T>,
+  instruction?: AgentNotificationInstruction,
 ) => Promise<T | undefined>;
 const notificationDeliveryHandlers = new WeakMap<AgentManager, NotificationDeliveryHandler>();
 
@@ -539,9 +580,10 @@ export async function withAgentNotificationDelivery<T>(
   agentManager: AgentManager,
   agentId: string,
   deliver: () => Promise<T>,
+  instruction?: AgentNotificationInstruction,
 ): Promise<T | undefined> {
   const handler = notificationDeliveryHandlers.get(agentManager);
-  return handler ? handler(agentId, deliver) : deliver();
+  return handler ? handler(agentId, deliver, instruction) : deliver();
 }
 
 export function setupFinishNotification(params: SetupFinishNotificationParams): () => void {
@@ -588,7 +630,10 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
     }
 
     const record = await agentStorage.get(childAgentId);
-    if (requireParentOwnership && getParentAgentIdFromLabels(record?.labels) !== callerAgentId) {
+    if (
+      requireParentOwnership &&
+      ![callerAgentId, targetAgentId].includes(getParentAgentIdFromLabels(record?.labels) ?? "")
+    ) {
       return;
     }
     const title = record?.title ?? childAgentId;
@@ -601,18 +646,27 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
       permissionRequest,
     });
 
-    await withAgentNotificationDelivery(agentManager, targetAgentId, () =>
-      sendPromptToAgent({
-        agentManager,
-        agentStorage,
-        agentId: targetAgentId,
-        prompt: formatSystemNotificationPrompt(body),
-        activeTurnBehavior: "steer",
-        unarchive: false,
-        backgroundRecovery: (recover) =>
-          withAgentNotificationDelivery(agentManager, targetAgentId, recover),
-        logger,
-      }),
+    const prompt = formatSystemNotificationPrompt(body);
+    const instruction = {
+      id: `notification:${childAgentId}:${permissionRequest?.id ?? reason}:${record?.lastUserMessageAt ?? ""}`,
+      prompt,
+    };
+    await withAgentNotificationDelivery(
+      agentManager,
+      targetAgentId,
+      () =>
+        sendPromptToAgent({
+          agentManager,
+          agentStorage,
+          agentId: targetAgentId,
+          prompt,
+          activeTurnBehavior: "steer",
+          unarchive: false,
+          backgroundRecovery: (recover) =>
+            withAgentNotificationDelivery(agentManager, targetAgentId, recover),
+          logger,
+        }),
+      instruction,
     );
   }
 

@@ -244,10 +244,12 @@ export interface ScheduleServiceOptions {
   ) => Promise<CreatePaseoWorktreeWorkflowResult>;
   archiveWorkspace: (workspaceId: string) => Promise<void>;
   now?: () => Date;
+  isProtectedAgentTarget?: (agentId: string) => boolean;
   runner?: (schedule: StoredSchedule, runId: string) => Promise<ScheduleExecutionResult>;
 }
 
 export class ScheduleService {
+  private readonly isProtectedAgentTarget: (agentId: string) => boolean;
   private readonly store: ScheduleStore;
   private readonly logger: Logger;
   private readonly agentManager: ScheduleAgentManager;
@@ -269,6 +271,7 @@ export class ScheduleService {
   private tickTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: ScheduleServiceOptions) {
+    this.isProtectedAgentTarget = options.isProtectedAgentTarget ?? (() => false);
     this.store = new ScheduleStore(join(options.paseoHome, "schedules"));
     this.logger = options.logger.child({ module: "schedule-service" });
     this.agentManager = options.agentManager;
@@ -488,7 +491,27 @@ export class ScheduleService {
     await this.store.delete(id);
   }
 
+  async retargetAgent(sourceAgentId: string, successorAgentId: string): Promise<void> {
+    for (const schedule of await this.store.list()) {
+      if (schedule.target.type !== "agent" || schedule.target.agentId !== sourceAgentId) continue;
+      await this.store.update(schedule.id, (current) =>
+        current.target.type === "agent" && current.target.agentId === sourceAgentId
+          ? {
+              ...current,
+              target: { ...current.target, agentId: successorAgentId },
+              updatedAt: this.now().toISOString(),
+            }
+          : current,
+      );
+    }
+  }
+
+  private protectedSchedule(schedule: StoredSchedule): boolean {
+    return schedule.target.type === "agent" && this.isProtectedAgentTarget(schedule.target.agentId);
+  }
+
   async completeForAgent(agentId: string): Promise<number> {
+    if (this.isProtectedAgentTarget(agentId)) return 0;
     const now = this.now();
     const schedules = await this.store.list();
     const matches = schedules.filter(
@@ -526,6 +549,7 @@ export class ScheduleService {
     let completed = false;
     const updated = await this.store.update(scheduleId, (schedule) => {
       if (
+        this.isProtectedAgentTarget(agentId) ||
         schedule.target.type !== "agent" ||
         schedule.target.agentId !== agentId ||
         schedule.status === "completed"
@@ -541,6 +565,7 @@ export class ScheduleService {
 
   async runOnce(id: string): Promise<StoredSchedule> {
     const schedule = await this.inspect(id);
+    if (this.protectedSchedule(schedule)) throw new Error("The schedule target is rotating");
     if (schedule.status === "completed") {
       throw new Error(`Schedule ${id} is already completed`);
     }
@@ -571,6 +596,7 @@ export class ScheduleService {
     const now = this.now();
     const schedules = await this.store.list();
     for (const schedule of schedules) {
+      if (this.protectedSchedule(schedule)) continue;
       if (schedule.status !== "active" || !schedule.nextRunAt) {
         continue;
       }
@@ -697,7 +723,11 @@ export class ScheduleService {
 
   private async sweepOrphanedSchedule(scheduleId: string, now: Date): Promise<void> {
     await this.store.update(scheduleId, async (schedule) => {
-      if (schedule.target.type !== "agent" || schedule.status === "completed") {
+      if (
+        this.protectedSchedule(schedule) ||
+        schedule.target.type !== "agent" ||
+        schedule.status === "completed"
+      ) {
         return schedule;
       }
       const record = await this.agentStorage.get(schedule.target.agentId);
@@ -713,6 +743,7 @@ export class ScheduleService {
     now: Date,
     options?: { manual?: boolean },
   ): Promise<void> {
+    if (this.protectedSchedule(schedule)) return;
     const manual = options?.manual === true;
     this.runningScheduleIds.add(schedule.id);
     const runId = randomUUID();
@@ -737,6 +768,7 @@ export class ScheduleService {
         agentId: result.agentId,
         output: result.output,
         error: null,
+        targetAgentId: schedule.target.type === "agent" ? schedule.target.agentId : undefined,
         targetGone: false,
         manual,
       });
@@ -748,6 +780,7 @@ export class ScheduleService {
         agentId: null,
         output: null,
         error: error instanceof Error ? error.message : String(error),
+        targetAgentId: schedule.target.type === "agent" ? schedule.target.agentId : undefined,
         targetGone: error instanceof ScheduleTargetGoneError,
         manual,
       });
@@ -775,6 +808,7 @@ export class ScheduleService {
     agentId: string | null;
     output: string | null;
     error: string | null;
+    targetAgentId?: string;
     targetGone: boolean;
     manual: boolean;
   }): Promise<void> {
@@ -799,7 +833,15 @@ export class ScheduleService {
         updatedAt: now.toISOString(),
       };
 
-      if (params.targetGone) {
+      if (
+        params.targetGone &&
+        !this.protectedSchedule(schedule) &&
+        !(
+          schedule.target.type === "agent" &&
+          params.targetAgentId &&
+          schedule.target.agentId !== params.targetAgentId
+        )
+      ) {
         // The target is permanently gone; retrying only burns the schedule down to
         // its expiry, so complete it now regardless of manual/scheduled origin.
         updated = completeSchedule(updated, now);

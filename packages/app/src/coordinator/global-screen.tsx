@@ -1,3 +1,6 @@
+import { CoordinatorSettingsSheet } from "./settings-sheet";
+import { openWorkspaceTargetAtLocation } from "@/workspace-tabs/open-beside";
+import { buildWorkspaceTabPersistenceKey } from "@/workspace-tabs/model";
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { useIsFocused } from "@react-navigation/native";
 import { useRetainedPanelActive } from "@/components/retained-panel";
@@ -32,7 +35,7 @@ import { buildSelectableProviderSelectorProviders } from "@/provider-selection/p
 import { useHostFeature } from "@/runtime/host-features";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
-import { buildCoordinatorBoardDraftKey } from "@/stores/draft-keys";
+import { buildGlobalCoordinatorDraftKey } from "@/stores/draft-keys";
 import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 import type { PendingPermission } from "@/types/shared";
@@ -330,10 +333,14 @@ function GlobalTrust({
   coordinator,
   boards,
   onSelectTrust,
+  onOpenMemory,
+  onOpenSettings,
 }: {
   coordinator: GlobalCoordinatorState;
   boards: readonly CoordinatorBoardSnapshot[];
   onSelectTrust: (level: CoordinatorTrustLevel) => Promise<void>;
+  onOpenMemory: () => void;
+  onOpenSettings: () => void;
 }) {
   const { t } = useTranslation();
   const overrides = boards.filter((board) => board.trustLevel !== coordinator.trustLevel);
@@ -345,6 +352,8 @@ function GlobalTrust({
         usage={null}
         usageExpectation={null}
         onSelectTrust={onSelectTrust}
+        onOpenMemory={onOpenMemory}
+        onOpenSettings={onOpenSettings}
       >
         <Text style={styles.muted}>{t("coordinator.global.defaultTrust")}</Text>
         {overrides.length ? (
@@ -430,13 +439,25 @@ function GlobalBoardContent({
   const agent = session?.agents.get(agentId);
   const cwd = agent?.cwd ?? session?.workspaces.get(workspaceId)?.workspaceDirectory ?? "";
   const compact = useIsCompactFormFactor();
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
+  const openMemory = useCallback(() => {
+    navigateToWorkspace({
+      serverId,
+      workspaceId,
+      target: { kind: "coordinator_board", projectId: ownBoard.projectId },
+    });
+    openWorkspaceTargetAtLocation({
+      workspaceKey: buildWorkspaceTabPersistenceKey({ serverId, workspaceId }),
+      target: { kind: "coordinator_memory", scope: "personal" },
+      isCompact: compact,
+      location: "side",
+    });
+  }, [serverId, workspaceId, ownBoard.projectId, compact]);
   const insets = useSafeAreaInsets();
   const draft = useAgentInputDraft({
-    draftKey: buildCoordinatorBoardDraftKey({
-      serverId,
-      projectId: ownBoard.projectId,
-      coordinatorAgentId: agentId,
-    }),
+    draftKey: buildGlobalCoordinatorDraftKey(serverId),
   });
   const scopeKey = useWorkspaceAttachmentScopeKey({ serverId, cwd, workspaceId });
   const attachmentScopeKeys = useMemo(() => [scopeKey], [scopeKey]);
@@ -523,6 +544,11 @@ function GlobalBoardContent({
   );
   return (
     <FileDropZone style={styles.root}>
+      <CoordinatorSettingsSheet
+        serverId={serverId}
+        visible={settingsOpen}
+        onClose={closeSettings}
+      />
       <CoordinatorBoard
         board={projection.board}
         groups={projection.groups}
@@ -540,6 +566,8 @@ function GlobalBoardContent({
             coordinator={coordinator}
             boards={projectBoards}
             onSelectTrust={onSelectTrust}
+            onOpenMemory={openMemory}
+            onOpenSettings={openSettings}
           />
           <Composer
             serverId={serverId}

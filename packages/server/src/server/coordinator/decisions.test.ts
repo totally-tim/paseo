@@ -183,3 +183,47 @@ it("defers quiet-hours stalled pushes and persists Leave it without answering th
     await rm(home, { recursive: true, force: true });
   }
 });
+
+it("rotation retargets durable questions and accepts only their original response routing", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "coordinator-decision-rotation-"));
+  const requests = new Map<string, Parameters<DecisionDeps["register"]>[0]>();
+  const deps: DecisionDeps = {
+    paseoHome: home,
+    now: () => new Date(2026, 8, 13, 12).getTime(),
+    settings: async () => DEFAULT_DECISION_SETTINGS,
+    eligible: async () => ({ projectId: "project", provider: "codex" }),
+    register: (input) => {
+      requests.set(input.request.id, input);
+      return () => {
+        requests.delete(input.request.id);
+      };
+    },
+    respond: async () => {},
+    deliverAnswer: async () => true,
+    digest: async () => null,
+  };
+  const decisions = new CoordinatorDecisions(deps);
+  try {
+    const { requestId } = await decisions.raise({
+      callerAgentId: "source",
+      question: "Ship?",
+      actions: [{ id: "yes", label: "Ship", response: { behavior: "allow" } }],
+      defaultActionId: "yes",
+    });
+    const timeout = requests.get(requestId)?.request.timeoutAt;
+    await decisions.retargetAgent("source", "successor");
+    expect(requests.has(requestId)).toBe(false);
+    await decisions.stop();
+    const restored = new CoordinatorDecisions(deps);
+    await restored.tick();
+    expect(requests.get(requestId)?.agentId).toBe("successor");
+    expect(requests.get(requestId)?.request.timeoutAt).toBe(timeout);
+    expect(await restored.resolveResponseAgent("source", requestId)).toBe("successor");
+    expect(await restored.resolveResponseAgent("unrelated", requestId)).toBeNull();
+    expect(await restored.resolveResponseAgent("source", "provider-tool-permission")).toBeNull();
+    await restored.stop();
+  } finally {
+    await decisions.stop();
+    await rm(home, { recursive: true, force: true });
+  }
+});

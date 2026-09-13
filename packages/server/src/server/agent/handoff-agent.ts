@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import {
   COORDINATOR_PROJECT_ID_LABEL,
+  COORDINATOR_TRUST_LABEL,
   COORDINATOR_SUBAGENT_KIND_LABEL,
   HANDOFF_FROM_AGENT_ID_LABEL,
   PARENT_AGENT_ID_LABEL,
@@ -33,6 +34,7 @@ export interface HandoffExecution {
   unattended?: boolean;
   preserveConfiguration?: boolean;
   assertCurrent?: () => Promise<void>;
+  onPrepared?: (state: AgentHandoffState) => Promise<void>;
   onCreated?: (successor: StoredAgentRecord) => Promise<void>;
 }
 
@@ -83,6 +85,40 @@ export function handoffAgent(
     : run(execution);
 }
 
+/** Internal service capability. Public handoff inputs cannot supply this authorization. */
+export function createCoordinatorHandoff(
+  deps: HandoffDependencies,
+  authorize: (sourceAgentId: string, successorAgentId?: string) => Promise<boolean>,
+) {
+  return (input: HandoffAgentInput, hooks: HandoffExecution = {}): Promise<StoredAgentRecord> => {
+    const run = (owned: HandoffExecution = {}) => {
+      const execution: HandoffExecution = {
+        ...owned,
+        ...hooks,
+        operationId: owned.operationId,
+        unattended: true,
+        assertCurrent: async () => {
+          await owned.assertCurrent?.();
+          await hooks.assertCurrent?.();
+          const state = await deps.agentStorage.getHandoff(input.sourceAgentId);
+          if (!(await authorize(input.sourceAgentId, state?.successorAgentId)))
+            throw new Error("Coordinator rotation is no longer authorized");
+        },
+        onCreated: async (successor) => {
+          await owned.onCreated?.(successor);
+          await hooks.onCreated?.(successor);
+        },
+      };
+      return deps.agentStorage.runHandoff(input.sourceAgentId, input, () =>
+        performHandoff(deps, input, execution, true),
+      );
+    };
+    if (!deps.agentManager.continuations)
+      throw new Error("Coordinator rotation requires the continuation service");
+    return deps.agentManager.continuations.manualHandoff(input.sourceAgentId, run);
+  };
+}
+
 function assertHandoffSelection(
   successor: StoredAgentRecord,
   state: AgentHandoffState | null,
@@ -105,6 +141,7 @@ async function resolveHandoffConfig(
   input: HandoffAgentInput,
   source: StoredAgentRecord,
   execution?: HandoffExecution,
+  coordinatorAuthorized = false,
 ): Promise<AgentSessionConfig> {
   const selected = execution?.preserveConfiguration ? effectiveHandoffInput(source, input) : input;
   const resolved = await deps.providerSnapshotManager.resolveCreateConfig({
@@ -115,8 +152,9 @@ async function resolveHandoffConfig(
     requestedMode: selected.modeId,
     featureValues: selected.featureValues,
     parent: null,
-    // Automatic account admission does not grant a broader provider permission mode.
-    unattended: false,
+    // Only the private coordinator capability selects unattended defaults.
+    // Ordinary manual and automatic account handoffs keep interactive resolution.
+    unattended: coordinatorAuthorized,
   });
   return {
     provider: selected.provider,
@@ -128,6 +166,7 @@ async function resolveHandoffConfig(
     thinkingOptionId: selected.thinkingOptionId,
     featureValues: resolved.featureValues,
     ...(execution?.preserveConfiguration ? preservedOptions(source) : {}),
+    toolPolicy: source.config?.toolPolicy ?? undefined,
     systemPrompt: source.config?.systemPrompt ?? undefined,
     mcpServers: source.config?.mcpServers ?? undefined,
     // Launch-time restrictions belong to the agent, not the handoff input —
@@ -167,13 +206,20 @@ async function prepareHandoff(
   input: HandoffAgentInput,
   source: StoredAgentRecord & { workspaceId: string },
   execution?: HandoffExecution,
+  coordinatorAuthorized = false,
 ): Promise<AgentHandoffState> {
   const { agentManager, agentStorage } = deps;
   let state = await agentStorage.getHandoff(source.id);
   const savedSuccessor = state ? await agentStorage.get(state.successorAgentId) : null;
   if (savedSuccessor) assertHandoffSelection(savedSuccessor, state, input);
   if (!state || (state.phase === "prepared" && !savedSuccessor)) {
-    const config = await resolveHandoffConfig(deps, input, source, execution);
+    const config = await resolveHandoffConfig(
+      deps,
+      input,
+      source,
+      execution,
+      coordinatorAuthorized,
+    );
     const rows = await agentManager.readHandoffTimeline(source.id);
     if (!rows.length && source.lastUserMessageAt) {
       throw new Error("Open the source conversation to load its saved history before continuing.");
@@ -199,20 +245,24 @@ async function prepareHandoff(
   return state;
 }
 
+function assertCoordinatorHandoff(source: StoredAgentRecord, authorized: boolean): void {
+  // A transport execution object can never authorize a role-preserving successor.
+  if (source.labels[PASEO_ROLE_LABEL] && !authorized)
+    throw new Error("Coordinators are rotated by the coordinator service");
+}
+
 async function performHandoff(
   deps: HandoffDependencies,
   input: HandoffAgentInput,
   execution: HandoffExecution = {},
+  coordinatorAuthorized = false,
 ): Promise<StoredAgentRecord> {
   const { agentManager, agentStorage, logger } = deps;
   const assertCurrent = execution.assertCurrent ?? (() => Promise.resolve());
   const source = await agentStorage.get(input.sourceAgentId);
   if (!source || source.internal) throw new Error("Source agent not found");
-  // Every successor-creation path funnels here; a role-labeled source must not
-  // produce an unlabelled successor that bypasses delegate-only tool policy.
-  if (source.labels[PASEO_ROLE_LABEL])
-    throw new Error("Coordinators are rotated by the coordinator service");
-  await assertSourceRestored(source, execution, agentStorage);
+  assertCoordinatorHandoff(source, coordinatorAuthorized);
+  await assertSourceRestored(source, execution, agentStorage, coordinatorAuthorized);
   if (!source.workspaceId) throw new Error("Source agent has no workspace");
   if (source.owner) throw new Error("This agent is managed by an execution service");
   await assertCurrent();
@@ -222,7 +272,9 @@ async function performHandoff(
     input,
     { ...source, workspaceId: source.workspaceId },
     execution,
+    coordinatorAuthorized,
   );
+  await execution.onPrepared?.(state);
   await assertCurrent();
   await stopHandoffSource(deps, source, state.successorAgentId);
   await assertCurrent();
@@ -316,10 +368,13 @@ async function createHandoffSuccessor(
   await agentStorage.saveHandoff(next);
   await assertCurrent();
   const governed =
+    source.labels[PASEO_ROLE_LABEL] !== undefined ||
     source.labels[COORDINATOR_SUBAGENT_KIND_LABEL] !== undefined ||
     source.labels[COORDINATOR_PROJECT_ID_LABEL] !== undefined;
   const delegationLabels: Record<string, string> = {};
   for (const key of [
+    PASEO_ROLE_LABEL,
+    COORDINATOR_TRUST_LABEL,
     COORDINATOR_SUBAGENT_KIND_LABEL,
     COORDINATOR_PROJECT_ID_LABEL,
     ...(governed ? [PARENT_AGENT_ID_LABEL] : []),
@@ -353,9 +408,13 @@ async function assertSourceRestored(
   source: StoredAgentRecord,
   execution: HandoffExecution,
   storage: AgentStorage,
+  coordinatorAuthorized = false,
 ): Promise<void> {
-  if (source.archivedAt && !(execution.operationId && (await storage.getHandoff(source.id))))
-    throw new Error("Restore the source agent before continuing its work");
+  if (!source.archivedAt) return;
+  const handoff = await storage.getHandoff(source.id);
+  if (handoff && (execution.operationId || (coordinatorAuthorized && handoff.phase === "started")))
+    return;
+  throw new Error("Restore the source agent before continuing its work");
 }
 
 async function stopHandoffSource(

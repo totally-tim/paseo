@@ -16,7 +16,7 @@ import { buildSelectableProviderSelectorProviders } from "@/provider-selection/p
 import { useHostRuntimeClient } from "@/runtime/host-runtime";
 import { useHostFeature } from "@/runtime/host-features";
 import { useDraftStore } from "@/stores/draft-store";
-import { buildDraftStoreKey } from "@/stores/draft-keys";
+import { buildCoordinatorBoardDraftKey } from "@/stores/draft-keys";
 import type { Theme } from "@/styles/theme";
 import { useCoordinatorBoardSnapshot } from "@/coordinator/board-store";
 import {
@@ -284,12 +284,11 @@ export function CoordinatorEnableSheet({
         ...(Object.keys(profiles).length > 0 ? { profiles } : {}),
       });
       useCoordinatorProjectStore.getState().applyProjectResult(serverId, projectId, result);
-      // The board composer only exists once the session does — the draft key it
-      // reads is the session's own, so the queued ask lands there directly.
+      // The project role keeps the queued ask through coordinator rotation.
       const coordinatorAgentId = result.coordinator?.agentId;
       if (ciSeedQueued && coordinatorAgentId) {
         useDraftStore.getState().saveDraftInput({
-          draftKey: buildDraftStoreKey({ serverId, agentId: coordinatorAgentId }),
+          draftKey: buildCoordinatorBoardDraftKey({ serverId, projectId }),
           draft: { text: t("coordinator.setup.ciComposerSeed"), attachments: [] },
         });
       }

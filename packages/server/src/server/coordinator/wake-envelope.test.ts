@@ -1,3 +1,4 @@
+import { CoordinatorMemory } from "./memory.js";
 import { describe, expect, test } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -189,4 +190,38 @@ describe("sanitizeUntrustedText", () => {
     const text = "fix <div> markup and </other> closers — untouched";
     expect(sanitizeUntrustedText(text)).toBe(text);
   });
+});
+
+test("the next wake reads pane edits and branch learned memory afresh", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "wake-memory-edit-"));
+  try {
+    const input = makeInput(root);
+    const memory = new CoordinatorMemory({ paseoHome: input.paseoHome });
+    await memory.remember({
+      scope: "personal-project",
+      projectId: PROJECT_ID,
+      cwd: input.rootPath,
+      coordinator: true,
+      content: "Prefers squash merges",
+    });
+    await memory.remember({
+      scope: "team",
+      cwd: input.rootPath,
+      coordinator: false,
+      content: "Tests require UTC",
+    });
+    expect(await composeWakeEnvelope(input)).toContain("Prefers squash merges");
+    const before = await memory.readPersonal({ scope: "personal-project", projectId: PROJECT_ID });
+    await memory.updatePersonal({
+      scope: "personal-project",
+      projectId: PROJECT_ID,
+      content: "",
+      expectedRevision: before.revision,
+    });
+    const next = await composeWakeEnvelope(input);
+    expect(next).not.toContain("Prefers squash merges");
+    expect(next).toContain("Tests require UTC");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
