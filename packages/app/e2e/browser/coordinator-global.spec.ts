@@ -46,7 +46,7 @@ test.describe("Global coordinator", () => {
   test.setTimeout(120_000);
   test("sidebar opens setup, global board receives composer text and Chat uses its hidden workspace", async ({
     page,
-  }) => {
+  }, testInfo) => {
     const workspace = await seedWorkspace({ repoPrefix: "global-coordinator-" });
     let hiddenProjectId: string | null = null;
     try {
@@ -111,8 +111,12 @@ test.describe("Global coordinator", () => {
       await page.getByTestId("coordinator-trust-pill").filter({ visible: true }).click();
       await page.getByTestId("coordinator-open-settings").filter({ visible: true }).click();
       await page.getByTestId("coordinator-disable-project").filter({ visible: true }).click();
+      await expect
+        .poll(async () => (await workspace.client.getGlobalCoordinator()).enabled)
+        .toBe(false);
+      await page.getByTestId("sidebar-coordinator").click();
       await expect(page.getByTestId("coordinator-global-setup")).toBeVisible();
-      expect((await workspace.client.getGlobalCoordinator()).enabled).toBe(false);
+      await page.screenshot({ path: testInfo.outputPath("global-disabled.png"), fullPage: true });
     } finally {
       await workspace.client.disableGlobalCoordinator();
       if (hiddenProjectId) await workspace.client.removeProject(hiddenProjectId);
