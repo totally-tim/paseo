@@ -7,7 +7,8 @@ import { normalizeWorkspaceOpaqueId } from "@/utils/workspace-identity";
 export interface WorkspaceAgentVisibility {
   activeAgentIds: Set<string>;
   autoOpenAgentIds: Set<string>;
-  knownAgentIds: Set<string>;
+  /** Fork: every directory/detail agent in the workspace; reconcile uses it to end continuation protection. */
+  knownAgentIds?: Set<string>;
 }
 
 function agentBelongsToWorkspace(agent: Agent, workspaceId: string): boolean {
@@ -55,7 +56,6 @@ export function deriveWorkspaceAgentVisibility(input: {
     }
     knownAgentIds.add(agent.id);
   }
-
   return { activeAgentIds, autoOpenAgentIds, knownAgentIds };
 }
 
@@ -73,7 +73,6 @@ export function buildWorkspaceTabSnapshot(input: {
     terminalsHydrated: input.terminalsHydrated,
     activeAgentIds: input.agentVisibility.activeAgentIds,
     autoOpenAgentIds: input.agentVisibility.autoOpenAgentIds,
-    knownAgentIds: input.agentVisibility.knownAgentIds,
     knownTerminalIds: input.knownTerminalIds,
     standaloneTerminalIds: input.standaloneTerminalIds,
     hasActivePendingTerminalCreate: input.hasActivePendingTerminalCreate,
@@ -88,9 +87,11 @@ export function workspaceAgentVisibilityEqual(
   return (
     setsEqual(a.activeAgentIds, b.activeAgentIds) &&
     setsEqual(a.autoOpenAgentIds, b.autoOpenAgentIds) &&
-    setsEqual(a.knownAgentIds, b.knownAgentIds)
+    setsEqual(a.knownAgentIds ?? EMPTY_SET, b.knownAgentIds ?? EMPTY_SET)
   );
 }
+
+const EMPTY_SET = new Set<string>();
 
 function setsEqual(a: Set<string>, b: Set<string>): boolean {
   if (a.size !== b.size) {
