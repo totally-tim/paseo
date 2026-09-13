@@ -13,7 +13,7 @@ Skills give your agents reusable instructions for delegation, handoffs, and revi
 | Skill              | Use it to                                                            |
 | ------------------ | -------------------------------------------------------------------- |
 | `/paseo`           | Look up how to manage agents, workspaces, schedules, and heartbeats. |
-| `/paseo-handoff`   | Transfer a task and its context to another agent.                    |
+| `/paseo-handoff`   | Launch a fresh agent with context; keep the original session.        |
 | `/paseo-committee` | Get two independent analyses of a difficult problem.                 |
 | `/paseo-advisor`   | Get a second opinion on your current work.                           |
 
@@ -32,11 +32,11 @@ The foundational reference used by the other skills. It teaches agents to check 
 
 ## `/paseo-handoff`, Task Handoff
 
-Transfer the current task with a briefing: relevant files, progress, decisions, constraints, and acceptance criteria. The skill checks profiles before choosing the receiving agent; you can name the profile you want.
+Launch a fresh agent while keeping the original session usable. Give it a briefing: relevant files, progress, decisions, constraints, and acceptance criteria. The skill checks profiles before choosing the receiving agent; you can name the profile you want.
 
 > /paseo-handoff hand off the auth fix to an implementation agent in its own worktree
 
-The receiving agent gets the context it needs to continue. Ask for a separate worktree when it should edit independently.
+Open the new agent from the original session’s subagents track. It shares the current workspace unless you ask for a separate worktree. Use Paseo’s **Continue with…** UI when you want to replace the original session.
 
 ## `/paseo-committee`, Committee Planning
 
