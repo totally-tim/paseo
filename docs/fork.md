@@ -114,18 +114,16 @@ workspace without committing. The release workflow runs it before building, and
 `scripts/fork/build-desktop.sh <version>` runs it for a local build and restores the files
 afterwards.
 
-Why every workspace and not just desktop: the desktop app restarts a desktop-managed daemon
-whenever the app version differs from the daemon's, and the daemon reports the version from
-`packages/server/package.json` (`shouldRestartForVersion` in
-`packages/desktop/src/daemon/daemon-manager.ts`). A build where desktop says 1.0.1 and the
-server says 0.7.2 restarts its own daemon on every launch.
+Stamp every workspace so the CLI, daemon, and desktop report the same release.
+A package's committed upstream version does not establish the installed binary's
+provenance. Record the fork tag, resolved commit, artifact checksum, and executable
+paths when installing a release.
 
-Why the fork's version has to differ from upstream's at all: the same guard is what stops a
-fork app from adopting a leftover upstream desktop-managed daemon, which does not advertise
-the `projectGroups` capability and would show a sidebar with no groups and no error. The guard
-returns `false` whenever `desktopManaged` is false, so a daemon started by the CLI or launchd is
-adopted at any version. The version protects you from a leftover desktop-managed daemon, not
-from one you started yourself.
+Desktop ownership follows the [daemon lifecycle contract](architecture.md#deployment-models).
+A preexisting CLI or launchd daemon is attached without automatic binary replacement.
+Updating the desktop application therefore does not upgrade a separately managed
+daemon. Verify the supervisor and worker after an explicit service upgrade, and
+check app/CLI/daemon version drift separately from the fork update feed.
 
 The 1.x line collides with upstream the day upstream ships 1.0.0. Nothing breaks on that day,
 because the feed only ever compares fork builds with fork builds, but pick a new line before
@@ -137,7 +135,7 @@ then.
 the auto-updater (`autoDownload = true`, `allowDowngrade = false` in
 `packages/desktop/src/features/auto-updater.ts`) would install an upstream release over the fork
 build and take every fork feature with it. Check any built app: `Contents/Resources/app-update.yml`
-must say `owner: totally-tim`.
+must say `owner: totally-tim` and `repo: paseo`.
 
 ## Releasing
 
