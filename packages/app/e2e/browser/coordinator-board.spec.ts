@@ -248,3 +248,66 @@ test.describe("Coordinator board", () => {
     }
   });
 });
+
+for (const viewport of [
+  { name: "desktop", width: 1280, height: 720 },
+  { name: "compact", width: 390, height: 844 },
+]) {
+  test(`${viewport.name}: coordinator settings can disable the project and preserve saved tabs on reload`, async ({
+    page,
+  }, testInfo) => {
+    test.setTimeout(180_000);
+    await page.setViewportSize(viewport);
+    const workspace = await seedWorkspace({ repoPrefix: "coordinator-migration-" });
+    try {
+      await enableMockCoordinator(workspace);
+      await gotoWorkspace(page, workspace.workspaceId);
+      const board = page.getByTestId("coordinator-board").filter({ visible: true });
+      await expect(board).toBeVisible({ timeout: 30000 });
+      await board.getByRole("button", { name: "Goals", exact: true }).click();
+      await expect(
+        page.getByTestId("coordinator-goals-pane").filter({ visible: true }),
+      ).toBeVisible();
+      await page.reload();
+      await expect(
+        page.getByTestId("coordinator-goals-pane").filter({ visible: true }),
+      ).toBeVisible({ timeout: 30000 });
+      await page.getByTestId("workspace-header-menu-trigger").filter({ visible: true }).click();
+      await page
+        .getByTestId("workspace-header-open-coordinator-board")
+        .filter({ visible: true })
+        .click();
+      await expect(board).toBeVisible();
+      await page.getByTestId("coordinator-trust-pill").filter({ visible: true }).click();
+      await page.getByTestId("coordinator-open-settings").filter({ visible: true }).click();
+      const settings = page.getByTestId("coordinator-settings-sheet").filter({ visible: true });
+      // The compact sheet portals its content outside the wrapper test ID.
+      const disable = page.getByTestId("coordinator-disable-project").filter({ visible: true });
+      await expect(disable).toBeVisible();
+      await page.screenshot({
+        path: testInfo.outputPath("coordinator-disable.png"),
+        fullPage: true,
+      });
+      await disable.click();
+      await expect(settings).toHaveCount(0);
+      await expect
+        .poll(
+          async () =>
+            (await workspace.client.getProjectCoordinator(workspace.projectId)).coordinator
+              ?.enabled,
+        )
+        .toBe(false);
+      await expect(disable).toHaveCount(0);
+      await expect(board).toHaveCount(0);
+      await expect(
+        page.getByTestId("coordinator-goals-pane").filter({ visible: true }),
+      ).toBeVisible();
+      await page.screenshot({
+        path: testInfo.outputPath("coordinator-disabled.png"),
+        fullPage: true,
+      });
+    } finally {
+      await workspace.cleanup();
+    }
+  });
+}

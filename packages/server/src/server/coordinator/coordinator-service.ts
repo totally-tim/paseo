@@ -87,6 +87,7 @@ import type { WorkspaceGitService } from "../workspace-git-service.js";
 
 import {
   ChangeRequestPoll,
+  failedCheckEventId,
   hashChangeRequestSnapshot,
   type ChangeRequestPollChange,
   type ChangeRequestPollOutcome,
@@ -2361,7 +2362,7 @@ export class CoordinatorService {
 
   /**
    * Resolves a subagent kind to the coordinator's configured launch bundle.
-   * `profiles.fallback` covers kinds the project did not configure explicitly.
+   * The explicit fallback or coordinator profile covers unconfigured kinds.
    */
   async resolveSubagentProfile(input: {
     callerAgentId: string;
@@ -2376,7 +2377,7 @@ export class CoordinatorService {
     const projectId = getCoordinatorProjectIdFromLabels(governing.node.labels);
     const state = projectId ? await this.getState(projectId) : null;
     const profiles = state?.profiles ?? {};
-    const profile = profiles[input.kind] ?? profiles["fallback"];
+    const profile = profiles[input.kind] ?? profiles["fallback"] ?? state?.profile;
     if (!profile) {
       throw new CoordinatorRequestError(
         `The coordinator has no "${input.kind}" profile configured — ` +
@@ -2393,16 +2394,14 @@ export class CoordinatorService {
    * A coordinator caller steers its own descendants at any level; at Ship and
    * above it may also act on sessions inside its project's scope — the spec's
    * "act on your sessions within policy". A delegated caller under a
-   * coordinator may act anywhere inside that coordinator's tree — its own
-   * descendants, siblings, and the coordinator it reports to — but mutating
-   * ops (`action: "mutate"`) may never target an ancestor: archiving or
-   * reconfiguring a parent would let a child sever the lineage that governs
-   * it.
+   * coordinator may exchange messages inside that tree. Only active Ship
+   * implementers may mutate their own descendants; permission authority never
+   * delegates. Ancestor mutation would sever the caller's governing lineage.
    */
   async assertAgentTargetAllowed(
     callerAgentId: string,
     targetAgentId: string,
-    options?: { action?: "steer" | "mutate" },
+    options?: { action?: "steer" | "mutate" | "permission" },
   ): Promise<void> {
     if (callerAgentId === targetAgentId) return;
     const deps = this.lineageDeps();
@@ -2417,17 +2416,27 @@ export class CoordinatorService {
     const governing = callerLineage[governingIndex];
 
     if (governingIndex !== 0) {
+      const action = options?.action ?? "steer";
       // Mutating an ancestor severs the caller's own lineage: the archive
       // cascade would detach the child and drop it outside the boundary
       // entirely. Steering upward (prompts, cancels) stays allowed — a
       // delegated agent may report to the coordinator it rolls up to.
       if (
-        options?.action === "mutate" &&
+        action === "mutate" &&
         callerLineage.slice(1).some((node) => node.agentId === targetAgentId)
       ) {
         throw new CoordinatorRequestError(
           "Delegated agents may not mutate their own ancestors — " +
             "delegation only flows downward",
+        );
+      }
+      if (action !== "steer") {
+        await this.assertDelegatedMutationAllowed(
+          callerAgentId,
+          targetAgentId,
+          governing.agentId,
+          governing.labels,
+          action,
         );
       }
       const targetLineage = await collectAgentLineage(deps, targetAgentId);
@@ -2462,10 +2471,44 @@ export class CoordinatorService {
     );
   }
 
+  private async assertDelegatedMutationAllowed(
+    callerAgentId: string,
+    targetAgentId: string,
+    governingAgentId: string,
+    governingLabels: Record<string, string>,
+    action: "mutate" | "permission",
+  ): Promise<void> {
+    if (action === "permission") {
+      throw new CoordinatorRequestError(
+        "Permission authority remains with the coordinator or user, never delegated agents",
+      );
+    }
+    const projectId = getCoordinatorProjectIdFromLabels(governingLabels);
+    const state = projectId ? await this.getState(projectId) : null;
+    const agent =
+      this.agentManager.getAgent(callerAgentId) ?? (await this.agentStorage.get(callerAgentId));
+    if (
+      !state?.enabled ||
+      state.agentId !== governingAgentId ||
+      !coordinatorTrustAtLeast(state.trustLevel, "ship") ||
+      getCoordinatorSubagentKind(agent?.labels) !== "implementer" ||
+      agent?.config?.delegateOnly
+    ) {
+      throw new CoordinatorRequestError(
+        "Only active Ship implementers may mutate their own descendants; read-only delegated agents may not mutate sessions",
+      );
+    }
+    if (!(await isAgentDescendantOf(this.lineageDeps(), callerAgentId, targetAgentId))) {
+      throw new CoordinatorRequestError(
+        "Delegated implementers may only mutate their own descendants, never siblings",
+      );
+    }
+  }
+
   private async assertGlobalTargetAllowed(
     callerAgentId: string,
     targetAgentId: string,
-    options?: { action?: "steer" | "mutate" },
+    options?: { action?: "steer" | "mutate" | "permission" },
   ): Promise<void> {
     const global = await this.global.get();
     const target =
@@ -2475,7 +2518,7 @@ export class CoordinatorService {
     if (
       global.enabled &&
       global.agentId === callerAgentId &&
-      options?.action !== "mutate" &&
+      (options?.action ?? "steer") === "steer" &&
       target &&
       getCoordinatorRole(target.labels) === COORDINATOR_PROJECT_ROLE &&
       getParentAgentIdFromLabels(target.labels) === callerAgentId &&
@@ -2771,7 +2814,12 @@ export class CoordinatorService {
       );
     const projectId = getCoordinatorProjectIdFromLabels(governing.node.labels);
     const state = projectId ? await this.getState(projectId) : null;
-    const trust = state?.trustLevel ?? coordinatorTrustLevelFromLabels(governing.node.labels);
+    if (!state?.enabled || state.agentId !== governing.node.agentId) {
+      throw new CoordinatorRequestError(
+        "The governing coordinator is disabled or no longer active; delegated agents cannot spawn",
+      );
+    }
+    const trust = state.trustLevel;
     assertSpawnTrustAndKind(trust, input);
     await this.assertSpawnWithinGuard(
       governing.node.agentId,
@@ -4066,14 +4114,11 @@ export class CoordinatorService {
             id: `pr:${entry.number}:opened`,
             trigger: "pr.opened",
           });
-        if (
-          entry.checksStatus === "failing" ||
-          entry.checksStatus === "failed" ||
-          entry.checks.some((check) => /failure|failed|error|timed_out/i.test(check.status))
-        )
+        const failureId = failedCheckEventId(entry);
+        if (failureId)
           await this.automation.emitEvent({
             ...base,
-            id: `pr:${entry.number}:ci:${entry.updatedAt}:${JSON.stringify(entry.checks)}`,
+            id: failureId,
             trigger: "pr.ci_failed",
           });
         await this.automation.emitEvent({

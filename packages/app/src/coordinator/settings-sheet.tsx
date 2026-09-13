@@ -68,10 +68,15 @@ function useSettingsSnapshot(serverId: string, projectId?: string) {
     },
     [client, projectId, serverId],
   );
-  return { snapshot, error, reload, save };
+  const disable = useCallback(async () => {
+    if (!client || !projectId) throw new Error("Project coordinator is unavailable.");
+    const result = await client.disableProjectCoordinator(projectId);
+    useCoordinatorProjectStore.getState().applyProjectResult(serverId, projectId, result);
+  }, [client, projectId, serverId]);
+  return { snapshot, error, reload, save, disable };
 }
 function OpenSettingsSheet({ serverId, projectId, onClose }: SettingsProps) {
-  const { snapshot, error, reload, save } = useSettingsSnapshot(serverId, projectId);
+  const { snapshot, error, reload, save, disable } = useSettingsSnapshot(serverId, projectId);
   return (
     <AdaptiveModalSheet
       visible
@@ -80,7 +85,13 @@ function OpenSettingsSheet({ serverId, projectId, onClose }: SettingsProps) {
       testID="coordinator-settings-sheet"
     >
       {snapshot ? (
-        <SettingsForm snapshot={snapshot} serverId={serverId} onClose={onClose} onSave={save} />
+        <SettingsForm
+          snapshot={snapshot}
+          serverId={serverId}
+          onClose={onClose}
+          onSave={save}
+          onDisable={projectId ? disable : undefined}
+        />
       ) : (
         <View style={styles.content}>
           <Text style={styles.muted}>{error ?? "Loading coordinator settings…"}</Text>
@@ -104,12 +115,29 @@ function SettingsForm({
   serverId,
   onClose,
   onSave,
+  onDisable,
 }: {
   snapshot: CoordinatorRotationSettings;
   serverId: string;
   onClose: () => void;
   onSave: (settings: CoordinatorRotationUpdate) => Promise<void>;
+  onDisable?: () => Promise<void>;
 }) {
+  const [disabling, setDisabling] = useState(false);
+  const [disableError, setDisableError] = useState<string | null>(null);
+  const disable = useCallback(async () => {
+    if (!onDisable) return;
+    setDisabling(true);
+    setDisableError(null);
+    try {
+      await onDisable();
+      onClose();
+    } catch (error) {
+      setDisableError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDisabling(false);
+    }
+  }, [onDisable, onClose]);
   const model = useSettingsForm(snapshot);
   const state = useSyncExternalStore(model.subscribe, model.getState, model.getState);
   const profiles = useProvidersSnapshot(serverId, { cwd: null });
@@ -143,6 +171,22 @@ function SettingsForm({
   const size = useIsCompactFormFactor() ? "md" : "sm";
   return (
     <View style={styles.content}>
+      {onDisable ? (
+        <Button
+          variant="destructive"
+          size="sm"
+          onPress={disable}
+          disabled={state.saving || disabling}
+          testID="coordinator-disable-project"
+        >
+          {disabling ? "Disabling…" : "Disable coordinator"}
+        </Button>
+      ) : null}
+      {disableError ? (
+        <Text style={styles.error} accessibilityRole="alert" testID="coordinator-disable-error">
+          {disableError}
+        </Text>
+      ) : null}
       <CoordinatorRoleProfileField
         label="Coordinator fallback profile"
         selection={selection}
@@ -150,7 +194,7 @@ function SettingsForm({
         providers={providers}
         isLoading={profiles.isLoading}
         isRefreshing={profiles.isRefreshing}
-        disabled={state.saving}
+        disabled={state.saving || disabling}
         serverId={serverId}
         testID="coordinator-fallback-profile"
         onSelect={model.setFallback}
@@ -161,7 +205,7 @@ function SettingsForm({
           variant="ghost"
           size="sm"
           onPress={clearFallback}
-          disabled={state.saving}
+          disabled={state.saving || disabling}
           testID="coordinator-clear-fallback"
         >
           Remove fallback
@@ -173,7 +217,7 @@ function SettingsForm({
           initialValue={state.threshold}
           onChangeText={model.setThreshold}
           keyboardType="number-pad"
-          editable={!state.saving}
+          editable={!state.saving && !disabling}
           testID="coordinator-rotation-threshold"
           accessibilityLabel="Rotation threshold percent"
         />
@@ -182,6 +226,7 @@ function SettingsForm({
       <Button
         variant="default"
         loading={state.saving}
+        disabled={disabling}
         onPress={save}
         testID="coordinator-settings-save"
       >

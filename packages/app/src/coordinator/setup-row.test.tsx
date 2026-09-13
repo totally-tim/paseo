@@ -208,6 +208,9 @@ describe("coordinator setup sheet CI note", () => {
     expect(screen.getByTestId("coordinator-setup-ci-queued")).toBeTruthy();
     expect(screen.queryByTestId("coordinator-setup-add-ci")).toBeNull();
 
+    await waitFor(() =>
+      expect(screen.getByTestId("coordinator-enable-submit").hasAttribute("disabled")).toBe(false),
+    );
     fireEvent.click(screen.getByTestId("coordinator-enable-submit"));
     await waitFor(() => expect(client.enableProjectCoordinator).toHaveBeenCalled());
 
@@ -253,6 +256,9 @@ describe("coordinator setup sheet CI note", () => {
     renderSheet();
 
     await screen.findByTestId("coordinator-setup-no-ci");
+    await waitFor(() =>
+      expect(screen.getByTestId("coordinator-enable-submit").hasAttribute("disabled")).toBe(false),
+    );
     fireEvent.click(screen.getByTestId("coordinator-enable-submit"));
     await waitFor(() => expect(hostClient.current?.enableProjectCoordinator).toHaveBeenCalled());
 
@@ -263,4 +269,29 @@ describe("coordinator setup sheet CI note", () => {
     });
     expect(useDraftStore.getState().getDraftInput(draftKey)).toBeUndefined();
   });
+});
+
+it("restores a disabled coordinator's saved provider and launch settings after the record loads", async () => {
+  const profile = {
+    provider: "codex",
+    model: "gpt-5.4",
+    modeId: "auto-review",
+    thinkingOptionId: "high",
+  };
+  const coordinator = {
+    ...coordinatorRecord(null),
+    enabled: false,
+    profile,
+  } as ProjectCoordinatorState;
+  hostClient.current = clientWith({ coordinator, ciConfigured: true });
+  renderSheet();
+  await waitFor(() =>
+    expect(screen.getByTestId("coordinator-enable-submit").hasAttribute("disabled")).toBe(false),
+  );
+  fireEvent.click(screen.getByTestId("coordinator-enable-submit"));
+  await waitFor(() =>
+    expect(hostClient.current?.enableProjectCoordinator).toHaveBeenCalledWith(
+      expect.objectContaining({ profile }),
+    ),
+  );
 });

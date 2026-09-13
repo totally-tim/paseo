@@ -191,21 +191,28 @@ function CoordinatorProviderOption({
   );
 }
 
-export function CoordinatorEnableSheet({
-  visible,
-  projectId,
-  serverId,
-  cwd,
-  onClose,
-  initialProfile,
-}: {
+interface CoordinatorEnableSheetProps {
   visible: boolean;
   projectId: string;
   serverId: string;
   cwd: string | null;
   onClose: () => void;
   initialProfile?: CoordinatorProfileSelection;
-}) {
+}
+
+export function CoordinatorEnableSheet(props: CoordinatorEnableSheetProps) {
+  if (!props.visible) return null;
+  return <OpenCoordinatorEnableSheet key={`${props.serverId}:${props.projectId}`} {...props} />;
+}
+
+function OpenCoordinatorEnableSheet({
+  visible,
+  projectId,
+  serverId,
+  cwd,
+  onClose,
+  initialProfile,
+}: CoordinatorEnableSheetProps) {
   const { t } = useTranslation();
   const client = useHostRuntimeClient(serverId);
   const snapshot = useProvidersSnapshot(serverId, { cwd });
@@ -218,16 +225,25 @@ export function CoordinatorEnableSheet({
   const [isEnabling, setIsEnabling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const record = useProjectCoordinatorRecord(serverId, projectId);
+  const [recordLoaded, setRecordLoaded] = useState(false);
+  const savedProfile = initialProfile ?? record?.coordinator?.profile;
   // The goal engine is a later milestone; until then the affordance queues a
   // composer draft for the coordinator session that enable creates.
   const [ciSeedQueued, setCiSeedQueued] = useState(false);
 
   useEffect(() => {
-    if (visible) {
-      setCiSeedQueued(false);
-      void refreshProjectCoordinator(serverId, projectId);
-    }
-  }, [visible, serverId, projectId]);
+    let disposed = false;
+    void refreshProjectCoordinator(serverId, projectId).then((loaded) => {
+      if (disposed) return undefined;
+      setRecordLoaded(loaded !== null);
+      if (!loaded)
+        setError("Couldn't load the saved coordinator profile. Close and reopen to retry.");
+      return undefined;
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [serverId, projectId]);
 
   const providerRows = useMemo<CoordinatorProviderRow[]>(
     () =>
@@ -245,11 +261,12 @@ export function CoordinatorEnableSheet({
   );
 
   const effectiveSelection = useMemo(() => {
-    if (selectedProvider && providerRows.some((row) => row.provider === selectedProvider)) {
-      return selectedProvider;
+    const preferred = selectedProvider ?? savedProfile?.provider;
+    if (preferred && providerRows.some((row) => row.provider === preferred)) {
+      return preferred;
     }
     return providerRows.find((row) => row.enabled)?.provider ?? null;
-  }, [providerRows, selectedProvider]);
+  }, [providerRows, selectedProvider, savedProfile?.provider]);
 
   // Delegates launch as ordinary sessions, so their pickers offer every
   // enabled provider, not just the coordinator-eligible ones.
@@ -259,7 +276,7 @@ export function CoordinatorEnableSheet({
   );
 
   const handleEnable = useCallback(async () => {
-    if (!client || !effectiveSelection) {
+    if (!client || !effectiveSelection || !recordLoaded) {
       return;
     }
     const profiles: CoordinatorProfiles = {};
@@ -278,7 +295,7 @@ export function CoordinatorEnableSheet({
       const result = await client.enableProjectCoordinator({
         projectId,
         profile: {
-          ...(initialProfile?.provider === effectiveSelection ? initialProfile : {}),
+          ...(savedProfile?.provider === effectiveSelection ? savedProfile : {}),
           provider: effectiveSelection,
         },
         ...(Object.keys(profiles).length > 0 ? { profiles } : {}),
@@ -307,7 +324,8 @@ export function CoordinatorEnableSheet({
     roleSelections,
     serverId,
     t,
-    initialProfile,
+    savedProfile,
+    recordLoaded,
   ]);
 
   const selectInvestigator = useCallback((selection: CoordinatorRoleSelection) => {
@@ -412,7 +430,7 @@ export function CoordinatorEnableSheet({
         <View style={styles.sheetActions}>
           <Button
             accessibilityRole="button"
-            disabled={!effectiveSelection || !client}
+            disabled={!effectiveSelection || !client || !recordLoaded || isEnabling}
             loading={isEnabling}
             onPress={handleEnablePress}
             testID="coordinator-enable-submit"

@@ -232,6 +232,17 @@ const WorkspaceTabTargetStorageSchema = z.discriminatedUnion("kind", [
   }),
   z.strictObject({ kind: z.literal("terminal"), terminalId: z.string() }),
   z.strictObject({ kind: z.literal("browser"), browserId: z.string() }),
+  z.strictObject({ kind: z.literal("coordinator_board"), projectId: z.string() }),
+  z.strictObject({ kind: z.literal("coordinator_goals"), projectId: z.string().optional() }),
+  z.strictObject({ kind: z.literal("coordinator_policy"), projectId: z.string().optional() }),
+  z.discriminatedUnion("scope", [
+    z.strictObject({ kind: z.literal("coordinator_memory"), scope: z.literal("personal") }),
+    z.strictObject({
+      kind: z.literal("coordinator_memory"),
+      scope: z.literal("personal-project"),
+      projectId: z.string(),
+    }),
+  ]),
   z.strictObject({ kind: z.literal("changes_tree") }),
   z.strictObject({ kind: z.literal("files") }),
   z.strictObject({ kind: z.literal("pull_request") }),

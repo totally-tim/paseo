@@ -1135,6 +1135,41 @@ describe("workspace-layout-store actions", () => {
     expect(state.explorerSidebarPaneIdByWorkspace.renamed).toBe("explorer");
   });
 
+  it("preserves every workspace when coordinator tabs are persisted and reopened", async () => {
+    await AsyncStorage.removeItem("workspace-layout-state");
+    const source = createWorkspaceLayoutStore(createDeterministicWorkspaceLayoutIds());
+    await source.persist.rehydrate();
+    const targets: WorkspaceTab["target"][] = [
+      { kind: "coordinator_board", projectId: "project" },
+      { kind: "coordinator_goals" },
+      { kind: "coordinator_goals", projectId: "project" },
+      { kind: "coordinator_policy" },
+      { kind: "coordinator_policy", projectId: "project" },
+      { kind: "coordinator_memory", scope: "personal" },
+      { kind: "coordinator_memory", scope: "personal-project", projectId: "project" },
+    ];
+    const workspaceKey = createWorkspaceKey();
+    source
+      .getState()
+      .openTab({ workspaceKey: "other", target: { kind: "files" }, intent: "reveal" });
+    for (const target of targets) {
+      source.getState().openTab({ workspaceKey, target, intent: "reveal" });
+    }
+    await vi.waitFor(async () =>
+      expect(await AsyncStorage.getItem("workspace-layout-state")).not.toBeNull(),
+    );
+    const restored = createWorkspaceLayoutStore(createDeterministicWorkspaceLayoutIds());
+    await restored.persist.rehydrate();
+    expect(
+      collectAllTabs(restored.getState().layoutByWorkspace[workspaceKey].root).map(
+        (tab) => tab.target,
+      ),
+    ).toEqual(expect.arrayContaining(targets));
+    expect(
+      collectAllTabs(restored.getState().layoutByWorkspace.other.root).map((tab) => tab.target),
+    ).toContainEqual({ kind: "files" });
+  });
+
   it("persists first-class pane targets, visibility, and focus", async () => {
     await AsyncStorage.removeItem("workspace-layout-state");
     const workspaceKey = createWorkspaceKey();

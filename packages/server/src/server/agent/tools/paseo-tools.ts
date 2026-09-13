@@ -215,7 +215,7 @@ export interface PaseoToolHostDependencies {
     assertAgentTargetAllowed(
       callerAgentId: string,
       targetAgentId: string,
-      options?: { action?: "steer" | "mutate" },
+      options?: { action?: "steer" | "mutate" | "permission" },
     ): Promise<void>;
     /**
      * Fails when a governed caller would escalate itself — rewriting its own
@@ -851,7 +851,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
    */
   const assertAgentTargetAllowed = async (
     targetAgentId: string,
-    targetOptions?: { action?: "steer" | "mutate" },
+    targetOptions?: { action?: "steer" | "mutate" | "permission" },
   ): Promise<void> => {
     if (!callerAgentId || !options.coordinator) return;
     await options.coordinator.assertAgentTargetAllowed(callerAgentId, targetAgentId, targetOptions);
@@ -2585,7 +2585,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async ({ agentId }) => {
-      await assertAgentTargetAllowed(agentId);
+      await assertAgentTargetAllowed(agentId, { action: "mutate" });
       const { cancelled } = await cancelAgentRunCommand(
         { agentManager, logger: childLogger },
         agentId,
@@ -2805,6 +2805,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       if (!workspaceScripts) {
         throw new Error("Workspace script management is not configured");
       }
+      await assertTerminalAccessAllowed();
       await assertWorkspaceTargetAllowed(workspaceId);
       return {
         content: [],
@@ -2832,6 +2833,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       if (!workspaceScripts) {
         throw new Error("Workspace script management is not configured");
       }
+      await assertTerminalAccessAllowed();
       await assertWorkspaceTargetAllowed(workspaceId);
       return {
         content: [],
@@ -3826,14 +3828,14 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async ({ agentId, requestId, response }) => {
-      await assertAgentTargetAllowed(agentId, { action: "mutate" });
+      await assertAgentTargetAllowed(agentId, { action: "permission" });
       // Permission authority sits with the coordinator or the user — a
       // governed session may not approve its own prompts.
       await assertSelfActionAllowed(agentId, "answer permission requests");
       const responseAgentId =
         (await options.coordinator?.resolveDecisionResponseAgent?.(agentId, requestId)) ?? agentId;
       if (responseAgentId !== agentId) {
-        await assertAgentTargetAllowed(responseAgentId, { action: "mutate" });
+        await assertAgentTargetAllowed(responseAgentId, { action: "permission" });
         await assertSelfActionAllowed(responseAgentId, "answer permission requests");
       }
       await respondToAgentPermission({

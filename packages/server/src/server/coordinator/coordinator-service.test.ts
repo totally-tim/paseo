@@ -1694,7 +1694,7 @@ describe("spawn gate", () => {
 });
 
 describe("resolveSubagentProfile", () => {
-  test("kind profiles win; fallback covers the rest; missing profiles name the kind", async () => {
+  test("kind profiles win, then explicit fallback, then the coordinator profile", async () => {
     await harness.service.enableProjectCoordinator(
       enableInput({
         trustLevel: "ship",
@@ -1728,7 +1728,7 @@ describe("resolveSubagentProfile", () => {
     expect(withoutFallback?.profiles?.implementer?.provider).toBe("codex");
     await expect(
       harness.service.resolveSubagentProfile({ callerAgentId, kind: "investigator" }),
-    ).rejects.toThrow(/investigator/);
+    ).resolves.toEqual(withoutFallback?.profile);
   });
 
   test("callers outside a coordinator tree cannot resolve profiles", async () => {
@@ -1741,6 +1741,122 @@ describe("resolveSubagentProfile", () => {
       harness.service.resolveSubagentProfile({ callerAgentId: plain.id, kind: "investigator" }),
     ).rejects.toThrow(/under a coordinator/);
   });
+});
+
+describe("migration review delegation regressions", () => {
+  test.each(["investigator", "reviewer"] as const)(
+    "%s cannot start or stop workspace scripts",
+    async (kind) => {
+      const state = await harness.service.enableProjectCoordinator(
+        enableInput({ trustLevel: "ship" }),
+      );
+      const own = makeWorkspace("wks_script_delegate", PROJECT_ID, harness.projectDir);
+      harness.workspaceRegistry.add(own);
+      const child = await harness.agentManager.createAgent(
+        { provider: "codex", cwd: harness.projectDir },
+        undefined,
+        {
+          workspaceId: own.workspaceId,
+          labels: {
+            [PARENT_AGENT_ID_LABEL]: state.agentId!,
+            [COORDINATOR_SUBAGENT_KIND_LABEL]: kind,
+          },
+        },
+      );
+      let actions = 0;
+      const forbiddenScript = async () => {
+        actions++;
+        throw new Error("script action reached");
+      };
+      const catalog = createPaseoToolCatalog({
+        agentManager: harness.agentManager,
+        agentStorage: harness.agentStorage,
+        providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+        callerAgentId: child.id,
+        coordinator: harness.service,
+        logger,
+        workspaceRegistry: harness.workspaceRegistry,
+        workspaceScripts: { list: async () => [], launch: forbiddenScript, stop: forbiddenScript },
+      });
+      for (const tool of ["start_workspace_script", "stop_workspace_script"]) {
+        await expect(
+          catalog.executeTool(tool, { workspaceId: own.workspaceId, scriptName: "dev" }),
+        ).rejects.toThrow(/read-only.*terminals/i);
+      }
+      expect(actions).toBe(0);
+    },
+  );
+
+  test("disabled coordinators cannot authorize surviving children to spawn", async () => {
+    const state = await harness.service.enableProjectCoordinator(
+      enableInput({ trustLevel: "ship" }),
+    );
+    const child = await harness.agentManager.createAgent(
+      { provider: "codex", cwd: harness.projectDir },
+      undefined,
+      {
+        workspaceId: harness.workspace.workspaceId,
+        labels: {
+          [PARENT_AGENT_ID_LABEL]: state.agentId!,
+          [COORDINATOR_SUBAGENT_KIND_LABEL]: "implementer",
+        },
+      },
+    );
+    await harness.service.disableProjectCoordinator(PROJECT_ID);
+    await expect(
+      harness.service.assertSpawnAllowed({ parentAgentId: child.id, subagentKind: "investigator" }),
+    ).rejects.toThrow(/disabled|active/);
+  });
+
+  test.each(["investigator", "reviewer", "implementer"] as const)(
+    "%s cannot mutate sibling sessions or answer their permissions",
+    async (kind) => {
+      const state = await harness.service.enableProjectCoordinator(
+        enableInput({ trustLevel: "ship" }),
+      );
+      const child = await harness.agentManager.createAgent(
+        { provider: "codex", cwd: harness.projectDir },
+        undefined,
+        {
+          workspaceId: harness.workspace.workspaceId,
+          labels: {
+            [PARENT_AGENT_ID_LABEL]: state.agentId!,
+            [COORDINATOR_SUBAGENT_KIND_LABEL]: kind,
+          },
+        },
+      );
+      const sibling = await harness.agentManager.createAgent(
+        { provider: "codex", cwd: harness.projectDir },
+        undefined,
+        {
+          workspaceId: harness.workspace.workspaceId,
+          labels: { [PARENT_AGENT_ID_LABEL]: state.agentId! },
+        },
+      );
+      const catalog = createPaseoToolCatalog({
+        agentManager: harness.agentManager,
+        agentStorage: harness.agentStorage,
+        providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+        callerAgentId: child.id,
+        coordinator: harness.service,
+        logger,
+      });
+      await expect(
+        catalog.executeTool("update_agent", { agentId: sibling.id, name: "hostile" }),
+      ).rejects.toThrow(/descendants|read-only|delegated/i);
+      await expect(catalog.executeTool("cancel_agent", { agentId: sibling.id })).rejects.toThrow(
+        /descendants|read-only|delegated/i,
+      );
+      await expect(
+        catalog.executeTool("respond_to_permission", {
+          agentId: sibling.id,
+          requestId: "request",
+          response: { behavior: "allow" },
+        }),
+      ).rejects.toThrow(/permission authority|delegated/i);
+      expect(harness.agentManager.getAgent(sibling.id)?.title).not.toBe("hostile");
+    },
+  );
 });
 
 describe("assertAgentTargetAllowed", () => {
@@ -1873,11 +1989,11 @@ describe("assertAgentTargetAllowed", () => {
     await expect(
       harness.service.assertAgentTargetAllowed(grandchild.id, state.agentId!),
     ).resolves.toBeUndefined();
-    // Mutating a sibling inside the tree is still fine.
+    // Delegation does not grant mutation authority over siblings.
     const sibling = await spawnChild(state.agentId!);
     await expect(
       harness.service.assertAgentTargetAllowed(grandchild.id, sibling.id, { action: "mutate" }),
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow(/read-only|descendants/);
   });
 });
 

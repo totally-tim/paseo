@@ -21,6 +21,9 @@ const POLL_READ_REASON = "coordinator-change-request-poll";
 const ChangeRequestCheckSchema = z.object({
   name: z.string(),
   status: z.string(),
+  checkRunId: z.number().optional(),
+  workflowRunId: z.number().optional(),
+  url: z.string().nullable().optional(),
 });
 
 const ChangeRequestEntrySchema = z.object({
@@ -104,7 +107,13 @@ interface TrackedProject {
 
 function sortedCheckList(checks: PullRequestCheck[]): ChangeRequestCheck[] {
   return checks
-    .map((check) => ({ name: check.name, status: check.status }))
+    .map((check) => ({
+      name: check.name,
+      status: check.status,
+      ...(check.checkRunId !== undefined ? { checkRunId: check.checkRunId } : {}),
+      ...(check.workflowRunId !== undefined ? { workflowRunId: check.workflowRunId } : {}),
+      ...(check.url ? { url: check.url } : {}),
+    }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -155,6 +164,25 @@ function normalizedEntries(snapshot: ChangeRequestSnapshot): ChangeRequestEntry[
       }),
     )
     .sort((a, b) => a.number - b.number);
+}
+
+/** PR comments and titles do not identify a new CI run. */
+export function failedCheckEventId(entry: ChangeRequestEntry): string | null {
+  const failed = entry.checks.filter((check) =>
+    /failure|failed|error|timed_out/i.test(check.status),
+  );
+  if (!failed.length && !/^(failure|failing|failed)$/.test(entry.checksStatus ?? "")) return null;
+  const checks = failed
+    .map((check) => [
+      check.name,
+      check.status,
+      check.checkRunId ?? null,
+      check.workflowRunId ?? null,
+      check.url ?? null,
+    ])
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const digest = createHash("sha256").update(JSON.stringify(checks)).digest("hex");
+  return `pr:${entry.number}:ci:${digest}`;
 }
 
 /** Everything the hash covers, in a fixed shape and order. */

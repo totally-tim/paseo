@@ -12,6 +12,7 @@ import type { ForgeResolution } from "../../services/forge-resolver.js";
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import {
   ChangeRequestPoll,
+  failedCheckEventId,
   diffChangeRequestSnapshots,
   hashChangeRequestSnapshot,
   type ChangeRequestPollChange,
@@ -478,4 +479,38 @@ test("failed goal observation preserves PR wakes and retries from its own checkp
   } finally {
     rmSync(harness.root, { recursive: true, force: true });
   }
+});
+
+test("CI failure receipts survive PR chatter but distinguish failed runs", () => {
+  const entry: ChangeRequestSnapshot["entries"][number] = {
+    number: 41,
+    title: "Fix",
+    url: "https://example.com/pr/41",
+    state: "open",
+    headRef: "fix",
+    updatedAt: "2026-09-13T00:00:00Z",
+    isDraft: false,
+    mergeable: null,
+    reviewDecision: null,
+    checksStatus: "failure",
+    checks: [{ name: "tests", status: "failure", checkRunId: 10 }],
+  };
+  const id = failedCheckEventId(entry);
+  expect(id).not.toBeNull();
+  expect(
+    failedCheckEventId({ ...entry, title: "Retitled", updatedAt: "2026-09-13T01:00:00Z" }),
+  ).toBe(id);
+  expect(
+    failedCheckEventId({
+      ...entry,
+      checks: [{ name: "tests", status: "failure", checkRunId: 11 }],
+    }),
+  ).not.toBe(id);
+  expect(
+    failedCheckEventId({
+      ...entry,
+      checksStatus: "success",
+      checks: [{ name: "tests", status: "success", checkRunId: 11 }],
+    }),
+  ).toBeNull();
 });

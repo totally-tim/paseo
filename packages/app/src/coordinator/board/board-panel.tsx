@@ -1,3 +1,4 @@
+import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { openWorkspaceTargetAtLocation } from "@/workspace-tabs/open-beside";
 import { useCallback, useMemo, useState } from "react";
 import { Text, View } from "react-native";
@@ -130,15 +131,15 @@ function CoordinatorBoardPanel() {
 
   const openChat = useCallback(() => {
     if (coordinatorAgentId) {
-      openTab({ kind: "agent", agentId: coordinatorAgentId });
+      navigateToAgent({ serverId, agentId: coordinatorAgentId });
     }
-  }, [coordinatorAgentId, openTab]);
+  }, [coordinatorAgentId, serverId]);
 
   const openAgent = useCallback(
     (agentId: string) => {
-      openTab({ kind: "agent", agentId });
+      navigateToAgent({ serverId, agentId });
     },
-    [openTab],
+    [serverId],
   );
 
   const quoteQuestionInComposer = useCallback(
