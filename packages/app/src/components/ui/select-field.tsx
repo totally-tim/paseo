@@ -9,7 +9,12 @@ import {
 } from "react-native";
 import { ChevronDown } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
-import { Combobox, ComboboxItem, type ComboboxOption } from "@/components/ui/combobox";
+import {
+  Combobox,
+  ComboboxItem,
+  type ComboboxDesktopPlacement,
+  type ComboboxOption,
+} from "@/components/ui/combobox";
 import {
   createControlGeometry,
   resolveControlInteractionStyles,
@@ -59,6 +64,8 @@ export interface SelectFieldProps<TValue> {
   size?: FieldControlSize;
   /** Minimum width for the desktop popover, when the trigger is narrower than the rows need. */
   desktopMinWidth?: number;
+  /** Which way the desktop popover opens; a trigger at the bottom of the viewport needs "top-start". */
+  desktopPlacement?: ComboboxDesktopPlacement;
   getValueKey?: (value: TValue) => string;
   renderOption?: (input: SelectFieldRenderOptionInput<TValue>) => ReactElement;
   triggerLeading?: ReactNode;
@@ -190,6 +197,7 @@ export function SelectField<TValue>({
   title,
   size = "md",
   desktopMinWidth,
+  desktopPlacement,
   getValueKey,
   renderOption,
   triggerLeading,
@@ -331,6 +339,7 @@ export function SelectField<TValue>({
         onOpenChange={setOpen}
         anchorRef={anchorRef}
         desktopMinWidth={desktopMinWidth}
+        desktopPlacement={desktopPlacement}
         renderOption={renderComboboxOption}
       />
     </>
