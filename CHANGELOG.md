@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.4.0 - 2026-09-14
+
+Forkeo 1.4 adds persistent coordinators, Autopilot workflows, shared configuration for managed accounts, and pooled quota controls, together with the latest upstream 0.8 fixes.
+
+**Before upgrading:** the desktop app requires macOS 13 or newer and is now named Forkeo; existing data and connection identities are retained. Plugins must support the [0.8 plugin API](https://github.com/totally-tim/paseo/blob/v1.4.0/public-docs/plugins/v0.8/migration.md). Upgrading the desktop app does not upgrade a separately managed daemon; update that service explicitly using the matching fork build.
+
+### Added
+
+- Added persistent global and project coordinators with goals, delegated agents, review policies, memory, and configurable Observe-to-Autopilot authority ([#29](https://github.com/totally-tim/paseo/pull/29) by [@totally-tim](https://github.com/totally-tim))
+- Added shared host instructions, skills, settings, and Claude MCP registrations to managed Claude and Codex accounts while keeping credentials and histories separate ([#36](https://github.com/totally-tim/paseo/pull/36) by [@totally-tim](https://github.com/totally-tim))
+- Added pooled account quota views, live usage updates, manual reset-credit controls, and continuation recovery when capacity resets ([#42](https://github.com/totally-tim/paseo/pull/42) by [@totally-tim](https://github.com/totally-tim))
+- Added inbox-plugin triage with attention reasons, snoozing, project grouping, keyboard navigation, and file previews ([#26](https://github.com/totally-tim/paseo/pull/26) by [@totally-tim](https://github.com/totally-tim))
+- Added ACP context-window and cost reporting to the usage display ([#24](https://github.com/totally-tim/paseo/pull/24) by [@totally-tim](https://github.com/totally-tim))
+- Added Find in web and desktop file panes, with Replace in editable files ([#4586](https://github.com/getpaseo/paseo/pull/4586))
+- Added answer forms for Codex questions asked while work continues, plus an explicit Fast option on supported Codex models ([#4587](https://github.com/getpaseo/paseo/pull/4587), [#4640](https://github.com/getpaseo/paseo/pull/4640))
+- Added Mark as unread for finished workspaces ([#3603](https://github.com/getpaseo/paseo/pull/3603) by [@edihasaj](https://github.com/edihasaj))
+- Added an in-app What's new sheet displaying the fork's changelog ([#4576](https://github.com/getpaseo/paseo/pull/4576), [#25](https://github.com/totally-tim/paseo/pull/25) by [@totally-tim](https://github.com/totally-tim))
+
+### Changed
+
+- Renamed the app and downloads to Forkeo and introduced its new icon while preserving the existing application identifiers and fork update feed ([#39](https://github.com/totally-tim/paseo/pull/39) by [@totally-tim](https://github.com/totally-tim))
+- Enabled Forkeo MCP injection by default while honoring explicit opt-outs ([#44](https://github.com/totally-tim/paseo/pull/44) by [@totally-tim](https://github.com/totally-tim))
+- Changed the handoff skill to create a fresh agent and leave the original session available ([#45](https://github.com/totally-tim/paseo/pull/45) by [@totally-tim](https://github.com/totally-tim))
+- Applied configured worktree defaults to agents created through both the CLI and MCP, preserving the parent's committed branch and original project ([#27](https://github.com/totally-tim/paseo/pull/27) by [@SevFle](https://github.com/SevFle), [#30](https://github.com/totally-tim/paseo/pull/30), [#40](https://github.com/totally-tim/paseo/pull/40) by [@totally-tim](https://github.com/totally-tim))
+- Made daemon startup use saved configuration and kept foreground service execution under `daemon run`, with desktop shutdown restricted to the daemon it owns ([#4575](https://github.com/getpaseo/paseo/pull/4575))
+- Added plugin header buttons and revised composer registrations to support live updates and removal ([#4577](https://github.com/getpaseo/paseo/pull/4577))
+
+### Improved
+
+- Reduced stalls when opening large and wrapped diffs and reused cached file content across diff views ([#4574](https://github.com/getpaseo/paseo/pull/4574), [#4676](https://github.com/getpaseo/paseo/pull/4676))
+- Throttled hidden embedded browser tabs while temporarily refreshing their rendering for screenshots ([#4646](https://github.com/getpaseo/paseo/pull/4646))
+- Kept incomplete Markdown formatted during streaming and preserved collapsible rejected plans in conversation order ([#4742](https://github.com/getpaseo/paseo/pull/4742), [#4756](https://github.com/getpaseo/paseo/pull/4756))
+
+### Fixed
+
+- Preserved archived Codex conversations during workspace restore and serialized archive, cancellation, and resume operations ([#4736](https://github.com/getpaseo/paseo/pull/4736), [#43](https://github.com/totally-tim/paseo/pull/43) by [@totally-tim](https://github.com/totally-tim))
+- Restored connections to older daemons and preserved live subscriptions through reconnect without forcing automatic history reads ([#4737](https://github.com/getpaseo/paseo/pull/4737))
+- Avoided phantom Claude quota blocks for absent usage buckets and refreshed capacity rejections when account identity changes ([#38](https://github.com/totally-tim/paseo/pull/38) by [@totally-tim](https://github.com/totally-tim))
+- Reopened affected provider sessions on the next prompt after a plugin reload ([#4629](https://github.com/getpaseo/paseo/pull/4629) by [@mcowger](https://github.com/mcowger))
+- Fixed Cursor per-model thinking options and duplicate Claude compaction rows ([#4180](https://github.com/getpaseo/paseo/pull/4180) by [@fidelix](https://github.com/fidelix), [#4391](https://github.com/getpaseo/paseo/pull/4391) by [@tomgrin10](https://github.com/tomgrin10))
+
 ## 0.8.0 - 2026-09-10
 
 Paseo 0.8 adds plugin header buttons, custom providers, and richer chat components, alongside fixes for desktop updates and mobile keyboards.
