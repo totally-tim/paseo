@@ -130,6 +130,8 @@ jobs:
       - name: Build desktop release
         shell: bash
         env:
+          # Metro's generated protocol validator exceeds Node's default 2 GB heap.
+          NODE_OPTIONS: "--max-old-space-size=4096"
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EP_GH_IGNORE_TIME: true
           CSC_LINK: ${{ secrets.APPLE_CERTIFICATE }}
