@@ -30,6 +30,10 @@ async function expectAccountPickerAboveComposer(page: Page, screenshotPath: stri
 
   const popover = page.getByTestId("combobox-desktop-container");
   await expect(popover).toBeVisible({ timeout: 30_000 });
+  // The combobox paints at opacity 0 until its position resolves, and Playwright's visibility
+  // checks ignore opacity, so a picker stuck at its unresolved origin would pass the geometry
+  // assertions below. Wait for the reveal first.
+  await expect(popover).toHaveCSS("opacity", "1");
   const rows = popover.locator('[data-testid^="account-option-"]');
   await expect(rows.first()).toBeVisible();
   await page.screenshot({ path: screenshotPath });
@@ -49,33 +53,36 @@ test("the account picker opens above the composer in an existing workspace and o
 }, testInfo) => {
   test.setTimeout(120_000);
   const profile = await seedAgentProfiles([CLAUDE_PROFILE]);
-  const workspace = await seedWorkspace({ repoPrefix: "account-picker-placement-" });
   try {
-    await test.step("new agent in an existing workspace", async () => {
-      await gotoWorkspace(page, workspace.workspaceId);
-      await clickNewChat(page);
-      await expectComposerVisible(page);
-      await expectAccountPickerAboveComposer(
-        page,
-        testInfo.outputPath("account-picker-existing-workspace.png"),
-      );
-    });
-
-    await test.step("new workspace screen", async () => {
-      await gotoAppShell(page);
-      await waitForSidebarHydration(page);
-      await openNewWorkspaceComposer(page, {
-        projectKey: workspace.projectKey,
-        projectDisplayName: workspace.projectDisplayName,
+    const workspace = await seedWorkspace({ repoPrefix: "account-picker-placement-" });
+    try {
+      await test.step("new agent in an existing workspace", async () => {
+        await gotoWorkspace(page, workspace.workspaceId);
+        await clickNewChat(page);
+        await expectComposerVisible(page);
+        await expectAccountPickerAboveComposer(
+          page,
+          testInfo.outputPath("account-picker-existing-workspace.png"),
+        );
       });
-      await expectComposerVisible(page);
-      await expectAccountPickerAboveComposer(
-        page,
-        testInfo.outputPath("account-picker-new-workspace.png"),
-      );
-    });
+
+      await test.step("new workspace screen", async () => {
+        await gotoAppShell(page);
+        await waitForSidebarHydration(page);
+        await openNewWorkspaceComposer(page, {
+          projectKey: workspace.projectKey,
+          projectDisplayName: workspace.projectDisplayName,
+        });
+        await expectComposerVisible(page);
+        await expectAccountPickerAboveComposer(
+          page,
+          testInfo.outputPath("account-picker-new-workspace.png"),
+        );
+      });
+    } finally {
+      await workspace.cleanup();
+    }
   } finally {
-    await workspace.cleanup();
     await profile.restore();
   }
 });
