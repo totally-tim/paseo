@@ -1910,6 +1910,7 @@ export function DraftAgentControls({
           onChange={onSelectAccount}
           disabled={disabled}
           compact
+          desktopPlacement="top-start"
         />
       ) : null}
       <ControlledAgentControls

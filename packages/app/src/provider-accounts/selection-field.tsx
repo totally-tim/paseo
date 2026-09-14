@@ -3,6 +3,7 @@ import { Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { StyleSheet } from "react-native-unistyles";
 import type { AccountSelection } from "@getpaseo/protocol/provider-accounts";
+import type { ComboboxDesktopPlacement } from "@/components/ui/combobox";
 import { SelectField, type SelectFieldRenderOptionInput } from "@/components/ui/select-field";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { ProviderUsageCard } from "@/provider-usage/card";
@@ -22,6 +23,7 @@ export function AccountSelectionField({
   onChange,
   disabled,
   compact = false,
+  desktopPlacement,
 }: {
   serverId: string;
   provider: string;
@@ -31,6 +33,7 @@ export function AccountSelectionField({
   onChange: (selection: AccountSelection) => void;
   disabled?: boolean;
   compact?: boolean;
+  desktopPlacement?: ComboboxDesktopPlacement;
 }) {
   const { t } = useTranslation();
   const accounts = useProviderAccounts(serverId);
@@ -87,6 +90,7 @@ export function AccountSelectionField({
         onChange={change}
         renderOption={renderOption}
         desktopMinWidth={OPTION_MIN_WIDTH}
+        desktopPlacement={desktopPlacement}
         placeholder={t("providerAccounts.account")}
         emptyText={t("common.empty.noResults")}
         disabled={disabled || !accounts.connected}
